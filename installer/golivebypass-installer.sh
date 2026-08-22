@@ -529,10 +529,20 @@ ensure_toolchain() {
         fail "Atualize o Node e rode de novo."
     fi
 
-    # Sem corepack de proposito. Ele so serviria para fixar a versao do campo packageManager,
-    # que o proprio pnpm ja respeita, e em troca traz dois modos de falha: as chaves de
-    # assinatura vencidas que vem no Node 22, e uma pergunta interativa antes de baixar que
-    # deixa o instalador parado esperando uma resposta que ninguem sabe que precisa dar.
+    # O corepack vem ligado no Node 22 e cria um atalho do pnpm que quebra na primeira
+    # execucao: as chaves de assinatura embutidas estao velhas e o atalho morre com
+    # "Cannot find matching keyid", ou fica esperando resposta no stdin. O </dev/null do
+    # have_pnpm corta essa espera, mas o atalho continua no PATH atrapalhando a instalacao
+    # e o uso do pnpm de verdade. Desligar tira esse atalho do caminho.
+    #
+    # So mexemos nisso quando o pnpm nao esta funcionando: se o corepack ja entrega um pnpm
+    # que roda, desligar seria estragar a maquina de quem estava bem. E "disable pnpm", nao
+    # "disable" seco, que tambem levaria o atalho do yarn junto -- nao e nosso para desligar.
+    if ! have_pnpm && have corepack; then
+        step "Desligando o atalho quebrado do pnpm no corepack"
+        corepack disable pnpm >/dev/null 2>&1 || true
+        hash -r 2>/dev/null || true
+    fi
 
     # No Arch o pnpm e um pacote como qualquer outro, e sai mais limpo que um -g do npm em
     # /usr/lib, que fica fora do controle do pacman.
@@ -545,6 +555,23 @@ ensure_toolchain() {
     if ! have_pnpm; then
         step "Instalando o pnpm pelo npm"
         npm install -g pnpm >/dev/null 2>&1 || sudo npm install -g pnpm >/dev/null 2>&1 || true
+        hash -r 2>/dev/null || true
+    fi
+
+    # Fallback mais robusto: o instalador oficial baixa o binario standalone do pnpm
+    # (que nem precisa do Node instalado) para a pasta do usuario, sem sudo e sem tocar
+    # no npm. O default do instalador e ~/.pnpm no HOME; fixamos o PNPM_HOME para nao
+    # depender do default de versao nenhuma, e o binario cai em $PNPM_HOME/bin.
+    if ! have_pnpm && { have curl || have wget; }; then
+        step "Baixando o pnpm do site oficial (pasta do usuario, sem sudo)"
+        PNPM_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pnpm"
+        export PNPM_HOME
+        if have curl; then
+            curl -fsSL https://get.pnpm.io/install.sh | sh - >/dev/null 2>&1 || true
+        else
+            wget -qO- https://get.pnpm.io/install.sh | sh - >/dev/null 2>&1 || true
+        fi
+        PATH="$PNPM_HOME/bin:$PATH"
         hash -r 2>/dev/null || true
     fi
 

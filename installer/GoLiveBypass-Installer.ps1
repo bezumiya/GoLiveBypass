@@ -305,6 +305,73 @@ function Show-ModChoice {
     }
 }
 
+function Install-Pnpm {
+    # O corepack vem ligado no Node 22 e cria um atalho do pnpm que quebra na primeira
+    # execucao: as chaves de assinatura embutidas estao velhas ("Cannot find matching
+    # keyid") ou ele pergunta "Corepack is about to download..." e, sem quem responder,
+    # derruba o instalador. Desligar o corepack tira esse atalho do caminho; quem ja tiver
+    # o pnpm de verdade instalado passa a ser encontrado de novo.
+    # "disable pnpm", e nao "disable" seco: o segundo leva o atalho do yarn junto, e o yarn
+    # nao e nosso para desligar. Esta funcao so roda com o pnpm ja reprovado no Test-Pnpm,
+    # entao quem tem um corepack que funciona nunca passa por aqui.
+    if (Test-Tool 'corepack') {
+        Write-Step 'Desligando o atalho quebrado do pnpm no corepack'
+        & corepack disable pnpm 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { Update-PathFromEnvironment }
+    }
+
+    if (Test-Pnpm) { return }
+
+    Write-Step 'Instalando o pnpm pelo npm'
+    & npm install -g pnpm | Out-Host
+
+    if ($LASTEXITCODE -eq 0) {
+        Update-PathFromEnvironment
+        if (Test-Pnpm) { return }
+    }
+
+    # O npm global mora na pasta do Node; com o Node instalado em "Arquivos de Programas"
+    # (o instalador padrao do site), escrever ali exige admin e o npm falha com EPERM.
+    # Num prefixo dentro do perfil o npm escreve sem admin, e o pnpm entra no PATH desta
+    # sessao e fica registrado no PATH do usuario para as proximas.
+    Write-Step 'O npm nao conseguiu escrever na pasta global; instalando num prefixo do seu perfil'
+    $pnpmHome = Join-Path $env:LOCALAPPDATA 'pnpm-global'
+    & npm install -g --prefix $pnpmHome pnpm | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw 'O npm nao conseguiu instalar o pnpm. Rode "npm install -g pnpm" num terminal como administrador e tente de novo.'
+    }
+
+    $env:Path = "$pnpmHome;$env:Path"
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath -notlike "*$pnpmHome*") {
+        [Environment]::SetEnvironmentVariable('Path', "$pnpmHome;$userPath", 'User')
+    }
+
+    if (-not (Test-Pnpm)) {
+        # Ultimo recurso, e o mais robusto: o instalador oficial baixa o binario standalone
+        # do pnpm (que nem precisa do Node instalado) para %LOCALAPPDATA%\pnpm, sem admin
+        # e sem depender do npm. O instalador pode ser 5.1 (sem verificacao de assinatura)
+        # e ainda assim valida o checksum por baixo.
+        Write-Step 'Baixando o pnpm do site oficial (pasta do usuario, sem admin)'
+        $installer = Join-Path $env:TEMP 'install-pnpm.ps1'
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://get.pnpm.io/install.ps1' -OutFile $installer
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $installer 2>&1 | Out-Host
+        } catch {
+            Write-Step 'O download do site oficial falhou; seguindo para a checagem final.'
+        }
+        Update-PathFromEnvironment
+        # O setup do pnpm grava o PATH do usuario; no caso de nao ter gravado, os dois
+        # caminhos possiveis (com e sem \bin) entram aqui na sessao.
+        $pnpmHome = Join-Path $env:LOCALAPPDATA 'pnpm'
+        $env:Path = "$pnpmHome\bin;$pnpmHome;$env:Path"
+    }
+
+    if (-not (Test-Pnpm)) {
+        throw 'Nao consegui deixar o pnpm funcionando. Abra um terminal e rode: npm install -g pnpm'
+    }
+}
+
 function Install-Toolchain($needGit) {
     $missing = @()
     if ($needGit -and -not (Test-Tool 'git')) { $missing += 'git' }
@@ -332,23 +399,7 @@ function Install-Toolchain($needGit) {
         exit 0
     }
 
-    if (-not (Test-Pnpm)) {
-        # Sem corepack de proposito. Ele so serviria para fixar a versao do campo packageManager,
-        # que o proprio pnpm ja respeita, e em troca traz dois modos de falha: as chaves de
-        # assinatura vencidas que vem no Node 22, e uma pergunta interativa antes de baixar que
-        # deixa o instalador parado esperando uma resposta que ninguem sabe que precisa dar.
-        Write-Step 'Instalando o pnpm pelo npm'
-        # Out-Host, e nao a saida solta: um comando nativo escreve na saida da funcao, e esta
-        # funcao roda dentro de outra cujo retorno vira o caminho do checkout. Sem isto, as
-        # linhas de aviso do npm entram no valor de retorno e o caminho vira um array.
-        & npm install -g pnpm | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw 'O npm nao conseguiu instalar o pnpm. Rode "npm install -g pnpm" na mao e tente de novo.' }
-        Update-PathFromEnvironment
-    }
-
-    if (-not (Test-Pnpm)) {
-        throw 'Nao consegui deixar o pnpm funcionando. Abra um terminal e rode: npm install -g pnpm'
-    }
+    if (-not (Test-Pnpm)) { Install-Pnpm }
 
     Write-Ok "pnpm $script:PnpmVersion"
 }
