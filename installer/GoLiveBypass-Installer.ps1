@@ -835,24 +835,17 @@ Log notice stdout
 "@
     Save-Text $torrc $torrcText
 
-    # Tenta registrar como servico do Windows. Precisa de admin; sem admin, cai para a Run key
-    # do usuario (sobe no logon). Nesse caso o servico nao e "de verdade", mas atende.
-    $admin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if ($admin) {
-        Write-Step 'Registrando o Tor como servico do Windows'
-        $svcResult = & $exe --service install --service start 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Nao consegui registrar o servico: $svcResult"
-            Write-Step 'Tentando via chave de inicializacao do usuario (Run key)'
-            Set-RunKey $exe $torrc
-        } else {
-            Write-Ok 'Servico do Tor registrado e iniciado.'
-            return $true
-        }
-    } else {
-        Write-Step 'Sem permissao de admin; registrando na inicializacao do usuario (Run key)'
-        Set-RunKey $exe $torrc
-    }
+    # O caminho do Windows: o servico (tor.exe --service install) roda como LocalService e
+    # nao tem acesso a %LOCALAPPDATA% do usuario, entao o Tor nao consegue escrever no
+    # DataDirectory e o servico fica parado. A Run key sobe o Tor no logon do USUARIO — mesmo
+    # contexto da GUI — e e o caminho que funciona aqui, com ou sem admin. So vale a pena o
+    # servico se o DataDirectory morar em ProgramData (caso da GUI), nao dos instaladores.
+    Write-Step 'Registrando o Tor na inicializacao do usuario (sobe no logon)'
+    Set-RunKey $exe $torrc
+
+    # A Run key so vale no proximo logon; para a sessao atual, sobe o daemon agora.
+    Write-Step 'Iniciando o Tor'
+    Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
 
     # Espera subir e valida com um tunel SOCKS de verdade.
     Write-Step 'Esperando o Tor subir'
@@ -883,24 +876,24 @@ function Set-RunKey($exe, $torrc) {
 }
 
 function Remove-Tor {
-    # Desinstala o que este instalador criou: servico (se admin) e/ou Run key. Nao apaga o
-    # binario nem o Tor de outra pessoa no sistema — so o nosso.
+    # Desinstala o que este instalador criou: a Run key. Se existir um servico "tor" apontando
+    # para a nossa pasta (instalacao anterior), remove tambem; se for de outra pessoa, nao mexe.
     $exe = Get-TorExe
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
+    } catch { }
+
     if (Test-Path -LiteralPath $exe) {
         try {
-            $service = Get-CimInstance Win32_Service -Filter "Name='tor'" -ErrorAction SilentlyContinue
+            $service = Get-CimInstance Win32_Service -Filter "Name='tor' AND PathName LIKE '%GoLiveBypass%'" -ErrorAction SilentlyContinue
             if ($service) {
-                Write-Step 'Parando e removendo o servico do Tor'
+                Write-Step 'Removendo o servico do Tor'
                 & $exe --service stop 2>&1 | Out-Null
                 & $exe --service remove 2>&1 | Out-Null
             }
         } catch { }
     }
-
-    try {
-        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
-    } catch { }
 
     # O binario fica: a GUI usa o mesmo e sem ela nao faz mal.
     if (Test-Path -LiteralPath $exe) {

@@ -249,20 +249,18 @@ function Install-Tor {
     }
     [IO.File]::WriteAllText($TorTorrc, "SocksPort $TorPort`nDataDirectory $dataDir`n$geoipLines`Log notice stdout`n", (New-Object Text.UTF8Encoding $false))
 
-    # Servico do Windows precisa de admin; sem admin, Run key (sobe no logon).
-    $isAdmin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if ($isAdmin) {
-        Write-Step 'Registrando o Tor como servico do Windows'
-        $result = & $TorExe --service install --service start 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Nao consegui registrar o servico: $result"
-            Write-Step 'Tentando via chave de inicializacao do usuario (Run key)'
-            Set-RunKey
-        }
-    } else {
-        Write-Step 'Sem permissao de admin; registrando na inicializacao do usuario (Run key)'
-        Set-RunKey
-    }
+    # O caminho do Windows: o servico (tor.exe --service install) roda como LocalService e
+    # nao tem acesso a %LOCALAPPDATA% do usuario, entao o Tor nao consegue escrever no
+    # DataDirectory e o servico fica parado. A Run key sobe o Tor no logon do USUARIO — mesmo
+    # contexto da GUI — e e o caminho que funciona para o standalone/plugin, com ou sem admin.
+    # So vale a pena o servico se o DataDirectory morar em ProgramData (acessivel por
+    # LocalService); isso e o caso da GUI, nao dos instaladores.
+    Write-Step 'Registrando o Tor na inicializacao do usuario (sobe no logon)'
+    Set-RunKey
+
+    # A Run key so vale no proximo logon; para a sessao atual, sobe o daemon agora.
+    Write-Step 'Iniciando o Tor'
+    Start-Process -FilePath $TorExe -ArgumentList '-f', $TorTorrc -WindowStyle Hidden
 
     Write-Step 'Esperando o Tor subir'
     for ($i = 0; $i -lt 30; $i++) {
@@ -271,7 +269,7 @@ function Install-Tor {
     }
 
     if (-not (Test-TorReady)) {
-        Write-Warn 'Tor nao subiu em 30s. Veja o log em $TorDir\tor\data-state.'
+        Write-Warn "Tor nao subiu em 30s. Veja o log em $TorDir\tor\data-state."
         return $false
     }
     Write-Ok "Tor atendendo em 127.0.0.1:$TorPort"
@@ -290,20 +288,29 @@ function Set-RunKey {
 }
 
 function Remove-Tor {
-    # Para e desinstala o servico (se admin) e remove a Run key. O binario fica: a GUI usa o
-    # mesmo, e sem a GUI ele nao faz mal.
+    # Remove a Run key (o que este script cria). Se um servico "tor" existir de uma instalacao
+    # anterior (ex.: GUI), o deixamos em paz? Nao — se o binario e nosso (pasta GoLiveBypass),
+    # o servico aponta para ele e deve sair; senao e de outra pessoa.
     try {
-        $service = Get-CimInstance Win32_Service -Filter "Name='tor'" -ErrorAction SilentlyContinue
-        if ($service) {
-            Write-Step 'Parando e removendo o servico do Tor'
-            & $TorExe --service stop 2>&1 | Out-Null
-            & $TorExe --service remove 2>&1 | Out-Null
-        }
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
     } catch { }
 
-    try {
-        Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
-    } catch { }
+    if (Test-Path -LiteralPath $TorExe) {
+        try {
+            $service = Get-CimInstance Win32_Service -Filter "Name='tor' AND PathName LIKE '%GoLiveBypass%'" -ErrorAction SilentlyContinue
+            if ($service) {
+                Write-Step 'Removendo o servico do Tor'
+                & $TorExe --service stop 2>&1 | Out-Null
+                & $TorExe --service remove 2>&1 | Out-Null
+            }
+        } catch { }
+    }
+
+    # O binario fica: a GUI usa o mesmo e sem ele nao faz mal.
+    if (Test-Path -LiteralPath $TorExe) {
+        Write-Host '  [*] O binario do Tor em %LOCALAPPDATA%\GoLiveBypass\Tor permanece (usado tambem pela GUI).' -ForegroundColor DarkGray
+    }
 }
 
 function Install-Injection($resources) {
