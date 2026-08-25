@@ -163,6 +163,181 @@ hide_proxy_secret() {
     return 0
 }
 
+# ----------------------------------------------------------------------------- Tor embutido
+# Mesmo bundle 13.5 e mesmos hashes da GUI (golive-gui/electron/main.ts), na porta dedicada
+# 9060. A rotina e idempotente: se um Tor ja atende (nosso, da GUI, do sistema), reusa.
+
+TOR_BUNDLE_VERSION="13.5"
+TOR_PORT="9060"
+TOR_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/Tor"
+TOR_EXE="$TOR_BASE/tor/tor"
+TOR_TORRC="$TOR_BASE/torrc"
+TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
+TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
+TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
+TOR_SERVICE="golivebypass-tor.service"
+
+tor_base() { printf '%s\n' "$TOR_BASE"; }
+
+tor_ready() {
+    # Probe barato: quem aceita TCP na 9060 e um SOCKS de Tor (nosso, da GUI ou do sistema).
+    if have bash && bash -c "exec 3<>/dev/tcp/127.0.0.1/$TOR_PORT" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+tor_daemon_running() {
+    tor_ready && return 0
+    [ -x "$TOR_EXE" ] || return 1
+    return 1
+}
+
+# Baixa o bundle e deixa o binario pronto, se ainda nao existir. Nao sobe nada.
+ensure_tor_bundle() {
+    [ -x "$TOR_EXE" ] && return 0
+
+    step "Baixando o Tor (tor-expert-bundle $TOR_BUNDLE_VERSION, ~30 MB)"
+    tmp="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/glb-tor.$$")"
+    trap 'rm -rf "$tmp"' EXIT
+
+    if have curl; then
+        curl -fsSL "$TOR_URL" -o "$tmp/$TOR_TARBALL" || {
+            warn "Falha ao baixar o Tor. Verifique sua conexao."
+            return 1
+        }
+    elif have wget; then
+        wget -qO- "$TOR_URL" >"$tmp/$TOR_TARBALL" || {
+            warn "Falha ao baixar o Tor. Verifique sua conexao."
+            return 1
+        }
+    else
+        warn "Preciso de curl ou wget para baixar o Tor."
+        return 1
+    fi
+
+    step "Conferindo SHA-256"
+    local obtido
+    obtido="$(sha256sum "$tmp/$TOR_TARBALL" 2>/dev/null | cut -d' ' -f1)"
+    if [ "$obtido" != "$TOR_SHA256" ]; then
+        warn "O download do Tor veio corrompido (SHA-256 $obtido). Abortando."
+        return 1
+    fi
+
+    step "Extraindo o Tor"
+    mkdir -p "$TOR_BASE"
+    tar -xzf "$tmp/$TOR_TARBALL" -C "$TOR_BASE" --exclude 'tor/pluggable_transports/*' --exclude 'debug/*' || {
+        warn "Falha ao extrair o bundle do Tor."
+        return 1
+    }
+    chmod +x "$TOR_EXE" 2>/dev/null || true
+    return 0
+}
+
+# Garante o Tor de pe na 9060. Devolve 0 se estiver pronto (ja rodando ou acabou de subir).
+ensure_tor() {
+    tor_ready && { step "Tor ja atendendo em 127.0.0.1:$TOR_PORT"; return 0; }
+
+    # Tor do sistema ja rodando na porta dele? Reusar evita baixar 30 MB.
+    if have tor && tor_ready; then
+        step "Tor do sistema em uso"
+        return 0
+    fi
+
+    have tor && step "Tor do sistema encontrado; verifica se o daemon esta de pe (porta $TOR_PORT)"
+
+    ensure_tor_bundle || return 1
+
+    mkdir -p "$TOR_BASE/data-state"
+    cat >"$TOR_TORRC" <<EOF
+SocksPort $TOR_PORT
+DataDirectory $TOR_BASE/data-state
+$( [ -f "$TOR_BASE/tor/data/geoip" ] && printf 'GeoIPFile %s\n' "$TOR_BASE/tor/data/geoip" )
+$( [ -f "$TOR_BASE/tor/data/geoip6" ] && printf 'GeoIPv6File %s\n' "$TOR_BASE/tor/data/geoip6" )
+Log notice stdout
+EOF
+
+    # systemd user (padrao); com sudo sem systemd user, unit system com User=<SUDO_USER>;
+    # ultimo recurso (sem systemd): nohup com aviso de que nao sobrevive ao boot.
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        step "Registrando o Tor como servico do usuario (systemd user)"
+        mkdir -p "$HOME/.config/systemd/user"
+        cat >"$HOME/.config/systemd/user/$TOR_SERVICE" <<EOF
+[Unit]
+Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
+After=network.target
+
+[Service]
+ExecStart=$TOR_EXE -f $TOR_TORRC
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+        systemctl --user daemon-reload
+        systemctl --user enable --now "$TOR_SERVICE" 2>/dev/null || {
+            warn "Nao consegui ativar o servico do usuario. Tentando nohup."
+            nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
+        }
+    elif command -v systemctl >/dev/null 2>&1; then
+        # Estamos com sudo (a injecao do plugin pode pedir) e nao ha systemd user. A unit
+        # system sobe com o User do dono real, senao o Tor guardaria o estado em /root.
+        local real_user="${SUDO_USER:-$USER}"
+        step "Registrando o Tor como servico do sistema (via sudo)"
+        sudo tee "/etc/systemd/system/$TOR_SERVICE" >/dev/null <<EOF
+[Unit]
+Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
+After=network.target
+
+[Service]
+User=$real_user
+ExecStart=$TOR_EXE -f $TOR_TORRC
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now "$TOR_SERVICE" 2>/dev/null || {
+            warn "Nao consegui ativar o servico do sistema. Tentando nohup."
+            nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
+        }
+    else
+        step "systemd nao encontrado; rodando o Tor em background (nao sobrevive ao boot)"
+        nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
+    fi
+
+    step "Esperando o Tor subir"
+    local i
+    for i in $(seq 1 30); do
+        tor_ready && break
+        sleep 1
+    done
+
+    if tor_ready; then
+        step "Tor atendendo em 127.0.0.1:$TOR_PORT"
+        return 0
+    fi
+
+    warn "O Tor nao subiu em 30s. Veja o log em $TOR_BASE/tor.log"
+    return 1
+}
+
+remove_tor() {
+    # Desinstala o que este instalador criou. Nao apaga o binario (a GUI usa o mesmo).
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user disable --now "$TOR_SERVICE" 2>/dev/null
+        rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
+        systemctl --user daemon-reload 2>/dev/null
+        if [ -f "/etc/systemd/system/$TOR_SERVICE" ]; then
+            sudo systemctl disable --now "$TOR_SERVICE" 2>/dev/null
+            sudo rm -f "/etc/systemd/system/$TOR_SERVICE"
+            sudo systemctl daemon-reload 2>/dev/null
+        fi
+    fi
+    rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
+}
+
 # O corepack cria o atalho do pnpm antes de saber que versao usar. Na primeira execucao ele
 # busca essa versao no registro do npm e confere a assinatura com chaves embutidas nele; as
 # chaves do corepack que vem no Node 22 estao velhas, entao o atalho existe e mesmo assim
@@ -940,8 +1115,8 @@ select_proxy() {
     printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
     printf '    %s[1] Proxy gratuita, escolhida e testada sozinha%s\n' "$C_GREEN" "$C_OFF" >&2
     printf '  %s      Nao precisa instalar nada. O plugin testa varias e usa a que passar.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[2] Tor local%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Mais confiavel e rapido, mas voce precisa ter o Tor rodando.%s\n' "$C_DIM" "$C_OFF" >&2
+    printf '    %s[2] Tor automatico%s\n' "$C_CYAN" "$C_OFF" >&2
+    printf '  %s      Baixa e instala o Tor sozinho (uma vez) e deixa ele sempre rodando.%s\n' "$C_DIM" "$C_OFF" >&2
     printf '    %s[3] Proxy minha%s\n' "$C_CYAN" "$C_OFF" >&2
     printf '  %s      Voce informa o endereco, no formato socks5://host:porta.%s\n\n' "$C_DIM" "$C_OFF" >&2
 
@@ -949,7 +1124,14 @@ select_proxy() {
     printf '%s' "  Escolha: " >&2
     read -r choice
     case "$choice" in
-        2) printf 'socks5://127.0.0.1:9050\n' ;;
+        2)
+            if ! ensure_tor; then
+                warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
+                printf '\n'
+                return 0
+            fi
+            printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
+            ;;
         3)
             printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
             printf '  %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A)%s\n' "$C_DIM" "$C_OFF" >&2
@@ -1093,6 +1275,7 @@ do_uninstall() {
 
     build_mod "$root"
     stop_discord
+    remove_tor
     start_discord "$root"
 
     printf '\n'
@@ -1112,6 +1295,7 @@ do_restore_everything() {
         warn "Nao achei o fonte do mod, entao so posso parar por aqui."
     fi
 
+    remove_tor
     printf '\n'
     ok "Tudo restaurado. Seu Discord voltou ao normal."
 }

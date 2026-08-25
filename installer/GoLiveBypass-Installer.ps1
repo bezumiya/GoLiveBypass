@@ -50,6 +50,18 @@ $Mods = @{
     Vencord  = @{ Git = 'https://github.com/Vendicated/Vencord'; Label = 'Vencord'; Note = 'o original, mais enxuto' }
 }
 
+# Tor embutido: mesma versao e mesmos hashes da GUI (golive-gui/electron/main.ts), para os
+# instaladores de linha de comando entregarem exatamente o mesmo daemon que ela usa. A porta
+# dedicada 9060 evita conflito com um Tor do sistema (9050) ou do Tor Browser (9150).
+$TorBundle = '13.5'
+$TorPort = 9060
+$TorUrls = @{
+    'tor-expert-bundle-windows-x86_64-13.5.tar.gz' = @{
+        Url = 'https://archive.torproject.org/tor-package-archive/torbrowser/13.5/tor-expert-bundle-windows-x86_64-13.5.tar.gz'
+        Sha256 = '5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb'
+    }
+}
+
 function Write-Step($text) { Write-Host "  [*] $text" -ForegroundColor DarkGray }
 function Write-Ok($text) { Write-Host "  [OK] $text" -ForegroundColor Green }
 function Write-Warn($text) { Write-Host "  [!] $text" -ForegroundColor Yellow }
@@ -588,6 +600,7 @@ function Invoke-Uninstall {
         Write-Warn 'O plugin nao estava instalado nesse checkout.'
     }
 
+    Remove-Tor
     Build-Mod $root
     Stop-Discord
     Start-Discord
@@ -713,6 +726,188 @@ function Select-Target($root) {
     }
 }
 
+# =============================================================== Tor embutido
+
+function Get-TorBaseDir {
+    return (Join-Path $env:LOCALAPPDATA 'GoLiveBypass\Tor')
+}
+
+function Get-TorExe {
+    return (Join-Path (Get-TorBaseDir) 'tor\tor.exe')
+}
+
+function Test-TorReady {
+    # O probe barato: se a porta 9060 aceita conexao, um Tor ja esta escutando. Quem instalou
+    # o Tor por aqui tem o daemon verificado na hora; se for o Tor da GUI, ele tambem serve.
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $task = $client.ConnectAsync('127.0.0.1', $TorPort)
+        if (-not $task.Wait(1500)) { $client.Close(); return $false }
+        if (-not $client.Connected) { $client.Close(); return $false }
+        $client.Close()
+        return $true
+    } catch { return $false }
+}
+
+function Get-TorServiceStatus {
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='tor'" -ErrorAction SilentlyContinue
+        if ($svc -and $svc.State -eq 'Running') { return 'running' }
+        return 'absent'
+    } catch { return 'unknown' }
+}
+
+function Install-Tor {
+    $base = Get-TorBaseDir
+    $exe = Get-TorExe
+    $torrc = Join-Path $base 'torrc'
+
+    # Ja esta pondo a luz? Nada a fazer. Isso cobre um Tor do sistema (9050/9150) e o da GUI
+    # (9060) que ja esteja rodando — a GUI morre com ela, mas se esta de pe agora, serve.
+    if (Test-TorReady) {
+        Write-Ok "Tor ja esta atendendo em 127.0.0.1:$TorPort — reaproveitando."
+        return $true
+    }
+
+    # Primeiro tenta achar um Tor do sistema para reaproveitar o binario (sem baixar nada).
+    if (Test-Tool 'tor') {
+        Write-Step 'Tor do sistema encontrado; verificando se ele atende'
+        # Um tor do sistema usa a porta dele; o nosso servicio usa a 9060. O daemon do sistema
+        # so vale se ele ja estiver escutando na 9060 — senao, baixamos o nosso.
+        if (-not (Test-TorReady)) {
+            Write-Step 'Tor do sistema nao atende na porta 9060; baixando o bundle'
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $exe)) {
+        Write-Step 'Baixando o Tor (tor-expert-bundle 13.5, ~30 MB)'
+        $asset = $TorUrls.Values | Select-Object -First 1
+        $archive = Join-Path $env:TEMP $asset.Url.Split('/')[-1]
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.Url -OutFile $archive
+        } catch {
+            Write-Warn "Falha ao baixar o Tor: $($_.Exception.Message)"
+            return $false
+        }
+
+        Write-Step 'Conferindo SHA-256'
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
+        if ($hash -ne $asset.Sha256.ToLower()) {
+            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+            Write-Warn 'O download do Tor veio corrompido (SHA-256 diferente). Abortando.'
+            return $false
+        }
+
+        Write-Step 'Extraindo o Tor'
+        New-Item -ItemType Directory -Path $base -Force | Out-Null
+        # O bundle compacta um único diretório "tor"; tar.exe do Windows 11+ extrai direto.
+        & tar -xzf $archive -C $base --exclude 'tor/pluggable_transports/*' --exclude 'debug/*'
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn 'Falha ao extrair o bundle do Tor.'
+            return $false
+        }
+        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not (Test-Path -LiteralPath $exe)) {
+        Write-Warn "O binario do Tor nao apareceu em $exe."
+        return $false
+    }
+
+    # torrc com a porta dedicada, como a GUI usa.
+    $dataDir = Join-Path $base 'data-state'
+    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    $geoip = Join-Path $base 'tor\data'
+    $torrcText = @"
+SocksPort $TorPort
+DataDirectory $($dataDir -replace '\\','\')
+$(
+    if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
+        "GeoIPFile $(Join-Path $base 'tor\data\geoip')"
+    }
+)
+$(
+    if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
+        "GeoIPv6File $(Join-Path $base 'tor\data\geoip6')"
+    }
+)
+Log notice stdout
+"@
+    Save-Text $torrc $torrcText
+
+    # Tenta registrar como servico do Windows. Precisa de admin; sem admin, cai para a Run key
+    # do usuario (sobe no logon). Nesse caso o servico nao e "de verdade", mas atende.
+    $admin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($admin) {
+        Write-Step 'Registrando o Tor como servico do Windows'
+        $svcResult = & $exe --service install --service start 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Nao consegui registrar o servico: $svcResult"
+            Write-Step 'Tentando via chave de inicializacao do usuario (Run key)'
+            Set-RunKey $exe $torrc
+        } else {
+            Write-Ok 'Servico do Tor registrado e iniciado.'
+            return $true
+        }
+    } else {
+        Write-Step 'Sem permissao de admin; registrando na inicializacao do usuario (Run key)'
+        Set-RunKey $exe $torrc
+    }
+
+    # Espera subir e valida com um tunel SOCKS de verdade.
+    Write-Step 'Esperando o Tor subir'
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Milliseconds 1000
+        if (Test-TorReady) { break }
+    }
+
+    if (-not (Test-TorReady)) {
+        Write-Warn 'Tor nao subiu em 30s. Veja o log em tor/data-state.'
+        return $false
+    }
+    Write-Ok "Tor atendendo em 127.0.0.1:$TorPort"
+    return $true
+}
+
+function Set-RunKey($exe, $torrc) {
+    try {
+        $command = "`"$exe`" -f `"$torrc`""
+        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
+        Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'GoLiveBypassTor' -Value $command
+        Write-Ok 'Tor registrado para subir no proximo logon (GoLiveBypassTor).'
+        return $true
+    } catch {
+        Write-Warn "Nao consegui registrar a inicializacao: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Remove-Tor {
+    # Desinstala o que este instalador criou: servico (se admin) e/ou Run key. Nao apaga o
+    # binario nem o Tor de outra pessoa no sistema — so o nosso.
+    $exe = Get-TorExe
+    if (Test-Path -LiteralPath $exe) {
+        try {
+            $service = Get-CimInstance Win32_Service -Filter "Name='tor'" -ErrorAction SilentlyContinue
+            if ($service) {
+                Write-Step 'Parando e removendo o servico do Tor'
+                & $exe --service stop 2>&1 | Out-Null
+                & $exe --service remove 2>&1 | Out-Null
+            }
+        } catch { }
+    }
+
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
+    } catch { }
+
+    # O binario fica: a GUI usa o mesmo e sem ela nao faz mal.
+    if (Test-Path -LiteralPath $exe) {
+        Write-Host '  [*] O binario do Tor em %LOCALAPPDATA%\GoLiveBypass\Tor permanece (usado tambem pela GUI).' -ForegroundColor DarkGray
+    }
+}
+
 function Select-Proxy {
     if ($Yes) { return '' }
 
@@ -721,14 +916,20 @@ function Select-Proxy {
     Write-Host ''
     Write-Host '    [1] Proxy gratuita, escolhida e testada sozinha' -ForegroundColor Green
     Write-Host '        Nao precisa instalar nada. O plugin testa varias e usa a que passar.' -ForegroundColor DarkGray
-    Write-Host '    [2] Tor local' -ForegroundColor Cyan
-    Write-Host '        Mais confiavel e mais rapido, mas voce precisa ter o Tor rodando.' -ForegroundColor DarkGray
+    Write-Host '    [2] Tor automatico' -ForegroundColor Cyan
+    Write-Host '        Baixa e instala o Tor sozinho (uma vez) e deixa ele sempre rodando.' -ForegroundColor DarkGray
     Write-Host '    [3] Proxy minha' -ForegroundColor Cyan
     Write-Host '        Voce informa o endereco, no formato socks5://host:porta.' -ForegroundColor DarkGray
     Write-Host ''
 
     switch (Read-Host '  Escolha') {
-        '2' { return 'socks5://127.0.0.1:9150' }
+        '2' {
+            if (-not (Install-Tor)) {
+                Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
+                return ''
+            }
+            return "socks5://127.0.0.1:$TorPort"
+        }
         '3' {
             Write-Host '  Se a sua proxy pedir login, use socks5://usuario:senha@host:porta' -ForegroundColor DarkGray
             Write-Host '  Senha com @ ou : precisa vir codificada (@ vira %40, : vira %3A)' -ForegroundColor DarkGray
@@ -810,6 +1011,7 @@ function Invoke-RestoreEverything {
         Write-Warn 'Nao achei o fonte do mod, entao so posso parar por aqui.'
     }
 
+    Remove-Tor
     Write-Host ''
     Write-Ok 'Tudo restaurado. Seu Discord voltou ao normal.'
 }

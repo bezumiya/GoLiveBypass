@@ -49,10 +49,11 @@ const MAX_CANDIDATES = 48;
 const MIN_UPTIME = 90;
 const MAX_LISTED_TIMEOUT = 1500;
 
-// Portas SOCKS de clientes Tor, em ordem de preferencia: 9052 e a porta comum de um Tor
-// configurado a mao com bridge, e as outras sao Tor Browser, daemon e Brave. Uma porta
-// fechada recusa na hora, entao tentar as quatro nao custa relogio nenhum.
-const TOR_PORTS = [9052, 9150, 9050, 9250];
+// Portas SOCKS de clientes Tor, em ordem de preferencia: 9060 e a porta dedicada que o
+// GoLiveBypass usa (GUI e instaladores), 9052 e a porta comum de um Tor configurado a mao
+// com bridge, e as outras sao Tor Browser, daemon e Brave. Uma porta fechada recusa na
+// hora, entao tentar todas nao custa relogio nenhum.
+const TOR_PORTS = [9060, 9052, 9150, 9050, 9250];
 const TOR_PORT_TIMEOUT_MS = 400;
 
 const POOL_SIZE = 5;

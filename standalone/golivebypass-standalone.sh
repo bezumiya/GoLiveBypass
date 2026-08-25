@@ -55,9 +55,24 @@ STUB_PACKAGE='{"name":"discord","main":"index.js","version":"1.0.0"}'
 FLATPAK_IDS="com.discordapp.Discord com.discordapp.DiscordPTB com.discordapp.DiscordCanary dev.vencord.Vesktop app.legcord.Legcord org.equicord.equibop"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# ---------------------------------------------------------------------------
+# Tor embutido: mesma versao, mesmos hashes e mesma porta da GUI
+# (golive-gui/electron/main.ts). A porta dedicada 9060 nao conflita com um Tor
+# do sistema (9050) nem do Tor Browser (9150).
+TOR_BUNDLE_VERSION="13.5"
+TOR_PORT="9060"
+TOR_BASE="$INSTALL_DIR/Tor"
+TOR_EXE="$TOR_BASE/tor/tor"
+TOR_TORRC="$TOR_BASE/torrc"
+TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
+TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
+TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
+TOR_SERVICE="golivebypass-tor.service"
+
 MODE="install"
 PROXY=""
 EXCLUDED="BR"
+TOR_MODE=0
 ASSUME_YES=0
 JSON=0
 
@@ -75,6 +90,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --proxy) PROXY="${2:-}"; shift ;;
         --excluded-countries) EXCLUDED="${2:-BR}"; shift ;;
+        --tor) TOR_MODE=1 ;;
         --uninstall) MODE="uninstall" ;;
         --restore) MODE="restore" ;;
         --status) MODE="status" ;;
@@ -538,7 +554,11 @@ install_patcher() {
     # arquivo. Regravar sem essas chaves apagava a escolha A CADA ativacao: o runtime
     # voltava ao "auto" em silencio enquanto a GUI seguia mostrando Tor.
     local route_mode="" tor_addr=""
-    if [ -f "$INSTALL_DIR/settings.json" ]; then
+    if [ "$TOR_MODE" -eq 1 ]; then
+        # --tor: aponta o bypass para o Tor que o proprio script instalou.
+        route_mode="tor"
+        tor_addr="127.0.0.1:$TOR_PORT"
+    elif [ -f "$INSTALL_DIR/settings.json" ]; then
         route_mode="$(sed -n 's/.*"routeMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
         tor_addr="$(sed -n 's/.*"torAddr"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
     fi
@@ -563,6 +583,146 @@ JSON
     # 600 porque o arquivo pode conter a senha da proxy da pessoa.
     chmod 600 "$INSTALL_DIR/settings.json" 2>/dev/null || true
     ok "Configuracao gravada em $INSTALL_DIR/settings.json"
+}
+
+# ---------------------------------------------------------------------------
+# Tor embutido (installation)
+
+tor_ready() {
+    # Probe barato: quem aceita TCP na 9060 e um SOCKS de Tor (nosso, da GUI ou do sistema).
+    if command -v bash >/dev/null 2>&1 && bash -c "exec 3<>/dev/tcp/127.0.0.1/$TOR_PORT" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# Baixa o bundle e deixa o binario pronto, se ainda nao existir. Nao sobe nada.
+ensure_tor_bundle() {
+    [ -x "$TOR_EXE" ] && return 0
+
+    step "Baixando o Tor (tor-expert-bundle $TOR_BUNDLE_VERSION, ~30 MB)"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    if have curl; then
+        curl -fsSL "$TOR_URL" -o "$tmp/$TOR_TARBALL" || { warn "Falha ao baixar o Tor. Verifique sua conexao."; return 1; }
+    elif have wget; then
+        wget -qO- "$TOR_URL" > "$tmp/$TOR_TARBALL" || { warn "Falha ao baixar o Tor. Verifique sua conexao."; return 1; }
+    else
+        warn "Preciso de curl ou wget para baixar o Tor."
+        return 1
+    fi
+
+    step "Conferindo SHA-256"
+    local obtido
+    obtido="$(sha256sum "$tmp/$TOR_TARBALL" 2>/dev/null | cut -d' ' -f1)"
+    if [ "$obtido" != "$TOR_SHA256" ]; then
+        warn "O download do Tor veio corrompido (SHA-256 $obtido). Abortando."
+        return 1
+    fi
+
+    step "Extraindo o Tor"
+    mkdir -p "$TOR_BASE"
+    tar -xzf "$tmp/$TOR_TARBALL" -C "$TOR_BASE" --exclude 'tor/pluggable_transports/*' --exclude 'debug/*' || {
+        warn "Falha ao extrair o bundle do Tor."
+        return 1
+    }
+    chmod +x "$TOR_EXE" 2>/dev/null || true
+    return 0
+}
+
+# Garante o Tor de pe na 9060. Devolve 0 se estiver pronto.
+ensure_tor() {
+    tor_ready && { step "Tor ja atendendo em 127.0.0.1:$TOR_PORT"; return 0; }
+
+    have tor && step "Tor do sistema encontrado; verifica se o daemon esta de pe (porta $TOR_PORT)"
+
+    ensure_tor_bundle || return 1
+
+    mkdir -p "$TOR_BASE/data-state"
+    cat > "$TOR_TORRC" <<EOF
+SocksPort $TOR_PORT
+DataDirectory $TOR_BASE/data-state
+$( [ -f "$TOR_BASE/tor/data/geoip" ] && printf 'GeoIPFile %s\n' "$TOR_BASE/tor/data/geoip" )
+$( [ -f "$TOR_BASE/tor/data/geoip6" ] && printf 'GeoIPv6File %s\n' "$TOR_BASE/tor/data/geoip6" )
+Log notice stdout
+EOF
+
+    # systemd user (padrao); com sudo sem systemd user, unit system com User=<SUDO_USER>;
+    # ultimo recurso (sem systemd): nohup com aviso de que nao sobrevive ao boot.
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        step "Registrando o Tor como servico do usuario (systemd user)"
+        mkdir -p "$HOME/.config/systemd/user"
+        cat > "$HOME/.config/systemd/user/$TOR_SERVICE" <<EOF
+[Unit]
+Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
+After=network.target
+
+[Service]
+ExecStart=$TOR_EXE -f $TOR_TORRC
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+        systemctl --user daemon-reload
+        systemctl --user enable --now "$TOR_SERVICE" 2>/dev/null || {
+            warn "Nao consegui ativar o servico do usuario. Tentando nohup."
+            nohup "$TOR_EXE" -f "$TOR_TORRC" > "$TOR_BASE/tor.log" 2>&1 &
+        }
+    elif command -v systemctl >/dev/null 2>&1; then
+        local real_user="${SUDO_USER:-$USER}"
+        step "Registrando o Tor como servico do sistema (via sudo)"
+        sudo tee "/etc/systemd/system/$TOR_SERVICE" >/dev/null <<EOF
+[Unit]
+Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
+After=network.target
+
+[Service]
+User=$real_user
+ExecStart=$TOR_EXE -f $TOR_TORRC
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now "$TOR_SERVICE" 2>/dev/null || {
+            warn "Nao consegui ativar o servico do sistema. Tentando nohup."
+            nohup "$TOR_EXE" -f "$TOR_TORRC" > "$TOR_BASE/tor.log" 2>&1 &
+        }
+    else
+        step "systemd nao encontrado; rodando o Tor em background (nao sobrevive ao boot)"
+        nohup "$TOR_EXE" -f "$TOR_TORRC" > "$TOR_BASE/tor.log" 2>&1 &
+    fi
+
+    step "Esperando o Tor subir"
+    local i
+    for i in $(seq 1 30); do
+        tor_ready && break
+        sleep 1
+    done
+
+    if tor_ready; then
+        step "Tor atendendo em 127.0.0.1:$TOR_PORT"
+        return 0
+    fi
+    warn "O Tor nao subiu em 30s. Veja o log em $TOR_BASE/tor.log"
+    return 1
+}
+
+remove_tor() {
+    # Desinstala o que este script criou. Nao apaga o binario (a GUI usa o mesmo).
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user disable --now "$TOR_SERVICE" 2>/dev/null
+        rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
+        systemctl --user daemon-reload 2>/dev/null
+        if [ -f "/etc/systemd/system/$TOR_SERVICE" ]; then
+            sudo systemctl disable --now "$TOR_SERVICE" 2>/dev/null
+            sudo rm -f "/etc/systemd/system/$TOR_SERVICE"
+            sudo systemctl daemon-reload 2>/dev/null
+        fi
+    fi
+    rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
 }
 
 # Devolve 1 em qualquer falha, sem matar o script (set -eu mataria o processo inteiro se
@@ -711,6 +871,7 @@ if [ "$MODE" = "uninstall" ]; then
     # Nao reabrir o Discord nao-revertido: abriria com a injecao ainda no disco, e o botao
     # da GUI voltaria a "Ativo" por engano. Se nada falhou e ha um vanilla pra abrir, abre.
     if [ "$failed" -eq 0 ]; then
+        remove_tor
         start_discord "$(printf '%s\n' "$FOUND" | head -1)"
         exit 0
     fi
@@ -732,6 +893,7 @@ if [ "$MODE" = "restore" ]; then
             revoke_flatpak_access "$id" "$INSTALL_DIR"
         fi
     done
+    remove_tor
     exit 0
 fi
 
@@ -758,6 +920,14 @@ while IFS='|' read -r resources flav detect id; do
         warn "Flatpak do $id: a injecao por pasta app.asar nao abre este cliente (Electron 18/zypak)."
         printf '      %sPrefira a versao nativa (pacote da distro, AUR, deb/rpm) deste cliente.%s\n' "$C_DIM" "$C_OFF" >&2
         confirm "Mesmo assim injetar em $id?" || { warn "Deixei como estava."; continue; }
+    fi
+
+    # Com --tor, prepara o daemon antes de injetar: o settings.json aponta para ele e o
+    # gateway segura ate o Tor responder (o bypass nunca cai direto no modo tor).
+    if [ "$TOR_MODE" -eq 1 ] && ! ensure_tor; then
+        warn "O Tor nao subiu. Nao vou instalar o standalone no modo tor; tente de novo ou use --proxy."
+        printf '0\n' >> "$tally"
+        continue
     fi
 
     install_patcher
