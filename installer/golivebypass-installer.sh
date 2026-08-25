@@ -105,7 +105,9 @@ confirm() {
 
 tui_is_interactive() {
     [ "$ASSUME_YES" -eq 1 ] && return 1
-    [ -t 0 ] && [ -t 1 ] && return 0
+    # stdin interativo e suficiente: o terminal do usuario tem stdin+stdout ttys, e
+    # exigir -t 1 quebra em pty/emuladores onde o stdout noutro momento nao reporta tty.
+    [ -t 0 ] && return 0
     return 1
 }
 
@@ -155,7 +157,8 @@ tui_size() {
         TUI_ROWS=24
         TUI_COLS=80
     fi
-    [ "$TUI_COLS" -le 20 ] && TUI_COLS=80
+    if [ "$TUI_COLS" -le 20 ]; then TUI_COLS=80; fi
+    return 0
 }
 
 # Posiciona o cursor em (row, col) — base 1, como o ANSI.
@@ -615,6 +618,24 @@ discord_resources() {
         /usr/local/share/discord \
         "$HOME/.local/share/discord" "$HOME/Discord" "$HOME/discord" \
         "$HOME/.local/share/DiscordPTB" "$HOME/.local/share/DiscordCanary"
+    do
+        [ -d "$raiz" ] || continue
+        for sub in "$raiz/resources" "$raiz"; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
+                break
+            fi
+        done
+    done
+
+    # Clientes paralelos (Vesktop/Equibop/Legcord) instalados por AUR/pacote: costumam morar
+    # em /usr/share, /usr/lib, /usr/lib64, /opt ou ~/.local/share. Espelhado do standalone.
+    for raiz in \
+        /usr/share/vesktop /usr/lib/vesktop /usr/lib64/vesktop /opt/vesktop /opt/Vesktop \
+        /usr/share/equibop /usr/lib/equibop /usr/lib64/equibop /opt/equibop /opt/Equibop \
+        /usr/share/legcord /usr/lib/legcord /usr/lib64/legcord /opt/legcord /opt/Legcord \
+        /usr/local/share/vesktop /usr/local/share/equibop /usr/local/share/legcord \
+        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord"
     do
         [ -d "$raiz" ] || continue
         for sub in "$raiz/resources" "$raiz"; do

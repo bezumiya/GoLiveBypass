@@ -93,7 +93,8 @@ fail() { printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2; exit 1; }
 
 st_tui_is_interactive() {
     [ "$ASSUME_YES" -eq 1 ] && return 1
-    [ -t 0 ] && [ -t 1 ] && return 0
+    # stdin interativo e suficiente (evita quebrar em pty/emuladores).
+    [ -t 0 ] && return 0
     return 1
 }
 
@@ -121,7 +122,8 @@ st_tui_size() {
         ST_ROWS=24
         ST_COLS=80
     fi
-    [ "$ST_COLS" -le 20 ] && ST_COLS=80
+    if [ "$ST_COLS" -le 20 ]; then ST_COLS=80; fi
+    return 0
 }
 st_tui_cursor() { printf '\033[%d;%dH' "$1" "$2" >&2; }
 
