@@ -97,6 +97,185 @@ confirm() {
     esac
 }
 
+# =========================================================================== TUI
+# Interface no estilo OpenCode: dark, caixas, setas/Enter, mouse SGR onde o terminal
+# suporta. Tudo ANSI puro, sem dependencia. Quando nao ha TTY (pipe/automacao/CI) ou
+# --yes esta ligado, os scripts caem para os menus/flags de antes — nada muda nesses casos.
+# POSIX 100%: em vez de read -n (bash-only), usa stty -icanon + dd para ler 1 tecla.
+
+tui_is_interactive() {
+    [ "$ASSUME_YES" -eq 1 ] && return 1
+    [ -t 0 ] && [ -t 1 ] && return 0
+    return 1
+}
+
+# Cores extras da TUI (fundo escuro, texto claro, acento). Reutiliza C_* ja definidos.
+TUI_BG=$(printf '\033[48;5;235m')
+TUI_FG=$(printf '\033[38;5;252m')
+TUI_ACCENT=$(printf '\033[38;5;75m')   # azul-ciano (item ativo)
+TUI_OK=$(printf '\033[38;5;114m')      # verde (recomendado)
+TUI_DIM2=$(printf '\033[38;5;240m')
+TUI_BOLD=$(printf '\033[1m')
+TUI_RSET=$(printf '\033[0m')
+TUI_MOUSE_ON='\033[?1000h\033[?1006h'
+TUI_MOUSE_OFF='\033[?1000l\033[?1006l'
+
+tui_mouse_on()   { printf '%b' "$TUI_MOUSE_ON" >&2; }
+tui_mouse_off()  { printf '%b' "$TUI_MOUSE_OFF" >&2; }
+tui_hide_cursor() { printf '\033[?25l' >&2; }
+tui_show_cursor() { printf '\033[?25h' >&2; }
+
+# Desenha uma caixa com titulo e linhas de conteudo. Cada elemento de `lines` ja vem
+# com o texto pronto (sem as bordas).
+tui_box() {
+    local title="$1"; shift
+    local w=62 line txt i
+    local top bottom
+    top=""; bottom=""
+    i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+    i=0; while [ "$i" -lt $((w-2)) ]; do bottom="${bottom}─"; i=$((i+1)); done
+    printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$TUI_BG" "$TUI_RSET" "$TUI_ACCENT" "$title" "$TUI_RSET" "$TUI_DIM2" "$top" "$TUI_RSET" >&2
+    for txt in "$@"; do
+        local pad
+        pad=""
+        i=0; while [ "$i" -lt $((w-4-${#txt})) ]; do pad="${pad} "; i=$((i+1)); done
+        printf '%s%s│ %s%s%s %s│%s\n' "$TUI_BG" "$TUI_RSET" "$txt" "$TUI_RSET" "$pad" "$TUI_BG" "$TUI_RSET" >&2
+    done
+    printf '%s%s└%s┘%s\n' "$TUI_BG" "$TUI_RSET" "$bottom" "$TUI_RSET" >&2
+}
+
+# limpa a partir da linha N (para redesenhar o corpo sem o header).
+tui_clear_below() { printf '\033[%d;0H\033[J' "$1" >&2; }
+
+# Modo "raw" POSIX: le 1 byte sem eco, sem esperar Enter. Guarda o estado do terminal para
+# restaurar. `dd` e `stty` existem em toda distro/busybox.
+tui_raw_begin() {
+    # salva o modo atual (só se stty funciona)
+    TUI_STTY_SAVED="$(stty -g 2>/dev/null || true)"
+    stty -icanon -echo 2>/dev/null || true
+}
+tui_raw_end() {
+    if [ -n "${TUI_STTY_SAVED:-}" ]; then
+        stty "$TUI_STTY_SAVED" 2>/dev/null || true
+    else
+        stty icanon echo 2>/dev/null || true
+    fi
+    TUI_STTY_SAVED=""
+}
+
+# Le uma tecla de navegacao em modo raw: retorna "up|down|enter|esc|j|k|other".
+# Mouse SGR chega como sequencia de bytes; tratamos o hit simples (press) como
+# "enter" quando clicou dentro da area do menu — aposicao e estimada pela linha.
+tui_getkey() {
+    local key rest
+    key="$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "$key" in
+        1b) # ESC: ou so, ou seguido de [A/[B
+            rest="$(dd bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+            case "$rest" in
+                5b41) printf 'up\n' ;;      # ESC [ A
+                5b42) printf 'down\n' ;;     # ESC [ B
+                *)    printf 'esc\n' ;;      # ESC so
+            esac ;;
+        0a|0d) printf 'enter\n' ;;
+        6a) printf 'down\n' ;;               # j
+        6b) printf 'up\n' ;;                 # k
+        71) printf 'esc\n' ;;                # q
+        *) printf 'other\n' ;;
+    esac
+}
+
+# tui_menu <title> <items...> → imprime o indice escolhido (1..N) ou "0" para cancelar.
+tui_menu() {
+    local title="$1"; shift
+    local n sel key i txt
+    n=$#
+    sel=0
+    tui_mouse_on
+    tui_hide_cursor
+    tui_raw_begin
+    while :; do
+        tui_clear_below 1
+        local w=62
+        local top pad
+        top=""
+        i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$TUI_BG" "$TUI_RSET" "$TUI_ACCENT" "$title" "$TUI_RSET" "$TUI_DIM2" "$top" "$TUI_RSET" >&2
+        i=0
+        for txt in "$@"; do
+            pad=""
+            local j
+            j=0; while [ "$j" -lt $((w-6-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
+            if [ "$i" -eq "$sel" ]; then
+                printf '%s│ %s●%s %s%s%s%s│%s\n' "$TUI_BG" "$TUI_ACCENT" "$TUI_RSET" "$TUI_BOLD" "$txt" "$TUI_RSET" "$pad" "$TUI_RSET" >&2
+            else
+                printf '%s│ %s○%s %s%s%s│%s\n' "$TUI_BG" "$TUI_DIM2" "$TUI_RSET" "$txt" "$TUI_RSET" "$pad" "$TUI_RSET" >&2
+            fi
+            i=$((i+1))
+        done
+        printf '%s└%s┘%s\n' "$TUI_BG" "$(printf '─%.0s' $(seq_like 1 $((w-2))))" "$TUI_RSET" >&2
+        printf '  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s\n' "$TUI_DIM2" "$TUI_RSET" >&2
+        key="$(tui_getkey)"
+        case "$key" in
+            up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;
+            down) [ "$sel" -lt $((n-1)) ] && sel=$((sel+1)) ;;
+            enter) break ;;
+            esc)  sel=-1; break ;;
+        esac
+    done
+    tui_raw_end
+    tui_mouse_off
+    tui_show_cursor
+    if [ "$sel" -ge 0 ] && [ "$sel" -lt "$n" ]; then printf '%d\n' $((sel+1)); else printf '0\n'; fi
+}
+
+# seq_like 1 N → 1 2 3 ... N (POSIX, sem `seq`).
+seq_like() {
+    local start="$1" end="$2" i
+    i="$start"
+    while [ "$i" -le "$end" ]; do printf '%d ' "$i"; i=$((i+1)); done
+}
+
+# tui_select <title> <opt1> <opt2> ... → igual a tui_menu (1-indexado).
+tui_select() { tui_menu "$@"; }
+
+# tui_confirm <question> → 0 se sim, 1 se nao. Aceita s/N (le uma linha).
+tui_confirm() {
+    tui_is_interactive || { confirm "$1"; return $?; }
+    local answer
+    printf '%s%s  %s [s/N] ' "$TUI_BG" "$TUI_FG" "$1" >&2
+    tui_show_cursor
+    read -r answer
+    tui_hide_cursor
+    case "$answer" in
+        [sSyY]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# tui_input <label> <value_inicial> → imprime o valor digitado (ou o inicial se Enter vazio).
+tui_input() {
+    local label="$1" value="${2:-}"
+    printf '%s%s  %s%s: %s%s' "$TUI_BG" "$TUI_FG" "$label" "$TUI_ACCENT" "$value" >&2
+    tui_show_cursor
+    IFS= read -r value
+    tui_hide_cursor
+    printf '%s\n' "$value"
+}
+
+# tui_progress <texto> → spinner simples na linha (atualiza no lugar).
+tui_progress() {
+    local msg="$1"
+    printf '\033[2K\r%s%s[*]%s %s%s' "$TUI_BG" "$TUI_ACCENT" "$TUI_RSET" "$msg" "$TUI_RSET" >&2
+}
+
+# tui_done() → limpa a linha de progresso e imprime OK.
+tui_done() {
+    printf '\033[2K\r%s%s[OK]%s\n' "$TUI_BG" "$TUI_OK" "$TUI_RSET" >&2
+}
+
+# =========================================================================== /TUI
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # O id do flatpak a que um caminho pertence, ou nada se o caminho nao for de flatpak. Serve
@@ -589,6 +768,17 @@ choose_mod() {
 
     local installed
     installed="$(installed_mod || true)"
+
+    if tui_is_interactive; then
+        local tui_choice
+        tui_choice="$(tui_menu "Qual mod instalar?" "Equicord (recomendado, inclui tudo do Vencord)" "Vencord (o original, mais enxuto)")"
+        case "$tui_choice" in
+            1) echo "Equicord" ;;
+            2) echo "Vencord" ;;
+            *) fail "Cancelado." ;;
+        esac
+        return 0
+    fi
 
     printf '\n' >&2
     if [ -n "$installed" ]; then
@@ -1096,6 +1286,18 @@ select_target() {
 
     local name
     name="$(basename "$root")"
+
+    if tui_is_interactive; then
+        local tui_choice
+        tui_choice="$(tui_menu "Onde instalar?" "Usar o $name que ja esta aqui" "Baixar e usar outro (Equicord ou Vencord)")"
+        if [ "$tui_choice" = "2" ]; then
+            install_mod "$(choose_mod)"
+        else
+            printf '%s\n' "$root"
+        fi
+        return
+    fi
+
     printf '  %sOnde instalar?%s\n\n' "$C_BOLD" "$C_OFF" >&2
     printf '    %s[1] Usar o %s que ja esta aqui%s\n' "$C_GREEN" "$name" "$C_OFF" >&2
     printf '  %s      %s%s\n' "$C_DIM" "$root" "$C_OFF" >&2
@@ -1112,6 +1314,36 @@ select_target() {
 }
 
 select_proxy() {
+    if tui_is_interactive; then
+        local tui_choice
+        tui_choice="$(tui_menu "Como o bypass vai sair para fora do Brasil?" \
+            "Proxy gratuita (escolhida e testada sozinha)" \
+            "Tor automatico (baixa e sobe sozinho)" \
+            "Proxy minha (socks5://host:porta)")"
+        case "$tui_choice" in
+            2)
+                if ! ensure_tor; then
+                    warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
+                    printf '\n'
+                    return 0
+                fi
+                printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
+                ;;
+            3)
+                local manual
+                manual="$(tui_input "Endereco da proxy")"
+                case "$manual" in
+                    socks5://*|https://*|http://*)
+                        printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
+                    *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
+                esac
+                printf '%s\n' "$manual"
+                ;;
+            *) printf '\n' ;;
+        esac
+        return 0
+    fi
+
     printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
     printf '    %s[1] Proxy gratuita, escolhida e testada sozinha%s\n' "$C_GREEN" "$C_OFF" >&2
     printf '  %s      Nao precisa instalar nada. O plugin testa varias e usa a que passar.%s\n' "$C_DIM" "$C_OFF" >&2
@@ -1153,6 +1385,15 @@ select_proxy() {
 }
 
 select_persistence() {
+    if tui_is_interactive; then
+        local tui_choice
+        tui_choice="$(tui_menu "Como voce quer deixar o Discord?" \
+            "Permanente (abre com o mod toda vez)" \
+            "Temporario (desfaz quando voce fechar o Discord)")"
+        [ "$tui_choice" = "2" ] && return 1
+        return 0
+    fi
+
     printf '\n  %sComo voce quer deixar o Discord?%s\n\n' "$C_BOLD" "$C_OFF" >&2
     printf '    %s[1] Permanente%s\n' "$C_GREEN" "$C_OFF" >&2
     printf '  %s      O Discord abre com o mod toda vez, ate voce remover.%s\n' "$C_DIM" "$C_OFF" >&2
@@ -1304,6 +1545,22 @@ main_menu() {
     local root
     root="$(find_checkout || true)"
     show_status "$root"
+
+    if tui_is_interactive; then
+        local tui_choice
+        tui_choice="$(tui_menu "O que voce quer fazer?" \
+            "Instalar ou atualizar o GoLiveBypass" \
+            "Remover so o plugin (o mod continua)" \
+            "Restaurar tudo (remove o plugin e desfaz a injecao)" \
+            "Sair")"
+        case "$tui_choice" in
+            1) do_install "$root" ;;
+            2) do_uninstall ;;
+            3) do_restore_everything ;;
+            *) printf '  %sAte mais.%s\n' "$C_DIM" "$C_OFF" ;;
+        esac
+        return
+    fi
 
     printf '  %sO que voce quer fazer?%s\n\n' "$C_BOLD" "$C_OFF"
     printf '    %s[1] Instalar ou atualizar o GoLiveBypass%s\n' "$C_GREEN" "$C_OFF"

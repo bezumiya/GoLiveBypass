@@ -86,6 +86,138 @@ ok()   { printf '  %s[OK]%s %s\n' "$C_GREEN" "$C_OFF" "$1" >&2; }
 warn() { printf '  %s[!]%s %s\n' "$C_YELLOW" "$C_OFF" "$1" >&2; }
 fail() { printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2; exit 1; }
 
+# =========================================================================== TUI (standalone)
+# Interface no estilo OpenCode (dark, caixas, setas/Enter), ANSI puro, POSIX.
+# Quando nao ha TTY, ou -y/--yes esta ligado, o script cai para o fluxo por flags.
+# As funcoes usam prefixo st_ para nao colidir com as do instalador de plugin.
+
+st_tui_is_interactive() {
+    [ "$ASSUME_YES" -eq 1 ] && return 1
+    [ -t 0 ] && [ -t 1 ] && return 0
+    return 1
+}
+
+ST_BG=$(printf '\033[48;5;235m')
+ST_FG=$(printf '\033[38;5;252m')
+ST_ACCENT=$(printf '\033[38;5;75m')
+ST_OK=$(printf '\033[38;5;114m')
+ST_DIM2=$(printf '\033[38;5;240m')
+ST_BOLD=$(printf '\033[1m')
+ST_RSET=$(printf '\033[0m')
+
+st_tui_mouse_on()   { printf '\033[?1000h\033[?1006h' >&2; }
+st_tui_mouse_off()  { printf '\033[?1000l\033[?1006l' >&2; }
+st_tui_hide_cursor() { printf '\033[?25l' >&2; }
+st_tui_show_cursor() { printf '\033[?25h' >&2; }
+
+st_tui_raw_begin() {
+    ST_STTY_SAVED="$(stty -g 2>/dev/null || true)"
+    stty -icanon -echo 2>/dev/null || true
+}
+st_tui_raw_end() {
+    if [ -n "${ST_STTY_SAVED:-}" ]; then
+        stty "$ST_STTY_SAVED" 2>/dev/null || true
+    else
+        stty icanon echo 2>/dev/null || true
+    fi
+    ST_STTY_SAVED=""
+}
+
+st_tui_getkey() {
+    local key rest
+    key="$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "$key" in
+        1b)
+            rest="$(dd bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+            case "$rest" in
+                5b41) printf 'up\n' ;;
+                5b42) printf 'down\n' ;;
+                *)    printf 'esc\n' ;;
+            esac ;;
+        0a|0d) printf 'enter\n' ;;
+        6a) printf 'down\n' ;;
+        6b) printf 'up\n' ;;
+        71) printf 'esc\n' ;;
+        *) printf 'other\n' ;;
+    esac
+}
+
+st_seq() {
+    local start="$1" end="$2" i
+    i="$start"
+    while [ "$i" -le "$end" ]; do printf '%d ' "$i"; i=$((i+1)); done
+}
+
+# st_tui_menu <title> <items...> → imprime indice (1..N) ou 0 para cancelar.
+st_tui_menu() {
+    local title="$1"; shift
+    local n sel key i txt
+    n=$#
+    sel=0
+    st_tui_mouse_on
+    st_tui_hide_cursor
+    st_tui_raw_begin
+    while :; do
+        printf '\033[1;0H\033[J' >&2
+        local w=62 top pad
+        top=""
+        i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$ST_BG" "$ST_RSET" "$ST_ACCENT" "$title" "$ST_RSET" "$ST_DIM2" "$top" "$ST_RSET" >&2
+        i=0
+        for txt in "$@"; do
+            pad=""
+            local j
+            j=0; while [ "$j" -lt $((w-6-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
+            if [ "$i" -eq "$sel" ]; then
+                printf '%s│ %s●%s %s%s%s%s│%s\n' "$ST_BG" "$ST_ACCENT" "$ST_RSET" "$ST_BOLD" "$txt" "$ST_RSET" "$pad" "$ST_RSET" >&2
+            else
+                printf '%s│ %s○%s %s%s%s│%s\n' "$ST_BG" "$ST_DIM2" "$ST_RSET" "$txt" "$ST_RSET" "$pad" "$ST_RSET" >&2
+            fi
+            i=$((i+1))
+        done
+        printf '%s└%s┘%s\n' "$ST_BG" "$(printf '─%.0s' $(st_seq 1 $((w-2))))" "$ST_RSET" >&2
+        printf '  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s\n' "$ST_DIM2" "$ST_RSET" >&2
+        key="$(st_tui_getkey)"
+        case "$key" in
+            up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;
+            down) [ "$sel" -lt $((n-1)) ] && sel=$((sel+1)) ;;
+            enter) break ;;
+            esc)  sel=-1; break ;;
+        esac
+    done
+    st_tui_raw_end
+    st_tui_mouse_off
+    st_tui_show_cursor
+    if [ "$sel" -ge 0 ] && [ "$sel" -lt "$n" ]; then printf '%d\n' $((sel+1)); else printf '0\n'; fi
+}
+
+# st_tui_confirm <question> → 0 sim, 1 nao
+st_tui_confirm() {
+    st_tui_is_interactive || return 1
+    local answer
+    printf '%s%s  %s [s/N] ' "$ST_BG" "$ST_FG" "$1" >&2
+    st_tui_show_cursor
+    read -r answer
+    st_tui_hide_cursor
+    case "$answer" in [sSyY]*) return 0 ;; *) return 1 ;; esac
+}
+
+# st_tui_input <label> <inicial>
+st_tui_input() {
+    local label="$1" value="${2:-}"
+    printf '%s%s  %s%s: %s%s' "$ST_BG" "$ST_FG" "$label" "$ST_ACCENT" "$value" >&2
+    st_tui_show_cursor
+    IFS= read -r value
+    st_tui_hide_cursor
+    printf '%s\n' "$value"
+}
+
+# st_tui_progress/done: linha de status com spinner simples.
+st_tui_progress() { printf '\033[2K\r%s%s[*]%s %s%s' "$ST_BG" "$ST_ACCENT" "$ST_RSET" "$1" "$ST_RSET" >&2; }
+st_tui_done() { printf '\033[2K\r%s%s[OK]%s\n' "$ST_BG" "$ST_OK" "$ST_RSET" >&2; }
+
+# =========================================================================== /TUI (standalone)
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --proxy) PROXY="${2:-}"; shift ;;
@@ -808,6 +940,25 @@ DISTRO="$(os_field PRETTY_NAME)"
 [ -n "$DISTRO" ] || DISTRO="Linux"
 printf '  %s%s%s\n\n' "$C_DIM" "$DISTRO" "$C_OFF" >&2
 
+# ---------------------------------------------------------------------------
+# Modo interativo (TUI): quando rodamos sem flags --status/--uninstall/--restore/--json
+# com TTY de verdade, mostramos um menu estilo OpenCode. Com --yes ou sem TTY, o
+# fluxo continua 100% por flags (comportamento atual).
+if [ "$MODE" = "install" ] && st_tui_is_interactive; then
+    st_choice="$(st_tui_menu "GoLiveBypass standalone" \
+        "Instalar / atualizar o bypass" \
+        "Ver status" \
+        "Desinstalar" \
+        "Sair")"
+    case "$st_choice" in
+        1) : ;;  # continua no fluxo de instalação abaixo
+        2) MODE="status"; JSON=0 ;;
+        3) MODE="uninstall" ;;
+        *) printf '  %sAte mais.%s\n' "$C_DIM" "$C_OFF"; exit 0 ;;
+    esac
+    # Se veio de "Ver status" ou "Desinstalar", despacha abaixo (code continua).
+fi
+
 aviso_empacotado
 FOUND="$(discord_dirs)"
 [ -n "$FOUND" ] || fail "Nao achei nenhum Discord instalado."
@@ -901,6 +1052,20 @@ injected=0
 # O while do pipe roda em subshell; o acumulador precisa ser um arquivo para o -eq valer.
 lista="$(mktemp)"
 tally="$(mktemp)"
+
+# Se entramos pela TUI (instalar sem flags), pergunta a rede antes de injetar.
+if [ "$MODE" = "install" ] && st_tui_is_interactive; then
+    st_net="$(st_tui_menu "Como o bypass vai sair?" \
+        "Tor automatico (recomendado, baixa e sobe sozinho)" \
+        "Proxy gratuita (escolhida e testada sozinha)" \
+        "Proxy minha (socks5://host:porta)")"
+    case "$st_net" in
+        2) PROXY="" ; TOR_MODE=0 ;;
+        3) PROXY="$(st_tui_input "Endereco da proxy")" ; TOR_MODE=0 ;;
+        *) TOR_MODE=1 ;;
+    esac
+fi
+
 printf '%s\n' "$FOUND" > "$lista"
 while IFS='|' read -r resources flav detect id; do
     state="$(injection_state "$resources")"

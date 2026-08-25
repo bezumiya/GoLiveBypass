@@ -1,4 +1,4 @@
-<#
+﻿<#
     GoLiveBypass standalone - instalador
 
     Instala direto no Discord, sem Equicord e sem Vencord. Nao precisa de Node, nem de pnpm,
@@ -66,6 +66,101 @@ function Confirm-Action($question) {
     $answer = Read-Host "  $question [s/N]"
     return $answer -match '^[sSyY]'
 }
+
+# =========================================================================== TUI (PowerShell)
+# Interface no estilo OpenCode (dark, caixas, setas/Enter). Mouse: console do Windows nao
+# expoe cliques de forma confiavel; navegacao por teclado. Sem TTY ou com -Yes → flags.
+
+function Test-TuiInteractive {
+    if ($Yes) { return $false }
+    return (-not [Console]::IsInputRedirected) -and (-not [Console]::IsOutputRedirected)
+}
+
+$script:TuiBg = "`e[48;5;235m"
+$script:TuiFg = "`e[38;5;252m"
+$script:TuiAccent = "`e[38;5;75m"
+$script:TuiOk = "`e[38;5;114m"
+$script:TuiDim = "`e[38;5;240m"
+$script:TuiBold = "`e[1m"
+$script:TuiRset = "`e[0m"
+
+function Tui-HideCursor { Write-Host "`e[?25l" -NoNewline }
+function Tui-ShowCursor { Write-Host "`e[?25h" -NoNewline }
+function Tui-ClearBelow([int]$row) { Write-Host "`e[$row;0H`e[J" -NoNewline }
+
+function Tui-GetKey {
+    try {
+        $k = [Console]::ReadKey($true)
+        switch ($k.Key) {
+            'UpArrow'  { return 'up' }
+            'DownArrow' { return 'down' }
+            'Enter'    { return 'enter' }
+            'Escape'   { return 'esc' }
+            default {
+                if ($k.KeyChar -eq 'j') { return 'down' }
+                if ($k.KeyChar -eq 'k') { return 'up' }
+                if ($k.KeyChar -eq 'q') { return 'esc' }
+                return 'other'
+            }
+        }
+    } catch { return 'other' }
+}
+
+function Tui-Menu([string]$title, [string[]]$items) {
+    if (-not (Test-TuiInteractive)) { return 0 }
+    $sel = 0
+    $n = $items.Count
+    Tui-HideCursor
+    try {
+        while ($true) {
+            Tui-ClearBelow 1
+            Write-Host "`r" -NoNewline
+            $top = '─' * (62 - 8)
+            Write-Host "$($script:TuiBg)$($script:TuiRset)┌─ $($script:TuiAccent)$title$($script:TuiRset) ─$($script:TuiDim)$top$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            for ($i = 0; $i -lt $n; $i++) {
+                $txt = $items[$i]
+                $pad = ' ' * [Math]::Max(0, (62 - 6 - $txt.Length))
+                if ($i -eq $sel) {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiAccent)●$($script:TuiRset) $($script:TuiBold)$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                } else {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiDim)○$($script:TuiRset) $txt$pad │$($script:TuiRset)" -NoNewline
+                }
+                Write-Host ''
+            }
+            Write-Host "$($script:TuiBg)└$('─' * (62 - 2))┘$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            Write-Host "  $($script:TuiDim)[↑↓] navegar · [Enter] escolher · [Esc] cancelar$($script:TuiRset)" -NoNewline
+            $key = Tui-GetKey
+            switch ($key) {
+                'up'   { if ($sel -gt 0) { $sel-- } }
+                'down' { if ($sel -lt $n - 1) { $sel++ } }
+                'enter' { break }
+                'esc'  { $sel = -1; break }
+            }
+            if ($key -eq 'enter' -or $key -eq 'esc') { break }
+        }
+    } finally {
+        Tui-ShowCursor
+    }
+    if ($sel -ge 0) { return $sel + 1 } else { return 0 }
+}
+
+function Tui-Input([string]$label, [string]$initial = '') {
+    Write-Host "$($script:TuiBg)$($script:TuiFg)  ${label}: $($script:TuiAccent)$initial" -NoNewline
+    Tui-ShowCursor
+    $v = Read-Host
+    Tui-HideCursor
+    return ($v -replace '\s+$', '')
+}
+
+function Tui-Confirm([string]$question) {
+    if (-not (Test-TuiInteractive)) { return (Confirm-Action $question) }
+    $ans = Read-Host "$($script:TuiBg)$($script:TuiFg)  $question [s/N]"
+    return ($ans -match '^[sSyY]')
+}
+
+# =========================================================================== /TUI
 
 function Test-DiscordResourcesReady($resources) {
     $asar = Join-Path $resources 'app.asar'
@@ -375,6 +470,39 @@ if ($Mode -eq 'Status') { Show-Status; return }
 
 $installs = Get-DiscordResources
 if (-not $installs) { Write-Bad 'Nao achei nenhum Discord instalado.'; return }
+
+# ---------------------------------------------------------------------------
+# Modo interativo (TUI): rodando sem -Mode Uninstall/Status, sem flags de proxy/tor
+# e com TTY, mostra um menu estilo OpenCode e deixa escolher a rede. Com -Yes ou
+# sem TTY, o fluxo continua por flags (comportamento atual).
+if ($Mode -eq 'Install' -and (Test-TuiInteractive)) {
+    $tuiChoice = Tui-Menu 'GoLiveBypass standalone' @(
+        'Instalar / atualizar o bypass',
+        'Ver status',
+        'Desinstalar',
+        'Sair'
+    )
+    switch ($tuiChoice) {
+        2 {
+            Show-Status
+            return
+        }
+        3 {
+            $Mode = 'Uninstall'
+        }
+        0 { Write-Host '  Ate mais.' -ForegroundColor DarkGray; return }
+        default {
+            # Instalar: pede a rede antes de prosseguir.
+            $tuiNet = Tui-Menu 'Como o bypass vai sair?' @(
+                'Tor automatico (recomendado, baixa e sobe sozinho)',
+                'Proxy gratuita (escolhida e testada sozinha)',
+                'Proxy minha (socks5://host:porta)'
+            )
+            if ($tuiNet -eq 1) { $Tor = $true }
+            elseif ($tuiNet -eq 3) { $Proxy = (Tui-Input 'Endereco da proxy').Trim() }
+        }
+    }
+}
 
 if ($Mode -eq 'Uninstall') {
     Stop-Discord

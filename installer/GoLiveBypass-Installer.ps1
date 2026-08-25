@@ -1,4 +1,4 @@
-<#
+﻿<#
     GoLiveBypass - instalador automatico
 
     Encontra sozinho o Equicord ou o Vencord que voce tem, instala o plugin, compila e
@@ -79,6 +79,124 @@ function Confirm-Action($question) {
     if ($Yes) { return $true }
     return (Read-Host "  $question [s/N]") -match '^[sSyY]'
 }
+
+# =========================================================================== TUI (PowerShell)
+# Interface no estilo OpenCode: dark, caixas, setas/Enter. Mouse: o console do Windows
+# nao expoe cliques de forma confiavel por aqui; a navegacao e por teclado (up/down/Enter/Esc/j/k)
+# e o mouse SGR fica como melhoria futura. Sem TTY (pipe) ou com -Yes, cai para os menus atuais.
+
+function Test-TuiInteractive {
+    if ($Yes) { return $false }
+    return (-not [Console]::IsInputRedirected) -and (-not [Console]::IsOutputRedirected)
+}
+
+function Tui-Color($fg, $bg) { "`e[$fg`e[$bg" }  # acento/reset via ANSI
+
+# Pequena paleta da TUI (sempre ANSI; o console padrao do Windows suporta no WT/PowerShell 7).
+$script:TuiBg = "`e[48;5;235m"
+$script:TuiFg = "`e[38;5;252m"
+$script:TuiAccent = "`e[38;5;75m"
+$script:TuiOk = "`e[38;5;114m"
+$script:TuiDim = "`e[38;5;240m"
+$script:TuiBold = "`e[1m"
+$script:TuiRset = "`e[0m"
+
+function Tui-HideCursor { Write-Host "`e[?25l" -NoNewline }
+function Tui-ShowCursor { Write-Host "`e[?25h" -NoNewline }
+function Tui-ClearBelow([int]$row) { Write-Host "`e[$row;0H`e[J" -NoNewline }
+
+function Tui-GetKey {
+    # Na janela do Windows (powershell.exe), [Console]::ReadKey($true) captura setas e Enter.
+    try {
+        $k = [Console]::ReadKey($true)
+        switch ($k.Key) {
+            'UpArrow'  { return 'up' }
+            'DownArrow' { return 'down' }
+            'Enter'    { return 'enter' }
+            'Escape'   { return 'esc' }
+            default {
+                if ($k.KeyChar -eq 'j') { return 'down' }
+                if ($k.KeyChar -eq 'k') { return 'up' }
+                if ($k.KeyChar -eq 'q') { return 'esc' }
+                return 'other'
+            }
+        }
+    } catch { return 'other' }
+}
+
+function Tui-Box([string]$title, [string[]]$lines) {
+    $w = 62
+    $top = '─' * ($w - 8)
+    $bottom = '─' * ($w - 2)
+    Write-Host "$($script:TuiBg)$($script:TuiRset)┌─ $($script:TuiAccent)$title$($script:TuiRset) ─$($script:TuiDim)$top$($script:TuiRset)" -NoNewline
+    Write-Host ''
+    foreach ($txt in $lines) {
+        $pad = ' ' * [Math]::Max(0, ($w - 4 - $txt.Length))
+        Write-Host "$($script:TuiBg)$($script:TuiRset)│ $txt$pad │$($script:TuiRset)" -NoNewline
+        Write-Host ''
+    }
+    Write-Host "$($script:TuiBg)$($script:TuiRset)└$bottom┘$($script:TuiRset)" -NoNewline
+    Write-Host ''
+}
+
+function Tui-Menu([string]$title, [string[]]$items) {
+    if (-not (Test-TuiInteractive)) { return 0 }
+    $sel = 0
+    $n = $items.Count
+    Tui-HideCursor
+    try {
+        while ($true) {
+            Tui-ClearBelow 1
+            Write-Host "`r" -NoNewline
+            $top = '─' * (62 - 8)
+            Write-Host "$($script:TuiBg)$($script:TuiRset)┌─ $($script:TuiAccent)$title$($script:TuiRset) ─$($script:TuiDim)$top$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            for ($i = 0; $i -lt $n; $i++) {
+                $txt = $items[$i]
+                $pad = ' ' * [Math]::Max(0, (62 - 6 - $txt.Length))
+                if ($i -eq $sel) {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiAccent)●$($script:TuiRset) $($script:TuiBold)$txt$($script:TuiRset)$pad │$($script:TuiRset)" -NoNewline
+                } else {
+                    Write-Host "$($script:TuiBg)│ $($script:TuiDim)○$($script:TuiRset) $txt$pad │$($script:TuiRset)" -NoNewline
+                }
+                Write-Host ''
+            }
+            Write-Host "$($script:TuiBg)└$('─' * (62 - 2))┘$($script:TuiRset)" -NoNewline
+            Write-Host ''
+            Write-Host "  $($script:TuiDim)[↑↓] navegar · [Enter] escolher · [Esc] cancelar$($script:TuiRset)" -NoNewline
+            $key = Tui-GetKey
+            switch ($key) {
+                'up'   { if ($sel -gt 0) { $sel-- } }
+                'down' { if ($sel -lt $n - 1) { $sel++ } }
+                'enter' { break }
+                'esc'  { $sel = -1; break }
+            }
+            if ($key -eq 'enter' -or $key -eq 'esc') { break }
+        }
+    } finally {
+        Tui-ShowCursor
+    }
+    if ($sel -ge 0) { return $sel + 1 } else { return 0 }
+}
+
+function Tui-Input([string]$label, [string]$initial = '') {
+    Write-Host "$($script:TuiBg)$($script:TuiFg)  ${label}: $($script:TuiAccent)$initial" -NoNewline
+    Tui-ShowCursor
+    $v = Read-Host
+    Tui-HideCursor
+    return ($v -replace '\s+$', '')
+}
+
+function Tui-Confirm([string]$question) {
+    if (-not (Test-TuiInteractive)) { return (Confirm-Action $question) }
+    $ans = Read-Host "$($script:TuiBg)$($script:TuiFg)  $question [s/N]"
+    return ($ans -match '^[sSyY]')
+}
+
+function Tui-Progress([string]$msg) { Write-Host "$($script:TuiBg)`e[2K`r$($script:TuiAccent)[*]$($script:TuiRset) $msg" -NoNewline }
+function Tui-Done { Write-Host "$($script:TuiBg)`e[2K`r$($script:TuiOk)[OK]$($script:TuiRset)" }
+
+# =========================================================================== /TUI
 
 function Save-Text($path, $text) {
     $dir = Split-Path -Parent $path
@@ -300,6 +418,15 @@ function Show-ModChoice {
     if ($Mod) { return $Mod }
 
     $installed = Get-InstalledMod
+
+    if (Test-TuiInteractive) {
+        $tui = Tui-Menu 'Qual mod instalar?' @("Equicord — $($Mods.Equicord.Note)", "Vencord — $($Mods.Vencord.Note)")
+        switch ($tui) {
+            1 { return 'Equicord' }
+            2 { return 'Vencord' }
+            default { throw 'Cancelado.' }
+        }
+    }
 
     Write-Host ''
     if ($installed) {
@@ -713,6 +840,13 @@ function Select-Target($root) {
     if ($Yes) { return $root }
 
     $name = Split-Path -Leaf $root
+
+    if (Test-TuiInteractive) {
+        $tui = Tui-Menu 'Onde instalar?' @("Usar o $name que ja esta aqui", "Baixar e usar outro (Equicord ou Vencord)")
+        if ($tui -eq 2) { return (Install-Mod (Show-ModChoice)) }
+        return $root
+    }
+
     Write-Host '  Onde instalar?' -ForegroundColor White
     Write-Host ''
     Write-Host "    [1] Usar o $name que ja esta aqui" -ForegroundColor Green
@@ -904,6 +1038,31 @@ function Remove-Tor {
 function Select-Proxy {
     if ($Yes) { return '' }
 
+    if (Test-TuiInteractive) {
+        $tui = Tui-Menu 'Como o bypass vai sair para fora do Brasil?' @(
+            'Proxy gratuita (escolhida e testada sozinha)',
+            'Tor automatico (baixa e sobe sozinho)',
+            'Proxy minha (socks5://host:porta)'
+        )
+        switch ($tui) {
+            2 {
+                if (-not (Install-Tor)) {
+                    Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
+                    return ''
+                }
+                return "socks5://127.0.0.1:$TorPort"
+            }
+            3 {
+                $manual = (Tui-Input 'Endereco da proxy').Trim()
+                if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
+                    throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
+                }
+                return $manual
+            }
+            default { return '' }
+        }
+    }
+
     Write-Host ''
     Write-Host '  Como o bypass vai sair para fora do Brasil?' -ForegroundColor White
     Write-Host ''
@@ -940,6 +1099,14 @@ function Select-Proxy {
 
 function Select-Persistence {
     if ($Yes) { return $true }
+
+    if (Test-TuiInteractive) {
+        $tui = Tui-Menu 'Como voce quer deixar o Discord?' @(
+            'Permanente (abre com o mod toda vez)',
+            'Temporario (desfaz quando voce fechar o Discord)'
+        )
+        return $tui -ne 2
+    }
 
     Write-Host ''
     Write-Host '  Como voce quer deixar o Discord?' -ForegroundColor White
@@ -1012,6 +1179,22 @@ function Invoke-RestoreEverything {
 function Show-MainMenu {
     $root = Find-Checkout
     Show-Status $root
+
+    if (Test-TuiInteractive) {
+        $tui = Tui-Menu 'O que voce quer fazer?' @(
+            'Instalar ou atualizar o GoLiveBypass',
+            'Remover so o plugin (o mod continua)',
+            'Restaurar tudo (remove o plugin e desfaz a injecao)',
+            'Sair'
+        )
+        switch ($tui) {
+            1 { Invoke-Install $root }
+            2 { Invoke-Uninstall }
+            3 { Invoke-RestoreEverything }
+            default { Write-Host '  Ate mais.' -ForegroundColor DarkGray }
+        }
+        return
+    }
 
     Write-Host '  O que voce quer fazer?' -ForegroundColor White
     Write-Host ''
