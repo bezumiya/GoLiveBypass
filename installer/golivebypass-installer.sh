@@ -144,6 +144,23 @@ tui_box() {
     printf '%s%s└%s┘%s\n' "$TUI_BG" "$TUI_RSET" "$bottom" "$TUI_RSET" >&2
 }
 
+# Tamanho do terminal (linhas/colunas), com fallback 80x24 quando nao da para ler.
+tui_size() {
+    local s
+    if s="$(stty size 2>/dev/null)"; then
+        set -- $s
+        TUI_ROWS=${1:-24}
+        TUI_COLS=${2:-80}
+    else
+        TUI_ROWS=24
+        TUI_COLS=80
+    fi
+    [ "$TUI_COLS" -le 20 ] && TUI_COLS=80
+}
+
+# Posiciona o cursor em (row, col) — base 1, como o ANSI.
+tui_cursor() { printf '\033[%d;%dH' "$1" "$2" >&2; }
+
 # limpa a partir da linha N (para redesenhar o corpo sem o header).
 tui_clear_below() { printf '\033[%d;0H\033[J' "$1" >&2; }
 
@@ -186,6 +203,7 @@ tui_getkey() {
 }
 
 # tui_menu <title> <items...> → imprime o indice escolhido (1..N) ou "0" para cancelar.
+# Centraliza o box no meio do terminal (horizontal e vertical).
 tui_menu() {
     local title="$1"; shift
     local n sel key i txt
@@ -194,15 +212,26 @@ tui_menu() {
     tui_mouse_on
     tui_hide_cursor
     tui_raw_begin
+    tui_size
+    local w=62
+    local total_rows top pad margin_col margin_row
+    # total de linhas desenhadas: topo + n itens + rodape + hints(2) + 1 folga
+    total_rows=$((n + 5))
+    margin_col=$(( ( TUI_COLS - w ) / 2 ))
+    [ "$margin_col" -lt 1 ] && margin_col=1
+    margin_row=$(( ( TUI_ROWS - total_rows ) / 2 ))
+    [ "$margin_row" -lt 1 ] && margin_row=1
     while :; do
         tui_clear_below 1
-        local w=62
-        local top pad
         top=""
         i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        r=$margin_row
+        tui_cursor $r $margin_col
         printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$TUI_BG" "$TUI_RSET" "$TUI_ACCENT" "$title" "$TUI_RSET" "$TUI_DIM2" "$top" "$TUI_RSET" >&2
         i=0
         for txt in "$@"; do
+            r=$((r+1))
+            tui_cursor $r $margin_col
             pad=""
             local j
             j=0; while [ "$j" -lt $((w-6-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
@@ -213,8 +242,12 @@ tui_menu() {
             fi
             i=$((i+1))
         done
+        r=$((r+1))
+        tui_cursor $r $margin_col
         printf '%s└%s┘%s\n' "$TUI_BG" "$(printf '─%.0s' $(seq_like 1 $((w-2))))" "$TUI_RSET" >&2
-        printf '  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s\n' "$TUI_DIM2" "$TUI_RSET" >&2
+        r=$((r+1))
+        tui_cursor $r $margin_col
+        printf '%s  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s' "$TUI_BG" "$TUI_DIM2" "$TUI_RSET" >&2
         key="$(tui_getkey)"
         case "$key" in
             up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;

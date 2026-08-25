@@ -110,6 +110,21 @@ st_tui_mouse_off()  { printf '\033[?1000l\033[?1006l' >&2; }
 st_tui_hide_cursor() { printf '\033[?25l' >&2; }
 st_tui_show_cursor() { printf '\033[?25h' >&2; }
 
+# Tamanho do terminal + posicionamento (centraliza o box).
+st_tui_size() {
+    local s
+    if s="$(stty size 2>/dev/null)"; then
+        set -- $s
+        ST_ROWS=${1:-24}
+        ST_COLS=${2:-80}
+    else
+        ST_ROWS=24
+        ST_COLS=80
+    fi
+    [ "$ST_COLS" -le 20 ] && ST_COLS=80
+}
+st_tui_cursor() { printf '\033[%d;%dH' "$1" "$2" >&2; }
+
 st_tui_raw_begin() {
     ST_STTY_SAVED="$(stty -g 2>/dev/null || true)"
     stty -icanon -echo 2>/dev/null || true
@@ -149,6 +164,7 @@ st_seq() {
 }
 
 # st_tui_menu <title> <items...> → imprime indice (1..N) ou 0 para cancelar.
+# Centraliza o box no meio do terminal (horizontal e vertical).
 st_tui_menu() {
     local title="$1"; shift
     local n sel key i txt
@@ -157,14 +173,25 @@ st_tui_menu() {
     st_tui_mouse_on
     st_tui_hide_cursor
     st_tui_raw_begin
+    st_tui_size
+    local w=62
+    local total_rows top pad margin_col margin_row r
+    total_rows=$((n + 5))
+    margin_col=$(( ( ST_COLS - w ) / 2 ))
+    [ "$margin_col" -lt 1 ] && margin_col=1
+    margin_row=$(( ( ST_ROWS - total_rows ) / 2 ))
+    [ "$margin_row" -lt 1 ] && margin_row=1
     while :; do
         printf '\033[1;0H\033[J' >&2
-        local w=62 top pad
         top=""
         i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
+        r=$margin_row
+        st_tui_cursor $r $margin_col
         printf '%s%s┌─ %s%s%s ─%s%s%s\n' "$ST_BG" "$ST_RSET" "$ST_ACCENT" "$title" "$ST_RSET" "$ST_DIM2" "$top" "$ST_RSET" >&2
         i=0
         for txt in "$@"; do
+            r=$((r+1))
+            st_tui_cursor $r $margin_col
             pad=""
             local j
             j=0; while [ "$j" -lt $((w-6-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
@@ -175,8 +202,12 @@ st_tui_menu() {
             fi
             i=$((i+1))
         done
+        r=$((r+1))
+        st_tui_cursor $r $margin_col
         printf '%s└%s┘%s\n' "$ST_BG" "$(printf '─%.0s' $(st_seq 1 $((w-2))))" "$ST_RSET" >&2
-        printf '  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s\n' "$ST_DIM2" "$ST_RSET" >&2
+        r=$((r+1))
+        st_tui_cursor $r $margin_col
+        printf '%s  %s[↑↓] navegar · [Enter] escolher · [Esc] cancelar%s' "$ST_BG" "$ST_DIM2" "$ST_RSET" >&2
         key="$(st_tui_getkey)"
         case "$key" in
             up)   [ "$sel" -gt 0 ] && sel=$((sel-1)) ;;
