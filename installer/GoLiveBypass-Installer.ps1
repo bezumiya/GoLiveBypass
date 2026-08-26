@@ -1430,35 +1430,46 @@ function Backup-Plugin($root) {
 function Invoke-CheckUpdate {
     $root = Find-Checkout
     if (-not $root) {
-        Write-Host "  plugin: $(Write-Yellow 'nao encontrado') (rode uma vez para instalar)"
+        Write-Host "  plugin: " -NoNewline
+        Write-Host "nao encontrado" -ForegroundColor Yellow -NoNewline
+        Write-Host " (rode uma vez para instalar)"
         return
     }
 
     $installed = Get-InstalledPluginVersion $root
     if ($installed) {
-        Write-Host "  plugin: instalado ($(Write-Dim "v$installed"))"
+        Write-Host "  plugin: instalado (" -NoNewline
+        Write-Host "v$installed" -ForegroundColor DarkGray -NoNewline
+        Write-Host ")"
     } else {
-        Write-Host "  plugin: $(Write-Yellow 'instalado (versao desconhecida)')"
+        Write-Host "  plugin: " -NoNewline
+        Write-Host "instalado (versao desconhecida)" -ForegroundColor Yellow
     }
 
     $release = Get-LatestRelease
     if (-not $release -or -not $release.Tag) {
-        Write-Host "  remote: $(Write-Dim 'nao consegui consultar (rede ou rate limit)')"
+        Write-Host "  remote: " -NoNewline
+        Write-Host "nao consegui consultar (rede ou rate limit)" -ForegroundColor DarkGray
         return
     }
 
-    Write-Host "  remote: $(Write-Dim "v$($release.Tag)")"
+    Write-Host "  remote: " -NoNewline
+        Write-Host "v$($release.Tag)" -ForegroundColor DarkGray
 
     if (-not $installed) {
-        Write-Host "  resultado: $(Write-Yellow 'versao local desconhecida - rode --update para alinhar')"
+        Write-Host "  resultado: " -NoNewline
+        Write-Host "versao local desconhecida - rode --update para alinhar" -ForegroundColor Yellow
         return
     }
 
     $cmp = Compare-Version $installed $release.Tag
     switch ($cmp) {
-        0  { Write-Host "  resultado: $(Write-Green 'voce esta na versao mais recente')" }
-        1  { Write-Host "  resultado: $(Write-Dim 'versao local mais nova que a release (fork?)')" }
-        -1 { Write-Host "  resultado: $(Write-Yellow 'ha versao nova - rode sem --check-update para atualizar')" }
+        0  { Write-Host "  resultado: " -NoNewline
+        Write-Host "voce esta na versao mais recente" -ForegroundColor Green }
+        1  { Write-Host "  resultado: " -NoNewline
+        Write-Host "versao local mais nova que a release (fork?)" -ForegroundColor DarkGray }
+        -1 { Write-Host "  resultado: " -NoNewline
+        Write-Host "ha versao nova - rode sem --check-update para atualizar" -ForegroundColor Yellow }
     }
 }
 
