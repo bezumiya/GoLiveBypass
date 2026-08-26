@@ -405,7 +405,13 @@ function isManualAddress(proxy) {
     const candidato = parseProxy(proxy);
     if (candidato === null || candidato.host !== match[3]) return false;
     const portStart = Number(match[4]);
-    const portEnd = match[5] !== undefined ? Number(match[5]) : portStart;
+    if (match[5] === undefined) return candidato.port === portStart;
+    // Mesma convencao do parseProxy: range invalido (portEnd < portStart ou > 65535) cai
+    // para porta unica (portStart). Sem isto, isManualAddress rejeita uma porta que o
+    // parseProxy aceitou -- o tryReturnToManual nunca reconhece a ativa como manual e
+    // fica tentando trocar a cada 90s para uma porta que ele mesmo ja' sorteou.
+    const portEnd = Number(match[5]);
+    if (portEnd < portStart || portEnd > 65535) return candidato.port === portStart;
     return candidato.port >= portStart && candidato.port <= portEnd;
 }
 
@@ -1422,7 +1428,12 @@ let lastManualRetryAt = 0;
 // meio de uma Live e o proprio problema que a saida manual foi blindada contra em
 // trySwapByRtt. Recuperar e melhor que ficar preso em gratuita, mas nao a troco de derrubar
 // uma Live que por acaso esteja de pe na saida de fallback.
+//
+// Modo "tor" tem politica propria (so Tor conta) -- trocar a saida ativa Tor por uma proxy
+// nao-Tor configurada em settings.proxy violaria a escolha da pessoa, igual ao que
+// trySwapByRtt e stockReserves ja fazem.
 async function tryReturnToManual() {
+    if (routeMode === "tor") return;
     if (!usingManualProxy || isManualAddress(chosenExit)) return;
     if (Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS) return;
     if (Date.now() - lastManualRetryAt < MANUAL_RETRY_COOLDOWN_MS) return;
@@ -1431,7 +1442,31 @@ async function tryReturnToManual() {
     const manual = manualProxy();
     if (manual === null || manual === "") return;
 
-    if (await probe(manual, HEARTBEAT_TIMEOUT_MS) !== null) trocarPara(manual, "saida manual voltou a responder");
+    const ok = await probe(manual, HEARTBEAT_TIMEOUT_MS);
+    if (ok === null) return;
+
+    // Troca silenciosa: NAO chama trocarPara() para nao disparar o banner amarelo de
+    // "reconexao no meio da sessao" na proxima reconexao. A guarda de midia recente
+    // (MIDIA_RECENTE_MS) acima ja garante que NAO estamos em Live agora, mas a proxima
+    // reconexao pode acontecer minutos depois, com o timestamp de midia ja ultrapassando
+    // o MIDIA_RECENTE_MS (cenario: Live terminou ha 4-5 min, troca acontece em 5min01,
+    // gateway reconecta em 5min02, banner dispara sem motivo). Zera o contador para que
+    // a proxima reconexao seja contada como a primeira desta "sub-sessao" (sem recorrencia
+    // para o banner). Mantem o cooldown de SWAP_COOLDOWN_MS manualmente para nao abrir
+    // porta para trySwapByRtt em seguida.
+    ultimaTrocaProativaEm = Date.now();
+    gatewayReconexoes.length = 0;
+    missedBeats.delete(manual);
+    rttLentoSeguidas.delete(manual);
+    const antiga = chosenExit;
+    const vida = antiga === null || lastExitAt === 0 ? "?" : Math.round((Date.now() - lastExitAt) / 1000) + "s";
+    log("saida.trocada | de=" + (antiga === null ? "nenhuma" : safeProxy(antiga)) +
+        " para=" + safeProxy(manual) +
+        " motivo=saida manual voltou a responder" +
+        " vida_da_antiga=" + vida);
+    chosenExit = manual;
+    lastExitAt = Date.now();
+    gatewayConnCount = 0;
 }
 
 async function beat() {
