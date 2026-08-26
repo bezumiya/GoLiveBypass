@@ -1,0 +1,16 @@
+{
+  "name": "GoLiveBypass",
+  "description": "Devolve o Go Live e a câmera para contas brasileiras",
+  "authors": [
+    {
+      "name": "bezumiya",
+      "id": "1366453661970071633"
+    }
+  ],
+  "version": "1.1.8",
+  "updater": {
+    "type": "github",
+    "id": "bezumiya/GoLiveBypass",
+    "assetName": "goLiveBypass-vencord.zip"
+  }
+}

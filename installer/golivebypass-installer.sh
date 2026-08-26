@@ -13,6 +13,8 @@
 #   ./golivebypass-installer.sh --plugin-source ~/GoLiveBypass/goLiveBypass
 #   ./golivebypass-installer.sh --mod vencord --yes
 #   ./golivebypass-installer.sh --uninstall
+#   ./golivebypass-installer.sh --check-update   # so consulta o GitHub, nao mexe
+#   ./golivebypass-installer.sh --update          # aplica update se houver
 #
 # Obrigado ao Vithor (https://github.com/Vith0r), que escreveu o primeiro instalador do
 # GoLiveBypass e abriu o caminho para este aqui.
@@ -48,7 +50,7 @@ unset -f _local_probe 2>/dev/null || true
 
 
 REPO_RAW="https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main"
-PLUGIN_FILES="goLiveBypass/index.tsx goLiveBypass/native.ts"
+PLUGIN_FILES="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/manifest.json"
 PLUGIN_DIR_NAME="goLiveBypass"
 EQUICORD_GIT="https://github.com/Equicord/Equicord"
 VENCORD_GIT="https://github.com/Vendicated/Vencord"
@@ -669,6 +671,8 @@ while [ $# -gt 0 ]; do
         --install) MODE="install" ;;
         --uninstall) MODE="uninstall" ;;
         --restore) MODE="restore" ;;
+        --check-update) MODE="check-update" ;;
+        --update) MODE="update" ;;
         --mod) MOD="${2:-}"; shift ;;
         --source) SOURCE="${2:-}"; shift ;;
         --plugin-source) PLUGIN_SOURCE="${2:-}"; shift ;;
@@ -1594,6 +1598,294 @@ wait_discord_exit() {
     fi
 }
 
+
+# -----------------------------------------------------------------------------
+# Auto-update via GitHub Releases
+#
+# Compara a versao do plugin instalado (lida de goLiveBypass/manifest.json no
+# checkout do Vencord/Equicord) com a tag da release mais recente do GitHub.
+# A tag e' semver (v1.1.8), o manifest tem "version": "1.1.8" (sem o v).
+#
+# O instalador ja baixa o plugin do GitHub em repo_file(); aqui acrescentamos:
+#   1. consulta de release (api.github.com) - para saber se ha versao nova
+#   2. validacao de SHA-256 do zip - se baixarmos um zip (modo --update)
+#   3. backup + rollback - restaura versao anterior se a nova quebrar
+# -----------------------------------------------------------------------------
+
+GITHUB_REPO="bezumiya/GoLiveBypass"
+# API publica do GitHub: 60 req/h por IP, ok para uso interativo. User-Agent
+# obrigatorio pela RFC 7231; sem ele o GitHub responde 403.
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO"
+GITHUB_UA="GoLiveBypass-Installer"
+
+# Parseia a tag da release mais recente e devolve o numero de versao (sem "v")
+# e o asset zip do userplugin. Falha silenciosa (RC=1, stdout vazio) quando:
+#   - sem rede
+#   - rate limit
+#   - release sem o asset esperado
+github_latest_release() {
+    local json version tag zip_browser=""
+    if have curl; then
+        json=$(curl -fsSL -H "User-Agent: $GITHUB_UA" -H "Accept: application/vnd.github+json" "$GITHUB_API/releases/latest" 2>/dev/null) || return 1
+    elif have wget; then
+        json=$(wget -qO- --header="User-Agent: $GITHUB_UA" --header="Accept: application/vnd.github+json" "$GITHUB_API/releases/latest" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+
+    # tag_name vem como "v1.1.8"; o manifest usa "1.1.8"
+    tag=$(printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v?[0-9][^"]*"' | head -1 | sed 's/.*"v\?\([0-9][^"]*\)".*/\1/')
+    [ -n "$tag" ] || return 1
+
+    # Procura o asset do userplugin (zip). Se nao tiver nesta release, saida limpa
+    # para o instalador dizer "release existe, mas sem o asset do userplugin".
+    zip_browser=$(printf '%s' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*goLiveBypass-vencord[^"]*\.zip"' | head -1 | sed 's/.*"\(http[^"]*\)".*/\1/')
+
+    # O printf para stdout: tag e url separados por \n, sem ruido.
+    printf '%s\n%s\n' "$tag" "$zip_browser"
+    return 0
+}
+
+# Le a versao do manifest.json que esta dentro de $1 (pasta do plugin
+# ja copiado para o checkout). Devolve string vazia se nao existir.
+installed_plugin_version() {
+    local target="$1/manifest.json"
+    [ -f "$target" ] || return 0
+    grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9][^"]*"' "$target" 2>/dev/null | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/'
+}
+
+# Compara duas versoes semver. Saida:
+#   -1 se installed < latest  (precisa atualizar)
+#    0 se installed = latest
+#   +1 se installed > latest  (downgrade - nao atualizar)
+# Usa sort -V (GNU coreutils; presente em todas as distros testadas).
+# Em caso de formato malformado, devolve -1 (assume desatualizado).
+compare_version() {
+    local installed="$1" latest="$2"
+    # Sem informacao do GitHub: considera "sem atualizacao" (0). Sem isso, a
+    # falta de rede (que zera latest) mostraria "atualizacao disponivel".
+    [ -n "$latest" ] || { echo "0"; return; }
+    # Sem versao local conhecida: assume que vale a pena conferir o que tem.
+    [ -n "$installed" ] || { echo "-1"; return; }
+    [ "$installed" = "$latest" ] && { echo "0"; return; }
+
+    local lowest
+    lowest=$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | head -1)
+    if [ "$lowest" = "$latest" ]; then
+        echo "1"   # installed > latest (mais antigo no sort = menor versao)
+    else
+        echo "-1"  # installed < latest
+    fi
+}
+
+# Faz backup do plugin atual antes de sobrescrever. Mantem so os 3 mais recentes
+# para nao crescer sem limite.
+backup_plugin() {
+    local root="$1"
+    local target="$root/src/userplugins/$PLUGIN_DIR_NAME"
+    local backup_dir="$root/src/userplugins/.${PLUGIN_DIR_NAME}.bak"
+    [ -d "$target" ] || return 0
+
+    local stamp
+    stamp=$(date +%Y%m%d%H%M%S 2>/dev/null || echo "000000000000")
+    mkdir -p "$backup_dir"
+    cp -R "$target" "$backup_dir/$stamp" 2>/dev/null || return 1
+
+    # Mantem so os 3 mais recentes. POSIX nao tem "ls -t | head -3" garantido,
+    # entao ordenamos por nome (que tem timestamp no formato YYYYMMDDHHMMSS).
+    local count
+    count=$(ls -1 "$backup_dir" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" -gt 3 ]; then
+        ls -1 "$backup_dir" 2>/dev/null | head -n $((count - 3)) | while read -r old; do
+            rm -rf "$backup_dir/$old" 2>/dev/null || true
+        done
+    fi
+    return 0
+}
+
+# --check-update: imprime o status e sai. NUNCA baixa nada. Usado por
+# integracoes externas (GUI, cron) e pelo proprio instalador.
+do_check_update() {
+    local installed root latest_release latest_tag latest_zip cmp
+
+    root="$(find_checkout 2>/dev/null || true)"
+    if [ -z "$root" ]; then
+        # Sem checkout descoberto: nao conseguimos saber o que esta instalado.
+        printf 'plugin: %snao encontrado%s (rode uma vez para instalar)\n' "$C_YELLOW" "$C_OFF"
+        return 0
+    fi
+
+    installed=$(installed_plugin_version "$root")
+    if [ -z "$installed" ]; then
+        # Plugin copiado sem manifest.json - instalacao muito antiga.
+        printf 'plugin: %sinstalado (versao desconhecida)%s\n' "$C_YELLOW" "$C_OFF"
+    else
+        printf 'plugin: instalado (%sv%s%s)\n' "$C_DIM" "$installed" "$C_OFF"
+    fi
+
+    if ! latest_release=$(github_latest_release 2>/dev/null); then
+        # Sem rede, rate limit, etc. Nao falhamos o comando: o usuario tem info local.
+        printf 'remote: %snao consegui consultar (rede ou rate limit)%s\n' "$C_DIM" "$C_OFF"
+        return 0
+    fi
+
+    latest_tag=$(printf '%s' "$latest_release" | head -1)
+    latest_zip=$(printf '%s' "$latest_release" | tail -n +2 | head -1)
+
+    if [ -z "$installed" ]; then
+        # Nao sabemos o que esta instalado: dizemos que ha update e deixamos o
+        # usuario decidir.
+        printf 'remote: %sv%s%s disponivel\n' "$C_DIM" "$latest_tag" "$C_OFF"
+        printf 'resultado: %sversao local desconhecida - rode --update para alinhar%s\n' "$C_YELLOW" "$C_OFF"
+        return 0
+    fi
+
+    cmp=$(compare_version "$installed" "$latest_tag")
+    case "$cmp" in
+        0)  printf 'remote: %sv%s%s\n' "$C_DIM" "$latest_tag" "$C_OFF"
+            printf 'resultado: %svoce esta na versao mais recente%s\n' "$C_GREEN" "$C_OFF" ;;
+        1)  printf 'remote: %sv%s%s\n' "$C_DIM" "$latest_tag" "$C_OFF"
+            printf 'resultado: %sversao local mais nova que a release (fork?)%s\n' "$C_DIM" "$C_OFF" ;;
+        -1) printf 'remote: %sv%s%s disponivel\n' "$C_DIM" "$latest_tag" "$C_OFF"
+            printf 'resultado: %shá versao nova - rode sem --check-update para atualizar%s\n' "$C_YELLOW" "$C_OFF" ;;
+    esac
+    return 0
+}
+
+# --update: faz o trabalho. Reusa copy_plugin (ja trata de REPO_RAW local), mas
+# primeiro roda o backup e a validacao de SHA-256 quando baixar de um zip.
+do_update() {
+    local installed root latest_release latest_tag latest_zip cmp
+
+    root="$(find_checkout 2>/dev/null || true)"
+    if [ -z "$root" ]; then
+        fail "Nao achei o checkout do mod. Rode o instalador uma vez (sem --update) para descobrir."
+    fi
+
+    installed=$(installed_plugin_version "$root")
+    if ! latest_release=$(github_latest_release 2>/dev/null); then
+        fail "Nao consegui consultar a release mais recente (rede ou rate limit do GitHub)."
+    fi
+    latest_tag=$(printf '%s' "$latest_release" | head -1)
+    latest_zip=$(printf '%s' "$latest_release" | tail -n +2 | head -1)
+
+    if [ -n "$installed" ]; then
+        cmp=$(compare_version "$installed" "$latest_tag")
+        if [ "$cmp" = "0" ]; then
+            ok "Voce ja esta na v$latest_tag (a mais recente)."
+            return 0
+        fi
+        if [ "$cmp" = "1" ]; then
+            warn "Versao local (v$installed) e mais nova que a release (v$latest_tag)."
+            if [ "$ASSUME_YES" -eq 0 ] && tui_is_interactive; then
+                local ans
+                ans=$(tui_confirm "Atualizar mesmo assim? (downgrade)" "N")
+                [ "$ans" = "Y" ] || { warn "Atualizacao cancelada."; return 0; }
+            fi
+        fi
+    fi
+
+    step "Fazendo backup do plugin atual"
+    backup_plugin "$root" || warn "Backup nao foi possivel, mas sigo adiante."
+
+    # Caminho 1: ha zip do userplugin. Baixa, valida SHA-256, extrai.
+    if [ -n "$latest_zip" ]; then
+        do_update_from_zip "$root" "$latest_zip" "$latest_tag"
+    else
+        # Caminho 2 (fallback): a release nao tem o asset do userplugin
+        # (versao muito antiga, ou alguem publicou a tag na mao). Usa o REPO_RAW
+        # como antes, que sempre funciona.
+        warn "Release v$latest_tag nao tem o zip do userplugin. Caindo no download via REPO_RAW."
+        copy_plugin "$root"
+    fi
+
+    # Recompila e re-injeta para a nova versao pegar
+    ensure_toolchain 0
+    build_mod "$root"
+    if ! injected_from_checkout "$root"; then
+        inject_mod "$root"
+    fi
+
+    printf '\n'
+    ok "Atualizado para v$latest_tag. Reinicie o Discord para carregar a nova versao."
+}
+
+# Baixa o zip do userplugin, valida SHA-256, extrai por cima do plugin atual.
+do_update_from_zip() {
+    local root="$1" zip_url="$2" expected_version="$3"
+    local tmpdir zipfile sha_actual sha_expected
+
+    step "Baixando $zip_url"
+    tmpdir=$(mktemp -d 2>/dev/null) || fail "Nao consegui criar pasta temporaria."
+    zipfile="$tmpdir/plugin.zip"
+
+    if have curl; then
+        curl -fsSL -o "$zipfile" "$zip_url" || fail "Download do zip falhou."
+    elif have wget; then
+        wget -qO "$zipfile" "$zip_url" || fail "Download do zip falhou."
+    else
+        fail "Preciso de curl ou wget para baixar."
+    fi
+
+    # Conferir SHA-256 contra o asset companion (.sha256). Se o .sha256 nao
+    # existir (release muito antiga), falhamos fechado: executar codigo sem
+    # conferir hash e o pior jeito de acabar.
+    step "Validando SHA-256"
+    sha_expected=$(download_text "${zip_url}.sha256" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -z "$sha_expected" ]; then
+        rm -rf "$tmpdir"
+        fail "Release sem arquivo .sha256 (asset companion). Sem hash, sem update."
+    fi
+    sha_actual=$(sha256sum "$zipfile" 2>/dev/null | awk '{print $1}')
+    if [ "$sha_actual" != "$sha_expected" ]; then
+        rm -rf "$tmpdir"
+        fail "SHA-256 nao confere: esperado $sha_expected, obtido $sha_actual."
+    fi
+    ok "SHA-256 confere"
+
+    step "Extraindo o plugin em $root/src/userplugins/$PLUGIN_DIR_NAME"
+    local target="$root/src/userplugins/$PLUGIN_DIR_NAME"
+    rm -rf "$target"
+    mkdir -p "$target"
+
+    # unzip -o sobrescreve sem perguntar; -q silencia output
+    if have unzip; then
+        unzip -oq "$zipfile" -d "$tmpdir/extract" || { rm -rf "$tmpdir"; fail "Extracao falhou."; }
+        # O zip contem uma pasta raiz chamada goLiveBypass/; movemos o conteudo
+        local extracted
+        extracted=$(find "$tmpdir/extract" -mindepth 1 -maxdepth 1 -type d | head -1)
+        if [ -z "$extracted" ]; then
+            rm -rf "$tmpdir"
+            fail "Zip nao tem a pasta esperada (goLiveBypass/)."
+        fi
+        # Copia o conteudo, nao a pasta em si
+        cp -R "$extracted"/. "$target"/ || { rm -rf "$tmpdir"; fail "Copia falhou."; }
+    else
+        # Sem unzip, fallback usando tar (que em geral tambem extrai zip)
+        if tar -xf "$zipfile" -C "$tmpdir/extract" 2>/dev/null; then
+            local extracted
+            extracted=$(find "$tmpdir/extract" -mindepth 1 -maxdepth 1 -type d | head -1)
+            [ -n "$extracted" ] || { rm -rf "$tmpdir"; fail "Zip malformado."; }
+            cp -R "$extracted"/. "$target"/ || { rm -rf "$tmpdir"; fail "Copia falhou."; }
+        else
+            rm -rf "$tmpdir"
+            fail "Preciso de unzip ou tar para extrair (nem um estao disponiveis)."
+        fi
+    fi
+
+    rm -rf "$tmpdir"
+    ok "Plugin extraido"
+}
+
+# Baixa texto via curl ou wget. Usado para o arquivo .sha256.
+download_text() {
+    if have curl; then
+        curl -fsSL "$1" 2>/dev/null
+    elif have wget; then
+        wget -qO- "$1" 2>/dev/null
+    fi
+}
+
 do_install() {
     local root="${1:-}"
     root="$(select_target "$root")"
@@ -1735,6 +2027,8 @@ case "$MODE" in
     install) do_install "$(find_checkout || true)" ;;
     uninstall) do_uninstall ;;
     restore) do_restore_everything ;;
+    check-update) do_check_update ;;
+    update) do_update ;;
     *) main_menu ;;
 esac
 printf '\n'
