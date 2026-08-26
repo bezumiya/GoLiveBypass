@@ -84,7 +84,89 @@ C_OFF=$(printf '\033[0m'); C_CYAN=$(printf '\033[36m'); C_GREEN=$(printf '\033[3
 step() { printf '  %s[*]%s %s\n' "$C_CYAN" "$C_OFF" "$1" >&2; }
 ok()   { printf '  %s[OK]%s %s\n' "$C_GREEN" "$C_OFF" "$1" >&2; }
 warn() { printf '  %s[!]%s %s\n' "$C_YELLOW" "$C_OFF" "$1" >&2; }
-fail() { printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2; exit 1; }
+fail() {
+    printf '  %s[X]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2
+    # Report automatico: so quando esta de fato falhando (e nao em --yes de teste).
+    if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
+        report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
+    fi
+    exit 1
+}
+
+# =========================================================================== Report de bugs
+# Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
+# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# O envio NUNCA bloqueia o fluxo: falhou o report, avisa e segue.
+
+BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
+BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
+
+# Sanitiza texto: credenciais em URL, tokens Discord, query de gateway, e a proxy salva.
+report_sanitize() {
+    local texto="$1"
+    # credenciais em URL: scheme://usuario:senha@host -> scheme://usuario:***@host
+    texto="$(printf '%s' "$texto" | sed -E 's#([a-z][a-z0-9+.-]*://)([^/ @:]+):([^/@]+)@#\1\2:***@#g')"
+    # tokens Discord (mfa.* / JWT)
+    texto="$(printf '%s' "$texto" | sed -E 's/\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b/***/g')"
+    # query de gateway: so o host interessa
+    texto="$(printf '%s' "$texto" | sed -E 's#(https://gateway[^ ?]+)\?[^ ]*#\1?<params>#g')"
+    # proxy personalizada salva (host/porta e URL inteira)
+    if [ -f "$INSTALL_DIR/settings.json" ]; then
+        local segredo
+        segredo="$(sed -n 's/.*"proxy"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INSTALL_DIR/settings.json" | head -1)"
+        if [ -n "$segredo" ]; then
+            texto="$(printf '%s' "$texto" | sed "s#$(printf '%s' "$segredo" | sed 's/[&/\]/\\&/g')#<proxy-pessoal>#g")"
+        fi
+    fi
+    printf '%s' "$texto"
+}
+
+# Envia o report para a API. Devolve 0 em caso de sucesso (issue aberta).
+report_send() {
+    local titulo="$1" descricao="$2"
+    local corpo
+    corpo="$(report_sanitize "$descricao")"
+    # JSON minimo: title, description, includeLogs
+    local json
+    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
+        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
+        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    if have curl; then
+        curl -fsS -X POST "$BUG_API_URL" \
+            -H "Authorization: Bearer $BUG_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$json" >/dev/null 2>&1 && return 0
+    elif have wget; then
+        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+# Chamada unica de report: mostra aviso e tenta enviar (sem bloquear).
+report_error() {
+    local titulo="$1"
+    local desc="$(cat 2>/dev/null || true)"
+    if [ -s /tmp/glb-report-context.txt ]; then
+        desc="$(cat /tmp/glb-report-context.txt 2>/dev/null || true) $desc"
+    fi
+    # Aqui entra a cauda do log se existir
+    if [ -f "$INSTALL_DIR/golivebypass.log" ]; then
+        desc="$desc
+$(tail -n 40 "$INSTALL_DIR/golivebypass.log" 2>/dev/null || true)"
+    fi
+    if [ -n "$desc" ]; then
+        printf '  %s[!]%s Ocorreu um erro. Enviando relatorio automatico (issue no GitHub)...%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+        if report_send "$titulo" "$desc"; then
+            printf '  %s[OK]%s Relatorio enviado. Obrigado — os devs vao ver a issue no GitHub.%s\n' "$C_GREEN" "$C_OFF" "$C_OFF" >&2
+        else
+            printf '  %s[!]%s Nao consegui enviar o relatorio automatico. Rode com --json e mande a saida.%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+        fi
+    else
+        printf '  %s[!]%s Nao consegui montar o relatorio (sem logs). Mande o erro acima.%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+    fi
+}
+
+# =========================================================================== /Report de bugs
 
 # =========================================================================== TUI (standalone)
 # Interface no estilo OpenCode (dark, caixas, setas/Enter), ANSI puro, POSIX.
@@ -266,6 +348,10 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Em automacao (--yes) o report automatico nao deve spammar a API: quase sempre essas
+# rodadas sao de teste/CI. Usuario de verdade sem --yes reporta.
+[ "$ASSUME_YES" -eq 1 ] && REPORT_NO_AUTO=1 || REPORT_NO_AUTO=0
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -1059,7 +1145,7 @@ if [ "$MODE" = "uninstall" ]; then
         start_discord "$(printf '%s\n' "$FOUND" | head -1)"
         exit 0
     fi
-    exit 1
+    fail "Nao consegui desinstalar de todos — a elevacao pode ter falhado. Enviando relatorio."
 fi
 
 # Igual ao --uninstall, mas sem reabrir o Discord: usado pela GUI no boot para reverter
@@ -1161,8 +1247,7 @@ start_discord "$(printf '%s\n' "$FOUND" | head -1)"
 if [ "$injected" -eq 0 ]; then
     # Nada foi injetado: nao reabrir (senao a GUI mostraria um "sucesso" mentiroso) e
     # falhar de verdade para o chamador enxergar.
-    printf '\n  %sNADA foi injetado — a elevacao falhou ou nenhum Discord foi tocado.%s\n' "$C_RED" "$C_OFF" >&2
-    exit 1
+    fail "NADA foi injetado — a elevacao falhou ou nenhum Discord foi tocado."
 fi
 printf '\n  %sDiscord aberto com o GoLiveBypass.%s\n' "$C_GREEN" "$C_OFF" >&2
 

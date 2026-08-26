@@ -78,7 +78,13 @@ fi
 step() { printf '  %s[*] %s%s\n' "$C_DIM" "$1" "$C_OFF" >&2; }
 ok()   { printf '  %s[OK] %s%s\n' "$C_GREEN" "$1" "$C_OFF" >&2; }
 warn() { printf '  %s[!] %s%s\n' "$C_YELLOW" "$1" "$C_OFF" >&2; }
-fail() { printf '\n  %s[X] %s%s\n\n' "$C_RED" "$1" "$C_OFF" >&2; exit 1; }
+fail() {
+    printf '\n  %s[X] %s%s\n\n' "$C_RED" "$1" "$C_OFF" >&2
+    if [ "${REPORT_NO_AUTO:-0}" -eq 0 ]; then
+        report_error "Falha no instalador GoLiveBypass: $1" 2>&1 || true
+    fi
+    exit 1
+}
 
 banner() {
     printf '\n  %sGoLiveBypass%s\n' "$C_CYAN$C_BOLD" "$C_OFF"
@@ -96,6 +102,56 @@ confirm() {
         *) return 1 ;;
     esac
 }
+
+# =========================================================================== Report de bugs
+# Quando o instalador falha, monta um diagnostico (versao, OS, log sanitizado) e chama
+# a mesma API de bugs da GUI. A issue abre automaticamente no bezumiya/GoLiveBypass.
+# O envio NUNCA bloqueia o fluxo.
+
+BUG_API_URL="https://api.skyplaceia.com/bugs/v1/reports"
+BUG_API_TOKEN="c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511"
+
+report_sanitize() {
+    local texto="$1"
+    texto="$(printf '%s' "$texto" | sed -E 's#([a-z][a-z0-9+.-]*://)([^/ @:]+):([^/@]+)@#\1\2:***@#g')"
+    texto="$(printf '%s' "$texto" | sed -E 's/\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b/***/g')"
+    texto="$(printf '%s' "$texto" | sed -E 's#(https://gateway[^ ?]+)\?[^ ]*#\1?<params>#g')"
+    printf '%s' "$texto"
+}
+
+report_send() {
+    local titulo="$1" descricao="$2" corpo json
+    corpo="$(report_sanitize "$descricao")"
+    json="$(printf '{"title":"%s","description":"%s","includeLogs":true}' \
+        "$(printf '%s' "$titulo" | sed 's/"/\\"/g')" \
+        "$(printf '%s' "$corpo" | sed 's/"/\\"/g')")"
+    if have curl; then
+        curl -fsS -X POST "$BUG_API_URL" -H "Authorization: Bearer $BUG_API_TOKEN" -H "Content-Type: application/json" -d "$json" >/dev/null 2>&1 && return 0
+    elif have wget; then
+        echo "$json" | wget -qO- --post-data=- --header="Authorization: Bearer $BUG_API_TOKEN" --header="Content-Type: application/json" "$BUG_API_URL" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+report_error() {
+    local titulo="$1" desc=""
+    # pega a ultima mensagem de erro visivel (passthrough) + cauda de logs
+    if [ -f "$INSTALL_DIR/golivebypass.log" ]; then
+        desc="$(tail -n 40 "$INSTALL_DIR/golivebypass.log" 2>/dev/null || true)"
+    fi
+    if [ -n "$desc" ]; then
+        printf '  %s[!]%s Ocorreu um erro. Enviando relatorio automatico (issue no GitHub)...%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+        if report_send "$titulo" "$desc"; then
+            printf '  %s[OK]%s Relatorio enviado. Obrigado — os devs vao ver a issue no GitHub.%s\n' "$C_GREEN" "$C_OFF" "$C_OFF" >&2
+        else
+            printf '  %s[!]%s Nao consegui enviar o relatorio automatico. Mande esta saida.%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+        fi
+    else
+        printf '  %s[!]%s Nao consegui montar o relatorio (sem logs). Mande o erro acima.%s\n' "$C_YELLOW" "$C_OFF" "$C_OFF" >&2
+    fi
+}
+
+# =========================================================================== /Report de bugs
 
 # =========================================================================== TUI
 # Interface no estilo OpenCode: dark, caixas, setas/Enter, mouse SGR onde o terminal
@@ -313,6 +369,10 @@ tui_done() {
 # =========================================================================== /TUI
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Em automacao (--yes) o report automatico nao deve spammar a API (test/CI).
+# Usuario de verdade sem --yes reporta.
+[ "$ASSUME_YES" -eq 1 ] && REPORT_NO_AUTO=1 || REPORT_NO_AUTO=0
 
 # O id do flatpak a que um caminho pertence, ou nada se o caminho nao for de flatpak. Serve
 # para os dois lugares onde o Discord de flatpak aparece: o deploy em .../flatpak/app/<id>/ e

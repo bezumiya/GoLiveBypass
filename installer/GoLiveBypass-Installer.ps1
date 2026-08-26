@@ -80,6 +80,53 @@ function Confirm-Action($question) {
     return (Read-Host "  $question [s/N]") -match '^[sSyY]'
 }
 
+# =========================================================================== Report de bugs
+# Igual a GUI: ao falhar, monta diagnostico sanitizado e POST na API de bugs
+# (abre issue no bezumiya/GoLiveBypass). Nunca bloqueia o fluxo.
+
+$script:BugApiUrl = 'https://api.skyplaceia.com/bugs/v1/reports'
+$script:BugApiToken = 'c3d0bff691ecc3ddc6f6ca10037b9ac967c62547e681d3749204e50800504511'
+
+function Invoke-BugReport([string]$title, [string]$description) {
+    if ($Yes) { return }  # automacao: nao spammar a API
+    $desc = Invoke-SanitizeBug $description
+    $body = @{ title = $title; description = $desc; includeLogs = $true } | ConvertTo-Json
+    try {
+        Invoke-RestMethod -Method Post -Uri $script:BugApiUrl -Body $body -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($script:BugApiToken)" } -TimeoutSec 15 -ErrorAction Stop | Out-Null
+        Write-Host ''
+        Write-Host '  [OK] Relatorio enviado. Obrigado — os devs vao ver a issue no GitHub.' -ForegroundColor Green
+    } catch {
+        Write-Host ''
+        Write-Host '  [!] Nao consegui enviar o relatorio automatico. Rode de novo e mande a saida.' -ForegroundColor Yellow
+    }
+}
+
+function Invoke-SanitizeBug([string]$text) {
+    $text = [regex]::Replace($text, '([a-z][a-z0-9+.-]*://)([^/ @:]+):([^/@]+)@', '$1$2:***@')
+    $text = [regex]::Replace($text, '\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b', '***')
+    $text = [regex]::Replace($text, '(https://gateway[^ ?]+)\?[^ ]*', '$1?<params>')
+    # proxy personalizada digitada na instalacao (nunca sai)
+    if ($script:UltimaProxy) { $text = $text.Replace($script:UltimaProxy, '<proxy-pessoal>') }
+    return $text
+}
+
+function Invoke-SendAutoReport([string]$summary, [string]$extra = '') {
+    if ($Yes) { return }
+    $desc = "$extra`n`n--- logs ---`n"
+    try {
+        $logDir = Join-Path $env:LOCALAPPDATA 'GoLiveBypass'
+        foreach ($log in @('golivebypass.log', 'gui.log')) {
+            $lp = Join-Path $logDir $log
+            if (Test-Path -LiteralPath $lp) {
+                $desc += (Get-Content -LiteralPath $lp -Tail 40 -ErrorAction SilentlyContinue | Out-String)
+            }
+        }
+    } catch { }
+    Invoke-BugReport $summary $desc
+}
+
+# =========================================================================== /Report de bugs
+
 # =========================================================================== TUI (PowerShell)
 # Interface no estilo OpenCode: dark, caixas, setas/Enter. Mouse: o console do Windows
 # nao expoe cliques de forma confiavel por aqui; a navegacao e por teclado (up/down/Enter/Esc/j/k)
@@ -1232,6 +1279,9 @@ try {
         Write-Host "      linha $($info.ScriptLineNumber): $($info.Line.Trim())" -ForegroundColor DarkGray
     }
     Write-Host '      Se for relatar, mande esta linha junto.' -ForegroundColor DarkGray
+
+    # Report automatico (se nao for automacao): a issue abre no GitHub.
+    Invoke-SendAutoReport "Falha no instalador GoLiveBypass: $($_.Exception.Message)" $_.Exception.Message
     exit 1
 }
 
