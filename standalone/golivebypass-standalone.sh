@@ -91,6 +91,11 @@ should_report() {
     case "$1" in
         # --- cancelamento e instrucoes de uso ---
         "Cancelado.") return 1 ;;
+        # Cancelamento via Ctrl+C: ver nota no installer.sh.
+        *"cancelada pelo usu"*) return 1 ;;
+        *"canceled by the user"*) return 1 ;;
+        *"interrompido"*) return 1 ;;
+        *"terminated"*) return 1 ;;
         "O Discord nao fechou"*) return 1 ;;
         # --- input / uso do usuario ---
         "Opcao desconhecida: "*) return 1 ;;

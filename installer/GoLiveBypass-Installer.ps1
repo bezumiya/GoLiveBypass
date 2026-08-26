@@ -134,6 +134,12 @@ function Invoke-SendAutoReport([string]$summary, [string]$extra = '') {
 function Test-ShouldReport([string]$msg) {
     # cancelamento e instrucoes de uso
     if ($msg -eq 'Cancelado.') { return $false }
+    # Cancelamento via Ctrl+C no Read-Host: PowerShell lanca a mensagem nativa
+    # "Esse comando nao pode ser executado devido ao erro: A operacao foi cancelada
+    # pelo usuario." (PT-BR) / "This command cannot be executed ... The operation
+    # was canceled by the user." (EN). E cancelamento do usuario, nao bug.
+    if ($msg -like '*cancelada pelo usu*rio*') { return $false }
+    if ($msg -like '*canceled by the user*') { return $false }
     if ($msg -like 'O Discord nao fechou*') { return $false }
     # input / uso do usuario
     if ($msg -like 'Opcao desconhecida: *') { return $false }

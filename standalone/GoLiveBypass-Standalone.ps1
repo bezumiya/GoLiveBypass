@@ -124,6 +124,9 @@ function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
 function Test-ShouldReport([string]$msg) {
     # cancelamento e instrucoes de uso
     if ($msg -eq 'Cancelado.') { return $false }
+    # Cancelamento via Ctrl+C no Read-Host: ver nota no installer.ps1.
+    if ($msg -like '*cancelada pelo usu*rio*') { return $false }
+    if ($msg -like '*canceled by the user*') { return $false }
     if ($msg -like 'O Discord nao fechou*') { return $false }
     # input / uso do usuario
     if ($msg -like 'Opcao desconhecida: *') { return $false }
