@@ -49,6 +49,7 @@ declare global {
       onDevLogWindowClosed: (callback: () => void) => void;
       onRefreshStartup: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
+      onTorWatchdogRecuperado: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
       setTheme: (theme: string) => void;
       reportBug: (payload: { title: string; description: string; includeLogs: boolean }) => Promise<{
@@ -509,6 +510,10 @@ try {
 // A bandeja tambem tem esses controles; sem os avisos, os dois ficariam dessincronizados.
 window.api.onRefreshStartup(refreshStartup);
 window.api.onRefreshStatus(updateStatus);
+
+// O watchdog do Tor ressuscitou o daemon no meio da sessao: reabre o aviso do Ctrl+R
+// (a reconexao do gateway pode travar o video ate um reload — armadilha conhecida).
+window.api.onTorWatchdogRecuperado(() => setWarningOpen(true));
 
 // ---------------------------------------------------------------------------
 // Report de bug — dialog + IPC

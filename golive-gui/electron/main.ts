@@ -16,6 +16,7 @@ import fs from "fs";
 import { createHash } from "crypto";
 import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { bypassCode } from "./bypass";
+import { createTorWatchdog, type TorWatchdog } from "./torwatchdog";
 import { runScript } from "./linux-helper";
 import { setupUpdater, isQuittingForUpdate } from "./updater";
 import * as logger from "./logger";
@@ -569,8 +570,14 @@ if (!gotLock) {
       garantirTor()
         .then((r) => {
           if (!r.ok) console.warn("[tor] nao subiu na abertura:", r.error);
+          // Se o Discord ja esta injetado (sessao viva do boot anterior), o watchdog retoma
+          // a vigia — sem ele, um daemon que morreu na sessao antiga seguiria cego.
+          if (sessaoAtiva()) torWatchdogIniciar();
         })
         .catch((error) => console.error("[tor] falha ao preparar na abertura:", error));
+    } else {
+      // Modo nao-tor: nada a vigiar.
+      torWatchdogParar();
     }
 
     // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
@@ -600,6 +607,7 @@ app.on("before-quit", (event) => {
   cleaningUp = true;
   // O Tor embutido morre junto com o app (e o Discord restaurado nao fica dependente dele).
   stopTor();
+  torWatchdogParar();
   // O quit e limpo: o marcador de sessao morre aqui, para o boot seguinte nao tentar
   // reverter nada (a reversao abaixo e a que vale).
   clearSessionMarker();
@@ -961,6 +969,8 @@ async function activateBypass(event: any, proxyAddress: string = "") {
     // vai escrita no settings.json logo abaixo.
     const tor = await garantirTor();
     if (!tor.ok) throw new Error(`Nao consegui preparar o Tor: ${tor.error ?? "erro desconhecido"}`);
+    // A partir daqui a sessao e tor: o watchdog vigia o daemon e ressuscita se morrer no meio.
+    torWatchdogIniciar();
   }
 
   for (const install of installs) {
@@ -1031,6 +1041,9 @@ async function deactivateAll() {
     clearBundleQuarantine(install.bundlePath);
     startDiscord(install);
   }
+
+  // Sessao terminou: o watchdog nao tem mais o que vigiar.
+  torWatchdogParar();
 
   // Reverteu (de verdade): a sessao terminou, o marcador nao vale mais.
   clearSessionMarker();
@@ -1290,6 +1303,16 @@ function clearSessionMarker() {
     fs.rmSync(markerFile(), { force: true });
   } catch {
     // inofensivo
+  }
+}
+
+// Ha uma sessao de bypass ativa agora? (marcador escrito na ativacao, limpo no quit limpo).
+// Se o app reabre com o marcador, o Discord esta injetado e o watchdog deve retomar a vigia.
+function sessaoAtiva(): boolean {
+  try {
+    return fs.existsSync(markerFile());
+  } catch {
+    return false;
   }
 }
 
@@ -1769,6 +1792,74 @@ function stopTor() {
     torVerificado = false;
   }
 }
+
+// =========================================================================== watchdog do Tor
+// Vigia o daemon da porta 9060 durante a sessao (modo tor). Se ele morre/trava no meio,
+// ressuscita na MESMA porta (sem trocar de saida) e avisa que um Ctrl+R pode ser preciso.
+// Ver AGENTS.md: trocar de saida por RTT e sempre pior; so recuperar a morte real.
+
+let torWatchdog: TorWatchdog | null = null;
+let torWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+function criarTorWatchdog(): TorWatchdog {
+  return createTorWatchdog({
+    portaViva,
+    torEntregando,
+  });
+}
+
+function torWatchdogIniciar() {
+  if (readNetMode() !== "tor") return;
+  if (torWatchdog === null) torWatchdog = criarTorWatchdog();
+  torWatchdog.setActive(true);
+  if (torWatchdogTimer !== null) return;
+  torWatchdogTimer = setInterval(() => {
+    void torWatchdog!.check().then((acao) => {
+      if (acao !== "restart") return;
+      console.warn("[tor] watchdog: daemon morreu/travou na porta em uso; ressuscitando");
+      void torWatchdogRecuperar();
+    });
+  }, 30_000);
+}
+
+function torWatchdogParar() {
+  if (torWatchdog !== null) torWatchdog.setActive(false);
+  if (torWatchdogTimer !== null) {
+    clearInterval(torWatchdogTimer);
+    torWatchdogTimer = null;
+  }
+}
+
+async function torWatchdogRecuperar() {
+  try {
+    // Mata o daemon zumbi ANTES de tentar subir de novo: spawnTor so funciona com a porta
+    // livre, e o erro era "Address already in use" (issue #51) quando so ressuscitava por cima.
+    stopTor();
+    const r = await garantirTor();
+    if (r.ok) {
+      saveTorAddr(`127.0.0.1:${r.porta}`);
+      console.log("[tor] watchdog: Tor de volta na porta", r.porta);
+      avisarTorReiniciado();
+    } else {
+      console.warn("[tor] watchdog: nao consegui ressuscitar:", r.error);
+    }
+  } catch (error) {
+    console.error("[tor] watchdog: falha ao recuperar:", error);
+  }
+}
+
+// Toast na janela: a reconexao do gateway no meio de uma call costuma travar o video ate um
+// Ctrl+R. Avisar isso e melhor do que fingir que nao aconteceu (armadilha conhecida).
+function avisarTorReiniciado() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("tor-watchdog-recuperado");
+    }
+  } catch {
+    // janela fechada na bandeja: sem toast, sem problema
+  }
+}
+// =========================================================================== /watchdog
 
 // Baixa e extrai o Tor embutido, se preciso. Devolve true quando o binario existe.
 async function ensureTor(): Promise<{ ok: boolean; error?: string }> {

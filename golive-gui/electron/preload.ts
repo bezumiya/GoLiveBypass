@@ -30,6 +30,9 @@ import { ipcRenderer } from 'electron';
   },
   onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
   onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
+  // O watchdog do Tor ressuscitou o daemon no meio da sessao: a janela reabre o aviso do
+  // Ctrl+R (a reconexao do gateway pode travar o video ate um reload).
+  onTorWatchdogRecuperado: (callback: () => void) => ipcRenderer.on('tor-watchdog-recuperado', callback),
   resizeWindow: (height: number) => ipcRenderer.send('resize-window', height),
   setTheme: (theme: string) => ipcRenderer.send('set-theme', theme),
   reportBug: (payload: { title: string; description: string; includeLogs: boolean }) => ipcRenderer.invoke('report-bug', payload),
