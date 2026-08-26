@@ -394,6 +394,21 @@ function manualProxy() {
 // entrar neles so custa (ver trySwapByRtt e stockReserves).
 const usingManualProxy = typeof settings.proxy === "string" && settings.proxy.trim() !== "" && parseProxy(settings.proxy) !== null;
 
+// A saida ativa e uma das portas configuradas pela pessoa? Comparacao por string falha
+// para range: manualProxy() sorteia uma porta nova a cada chamada, entao a mesma saida
+// ativa nunca bateria com uma leitura nova. Aqui confere host e se a porta cai dentro do
+// intervalo configurado (um range vira um intervalo de 1 porta so).
+function isManualAddress(proxy) {
+    if (proxy === null || !usingManualProxy) return false;
+    const match = PROXY_RE.exec(String(settings.proxy).trim());
+    if (match === null) return false;
+    const candidato = parseProxy(proxy);
+    if (candidato === null || candidato.host !== match[3]) return false;
+    const portStart = Number(match[4]);
+    const portEnd = match[5] !== undefined ? Number(match[5]) : portStart;
+    return candidato.port >= portStart && candidato.port <= portEnd;
+}
+
 // ------------------------------------------------------------------ falar com uma saida
 
 function readReply(socket, size, done) {
@@ -1396,6 +1411,29 @@ function refreshExit() {
 // conserta isso depois que a conexao ja falhou; o batimento existe para que ela nao falhe: de
 // trinta em trinta segundos a ativa e as reservas sao reconferidas, e a troca acontece antes de
 // o Discord precisar.
+// Quanto esperar entre tentativas de voltar pra saida manual depois que a sessao caiu dela
+// (para free/pool). Uma queda na VM pode ser passageira -- medido ao vivo em 2026-08-26: uma
+// saida manual ficou fora por 48min e voltou sozinha -- e sem isto o app nunca mais tentava a
+// saida de confianca da pessoa, nem com ela ja saudavel de novo: so reabrir o Discord resolvia.
+const MANUAL_RETRY_COOLDOWN_MS = 90_000;
+let lastManualRetryAt = 0;
+
+// So mexe fora de chamada/transmissao em andamento (ultimaMidiaEm): reconectar o gateway no
+// meio de uma Live e o proprio problema que a saida manual foi blindada contra em
+// trySwapByRtt. Recuperar e melhor que ficar preso em gratuita, mas nao a troco de derrubar
+// uma Live que por acaso esteja de pe na saida de fallback.
+async function tryReturnToManual() {
+    if (!usingManualProxy || isManualAddress(chosenExit)) return;
+    if (Date.now() - ultimaMidiaEm < MIDIA_RECENTE_MS) return;
+    if (Date.now() - lastManualRetryAt < MANUAL_RETRY_COOLDOWN_MS) return;
+    lastManualRetryAt = Date.now();
+
+    const manual = manualProxy();
+    if (manual === null || manual === "") return;
+
+    if (await probe(manual, HEARTBEAT_TIMEOUT_MS) !== null) trocarPara(manual, "saida manual voltou a responder");
+}
+
 async function beat() {
     // Um batimento lento nunca pode se sobrepor ao proximo: seriam duas rodadas de conexoes na
     // mesma saida ao mesmo tempo, que e justamente o que derruba as fracas.
@@ -1416,6 +1454,7 @@ async function beat() {
             return;
         }
         await checkPool();
+        await tryReturnToManual();
     } catch (error) {
         // Batimento e rede de seguranca. Se ele falhar, o caminho antigo continua valendo:
         // falhar no trafego vivo, cair para a reserva e, no fim, o refreshExit.
