@@ -72,3 +72,54 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
+
+  release-assets:
+    # Sobe os assets de update que NAO dependem do electron-builder: o zip do
+    # userplugin Vencord e o bypass standalone "puro". Roda em paralelo com os
+    # builds da GUI (sao independentes).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "${{ inputs.tag }}"
+
+      - name: Determinar versao da tag
+        id: version
+        run: |
+          # Semver: v1.2.3 -> 1.2.3
+          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          # Bypass standalone tem versao no nome (download manual, sem auto-update).
+          echo "bypass_basename=GoLiveBypass-${GITHUB_REF_NAME#v}-bypass" >> $GITHUB_OUTPUT
+          # Userplugin tem nome fixo (igual ao assetName do manifest.json) para que o
+          # Vencord sempre baixe o asset mais recente independente da tag.
+          echo "vencord_basename=goLiveBypass-vencord" >> $GITHUB_OUTPUT
+
+      - name: Zip do userplugin Vencord (Onda 2 do auto-update)
+        run: |
+          cd goLiveBypass
+          # Garante que o manifest tem a versao da tag (CI e a fonte da verdade).
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${{ steps.version.outputs.version }}\"/" manifest.json
+          cd ..
+          zip -r "${{ steps.version.outputs.vencord_basename }}.zip" goLiveBypass/
+
+      - name: Bypass standalone "puro" (para distribuicao manual)
+        run: |
+          cp standalone/golivebypass.js "${{ steps.version.outputs.bypass_basename }}.js"
+
+      - name: SHA-256 dos novos assets
+        run: |
+          sha256sum "${{ steps.version.outputs.vencord_basename }}.zip" > "${{ steps.version.outputs.vencord_basename }}.zip.sha256"
+          sha256sum "${{ steps.version.outputs.bypass_basename }}.js" > "${{ steps.version.outputs.bypass_basename }}.js.sha256"
+
+      - name: Upload dos assets para a release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ inputs.tag }}"
+          files: |
+            ${{ steps.version.outputs.vencord_basename }}.zip
+            ${{ steps.version.outputs.vencord_basename }}.zip.sha256
+            ${{ steps.version.outputs.bypass_basename }}.js
+            ${{ steps.version.outputs.bypass_basename }}.js.sha256
+          fail_on_unmatched_files: true
