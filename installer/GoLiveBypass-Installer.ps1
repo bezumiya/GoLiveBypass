@@ -10,6 +10,8 @@
       .\GoLiveBypass-Installer.ps1 -PluginSource "C:\caminho\do\GoLiveBypass\goLiveBypass"
       .\GoLiveBypass-Installer.ps1 -Mod Equicord -Yes
       .\GoLiveBypass-Installer.ps1 -Mode Uninstall
+      .\GoLiveBypass-Installer.ps1 -Mode CheckUpdate   # so consulta o GitHub, nao mexe
+      .\GoLiveBypass-Installer.ps1 -Mode Update        # aplica update se houver
 
     Obrigado ao Vithor (https://github.com/Vith0r), que escreveu o primeiro instalador do
     GoLiveBypass e abriu o caminho para este aqui.
@@ -17,7 +19,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Uninstall', 'Restore')]
+    [ValidateSet('Menu', 'Install', 'Uninstall', 'Restore', 'CheckUpdate', 'Update')]
     [string] $Mode = 'Menu',
 
     [ValidateSet('Equicord', 'Vencord')]
@@ -41,7 +43,7 @@ $ErrorActionPreference = 'Stop'
 try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
 
 $RepoRaw = 'https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main'
-$PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts')
+$PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/manifest.json')
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
 
@@ -204,23 +206,32 @@ function Test-TuiInteractive {
     return (Test-TuiAnsi)
 }
 
-function Tui-Color($fg, $bg) { "`e[$fg`e[$bg" }  # acento/reset via ANSI
+function Tui-Color($fg, $bg) { "$([char]27)[$fg$([char]27)[$bg" }  # acento/reset via ANSI
 
 # Pequena paleta da TUI (sempre ANSI; o console padrao do Windows suporta no WT/PowerShell 7).
-$script:TuiBg = "`e[48;5;235m"
-$script:TuiFg = "`e[38;5;252m"
-$script:TuiAccent = "`e[38;5;75m"
-$script:TuiOk = "`e[38;5;114m"
-$script:TuiDim = "`e[38;5;240m"
-$script:TuiBold = "`e[1m"
-$script:TuiRset = "`e[0m"
+$script:TuiBg = "$([char]27)[48;5;235m"
+$script:TuiFg = "$([char]27)[38;5;252m"
+$script:TuiAccent = "$([char]27)[38;5;75m"
+$script:TuiOk = "$([char]27)[38;5;114m"
+$script:TuiDim = "$([char]27)[38;5;240m"
+$script:TuiBold = "$([char]27)[1m"
+$script:TuiRset = "$([char]27)[0m"
 
-function Tui-HideCursor { Write-Host "`e[?25l" -NoNewline }
-function Tui-ShowCursor { Write-Host "`e[?25h" -NoNewline }
-function Tui-ClearBelow([int]$row) { Write-Host "`e[$row;0H`e[J" -NoNewline }
+function Tui-HideCursor { Write-Host "$([char]27)[?25l" -NoNewline }
+function Tui-ShowCursor { Write-Host "$([char]27)[?25h" -NoNewline }
+function Tui-ClearBelow([int]$row) { Write-Host "$([char]27)[$row;0H$([char]27)[J" -NoNewline }
 
 function Tui-GetKey {
     # Na janela do Windows (powershell.exe), [Console]::ReadKey($true) captura setas e Enter.
+    # Drenar o buffer antes: SSH/conhost costuma injetar um Enter espúrio no início da
+    # sessão que faria o TUI pular direto o primeiro item. Aqui limpamos tudo que estiver
+    # enfileirado e lemos só a próxima tecla "real" do usuário.
+    if ([Console]::KeyAvailable) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ([Console]::KeyAvailable -and $sw.ElapsedMilliseconds -lt 80) {
+            [void][Console]::ReadKey($true)
+        }
+    }
     try {
         $k = [Console]::ReadKey($true)
         switch ($k.Key) {
@@ -307,8 +318,8 @@ function Tui-Confirm([string]$question) {
     return ($ans -match '^[sSyY]')
 }
 
-function Tui-Progress([string]$msg) { Write-Host "$($script:TuiBg)`e[2K`r$($script:TuiAccent)[*]$($script:TuiRset) $msg" -NoNewline }
-function Tui-Done { Write-Host "$($script:TuiBg)`e[2K`r$($script:TuiOk)[OK]$($script:TuiRset)" }
+function Tui-Progress([string]$msg) { Write-Host "$($script:TuiBg)$([char]27)[2K`r$($script:TuiAccent)[*]$($script:TuiRset) $msg" -NoNewline }
+function Tui-Done { Write-Host "$($script:TuiBg)$([char]27)[2K`r$($script:TuiOk)[OK]$($script:TuiRset)" }
 
 # =========================================================================== /TUI
 
@@ -1326,14 +1337,243 @@ function Show-MainMenu {
     }
 }
 
+
+# -----------------------------------------------------------------------------
+# Auto-update via GitHub Releases
+#
+# Compara a versao do plugin instalado (lida de goLiveBypass/manifest.json)
+# com a tag da release mais recente do GitHub. Reusa Get-RepoFile para o
+# caminho "nao tem zip" e adiciona o caminho "tem zip" (com validacao de
+# SHA-256 contra o asset companion .sha256).
+# -----------------------------------------------------------------------------
+
+$GitHubRepo = 'bezumiya/GoLiveBypass'
+$GitHubApi  = "https://api.github.com/repos/$GitHubRepo"
+
+# Consulta a release mais recente. Devolve um objeto com .Tag e .AssetUrl
+# (pode ser $null para qualquer um). RC=0 mesmo se a consulta falhou: o
+# --check-update nao pode derrubar o instalador por falta de rede.
+function Get-LatestRelease {
+    try {
+        $headers = @{ 'User-Agent' = 'GoLiveBypass-Installer'; 'Accept' = 'application/vnd.github+json' }
+        $release = Invoke-RestMethod -Uri "$GitHubApi/releases/latest" -Headers $headers -TimeoutSec 15
+    } catch {
+        return $null
+    }
+
+    $tag = $null
+    if ($release.PSObject.Properties['tag_name'] -and $release.tag_name) {
+        # tag_name vem como "v1.1.8"; o manifest usa "1.1.8" (sem o v)
+        $tag = $release.tag_name -replace '^v', ''
+    }
+
+    $zip = $null
+    foreach ($a in $release.assets) {
+        if ($a.name -like 'goLiveBypass-vencord*.zip') {
+            $zip = $a.browser_download_url
+            break
+        }
+    }
+
+    return [PSCustomObject]@{ Tag = $tag; AssetUrl = $zip }
+}
+
+# Le a versao do manifest.json em $root/src/userplugins/$PluginDirName.
+# Devolve $null se nao existir.
+function Get-InstalledPluginVersion($root) {
+    $manifest = Join-Path $root "src\userplugins\$PluginDirName\manifest.json"
+    if (-not (Test-Path -LiteralPath $manifest)) { return $null }
+    try {
+        $j = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+        if ($j.PSObject.Properties['version'] -and $j.version) { return [string]$j.version }
+    } catch {}
+    return $null
+}
+
+# Compara duas versoes semver. Retorna -1/0/+1.
+# [version] casts lidam com 1.2.3 mas nao com "1.2.3-beta" - usamos o tipo
+# apenas para a parte numerica.
+function Compare-Version($installed, $latest) {
+    if (-not $latest) { return 0 }   # sem informacao do GitHub: sem atualizacao
+    if (-not $installed) { return -1 }  # sem versao local: vale conferir
+
+    $a = [version]($installed -replace '-.*$', '')
+    $b = [version]($latest    -replace '-.*$', '')
+    if ($b -gt $a) { return -1 }
+    if ($b -lt $a) { return  1 }
+    return 0
+}
+
+# Faz backup do plugin atual em $root/src/userplugins/.$PluginDirName.bak/
+# com timestamp YYYYMMDDHHMMSS, mantendo so os 3 mais recentes.
+function Backup-Plugin($root) {
+    $target = Join-Path $root "src\userplugins\$PluginDirName"
+    if (-not (Test-Path -LiteralPath $target)) { return }
+
+    $backupRoot = Join-Path $root "src\userplugins\.${PluginDirName}.bak"
+    if (-not (Test-Path -LiteralPath $backupRoot)) { New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null }
+
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $dest = Join-Path $backupRoot $stamp
+    Copy-Item -LiteralPath $target -Destination $dest -Recurse -Force
+
+    # Mantem so os 3 mais recentes (ordem alfabetica = timestamp)
+    $items = Get-ChildItem -LiteralPath $backupRoot -Directory | Sort-Object Name
+    if ($items.Count -gt 3) {
+        $items | Select-Object -First ($items.Count - 3) | ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force
+        }
+    }
+}
+
+# --check-update: imprime o status e sai. NUNCA baixa nada.
+function Invoke-CheckUpdate {
+    $root = Find-Checkout
+    if (-not $root) {
+        Write-Host "  plugin: $(Write-Yellow 'nao encontrado') (rode uma vez para instalar)"
+        return
+    }
+
+    $installed = Get-InstalledPluginVersion $root
+    if ($installed) {
+        Write-Host "  plugin: instalado ($(Write-Dim "v$installed"))"
+    } else {
+        Write-Host "  plugin: $(Write-Yellow 'instalado (versao desconhecida)')"
+    }
+
+    $release = Get-LatestRelease
+    if (-not $release -or -not $release.Tag) {
+        Write-Host "  remote: $(Write-Dim 'nao consegui consultar (rede ou rate limit)')"
+        return
+    }
+
+    Write-Host "  remote: $(Write-Dim "v$($release.Tag)")"
+
+    if (-not $installed) {
+        Write-Host "  resultado: $(Write-Yellow 'versao local desconhecida - rode --update para alinhar')"
+        return
+    }
+
+    $cmp = Compare-Version $installed $release.Tag
+    switch ($cmp) {
+        0  { Write-Host "  resultado: $(Write-Green 'voce esta na versao mais recente')" }
+        1  { Write-Host "  resultado: $(Write-Dim 'versao local mais nova que a release (fork?)')" }
+        -1 { Write-Host "  resultado: $(Write-Yellow 'ha versao nova - rode sem --check-update para atualizar')" }
+    }
+}
+
+# --update: faz o trabalho. Baixa o zip, valida SHA-256, extrai.
+function Invoke-Update {
+    $root = Find-Checkout
+    if (-not $root) { throw "Nao achei o checkout do mod. Rode o instalador uma vez (sem --update) para descobrir." }
+
+    $installed = Get-InstalledPluginVersion $root
+    $release = Get-LatestRelease
+    if (-not $release -or -not $release.Tag) { throw "Nao consegui consultar a release mais recente (rede ou rate limit do GitHub)." }
+
+    if ($installed) {
+        $cmp = Compare-Version $installed $release.Tag
+        if ($cmp -eq 0) {
+            Write-Ok "Voce ja esta na v$($release.Tag) (a mais recente)."
+            return
+        }
+        if ($cmp -eq 1) {
+            Write-Warn "Versao local (v$installed) e mais nova que a release (v$($release.Tag))."
+            if (-not $Yes -and $Host.UI.RawUI) {
+                $ans = Read-Host "  Atualizar mesmo assim? (S/N)"
+                if ($ans -ne 'S' -and $ans -ne 's') { Write-Warn 'Atualizacao cancelada.'; return }
+            }
+        }
+    }
+
+    Write-Step "Fazendo backup do plugin atual"
+    Backup-Plugin $root
+
+    if ($release.AssetUrl) {
+        Invoke-UpdateFromZip $root $release.AssetUrl $release.Tag
+    } else {
+        # Fallback: a release nao tem o asset do userplugin
+        Write-Warn "Release v$($release.Tag) nao tem o zip do userplugin. Caindo no download via RepoRaw."
+        Copy-Plugin $root
+    }
+
+    Build-Mod $root
+    if (-not (Test-InjectedFromCheckout $root)) { Invoke-Injection $root }
+
+    Write-Host ''
+    Write-Ok "Atualizado para v$($release.Tag). Reinicie o Discord para carregar a nova versao."
+}
+
+# Baixa o zip, valida SHA-256, extrai por cima do plugin atual.
+function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
+    $tempDir = Join-Path $env:TEMP "GoLiveBypass-update-$expectedVersion"
+    if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    $zipFile = Join-Path $tempDir 'plugin.zip'
+
+    Write-Step "Baixando $zipUrl"
+    try {
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing -TimeoutSec 60
+    } catch {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Download do zip falhou: $($_.Exception.Message)"
+    }
+
+    Write-Step "Validando SHA-256"
+    $shaUrl = "$zipUrl.sha256"
+    $shaExpected = $null
+    try {
+        $shaContent = (Invoke-WebRequest -Uri $shaUrl -UseBasicParsing -TimeoutSec 15).Content.Trim()
+        $shaExpected = ($shaContent -split '\s+')[0].ToLower()
+    } catch {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Release sem arquivo .sha256 (asset companion). Sem hash, sem update."
+    }
+    $shaActual = (Get-FileHash -LiteralPath $zipFile -Algorithm SHA256).Hash.ToLower()
+    if ($shaActual -ne $shaExpected) {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "SHA-256 nao confere: esperado $shaExpected, obtido $shaActual."
+    }
+    Write-Ok 'SHA-256 confere'
+
+    Write-Step "Extraindo o plugin"
+    $extractDir = Join-Path $tempDir 'extract'
+    New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+    try {
+        Expand-Archive -LiteralPath $zipFile -DestinationPath $extractDir -Force
+    } catch {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Extracao falhou: $($_.Exception.Message)"
+    }
+
+    $target = Join-Path $root "src\userplugins\$PluginDirName"
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+    # O zip tem a pasta raiz goLiveBypass/; copia o conteudo
+    $extracted = Get-ChildItem -LiteralPath $extractDir -Directory | Select-Object -First 1
+    if (-not $extracted) {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw 'Zip nao tem a pasta esperada (goLiveBypass/).'
+    }
+    Get-ChildItem -LiteralPath $extracted.FullName -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $target -Recurse -Force
+    }
+
+    Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Ok 'Plugin extraido'
+}
+
 Show-Banner
 
 try {
     switch ($Mode) {
-        'Install' { Invoke-Install (Find-Checkout) }
-        'Uninstall' { Invoke-Uninstall }
-        'Restore' { Invoke-RestoreEverything }
-        default { Show-MainMenu }
+        'Install'     { Invoke-Install (Find-Checkout) }
+        'Uninstall'   { Invoke-Uninstall }
+        'Restore'     { Invoke-RestoreEverything }
+        'CheckUpdate' { Invoke-CheckUpdate }
+        'Update'      { Invoke-Update }
+        default       { Show-MainMenu }
     }
 } catch {
     Write-Host ''

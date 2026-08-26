@@ -1060,9 +1060,16 @@ remove_injection() {
 # do FOUND (path|flav|...) para abrir o binario certo do flav — injetou no Equibop, abre o
 # equibop, nao "discord".
 start_discord() {
-    local linha="${1:-}" resources="" flav="" id exe
+    # `local a=X b=Y` em uma linha so quebra em ksh93/mksh: as atribuicoes depois da
+    # primeira viram globais. Separar em linhas e' o que o POSIX manda, e o
+    # `|` em ${var%%pattern} precisa de escape `\|` para ksh.
+    local linha="${1:-}"
+    local resources=""
+    local flav=""
+    local id
+    local exe
 
-    resources="${linha%%|*}"
+    resources="${linha%%\|*}"
     [ -n "$resources" ] || return 1
 
     if id="$(flatpak_app_id "$resources")" && have flatpak; then

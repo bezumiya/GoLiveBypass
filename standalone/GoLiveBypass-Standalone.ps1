@@ -193,19 +193,26 @@ function Test-TuiInteractive {
     return (Test-TuiAnsi)
 }
 
-$script:TuiBg = "`e[48;5;235m"
-$script:TuiFg = "`e[38;5;252m"
-$script:TuiAccent = "`e[38;5;75m"
-$script:TuiOk = "`e[38;5;114m"
-$script:TuiDim = "`e[38;5;240m"
-$script:TuiBold = "`e[1m"
-$script:TuiRset = "`e[0m"
+$script:TuiBg = "$([char]27)[48;5;235m"
+$script:TuiFg = "$([char]27)[38;5;252m"
+$script:TuiAccent = "$([char]27)[38;5;75m"
+$script:TuiOk = "$([char]27)[38;5;114m"
+$script:TuiDim = "$([char]27)[38;5;240m"
+$script:TuiBold = "$([char]27)[1m"
+$script:TuiRset = "$([char]27)[0m"
 
-function Tui-HideCursor { Write-Host "`e[?25l" -NoNewline }
-function Tui-ShowCursor { Write-Host "`e[?25h" -NoNewline }
-function Tui-ClearBelow([int]$row) { Write-Host "`e[$row;0H`e[J" -NoNewline }
+function Tui-HideCursor { Write-Host "$([char]27)[?25l" -NoNewline }
+function Tui-ShowCursor { Write-Host "$([char]27)[?25h" -NoNewline }
+function Tui-ClearBelow([int]$row) { Write-Host "$([char]27)[$row;0H$([char]27)[J" -NoNewline }
 
 function Tui-GetKey {
+    # Drenar buffer: SSH/conhost injeta Enter espúrio no início da sessão.
+    if ([Console]::KeyAvailable) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ([Console]::KeyAvailable -and $sw.ElapsedMilliseconds -lt 80) {
+            [void][Console]::ReadKey($true)
+        }
+    }
     try {
         $k = [Console]::ReadKey($true)
         switch ($k.Key) {
