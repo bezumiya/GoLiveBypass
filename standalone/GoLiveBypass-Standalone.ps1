@@ -123,9 +123,39 @@ function Invoke-AutoBugReport([string]$summary, [string]$extra = '') {
 # Interface no estilo OpenCode (dark, caixas, setas/Enter). Mouse: console do Windows nao
 # expoe cliques de forma confiavel; navegacao por teclado. Sem TTY ou com -Yes → flags.
 
+# Diz se o console suporta ANSI (modo VT). O conhost classico do Windows (cmd rodando o
+# powershell.exe) NAO interpreta escapes por padrao: a TUI apareceria cheia de "[48;5;235m".
+# Tentamos habilitar o modo VT via P/Invoke; se der certo, ANSI funciona (Windows Terminal,
+# VS Code, conhost com VT ativo). Se nao der, a TUI cai para os menus/flags simples.
+function Test-TuiAnsi {
+    try {
+        Add-Type -Namespace Win32 -Name Console -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+'@ -ErrorAction Stop
+        $h = [Win32.Console]::GetStdHandle(-11)
+        if ($h -eq [IntPtr]::Zero) { return $false }
+        $mode = [uint32]0
+        if (-not [Win32.Console]::GetConsoleMode($h, [ref]$mode)) { return $false }
+        if (($mode -band 0x0004) -eq 0x0004) { return $true }
+        $novo = $mode -bor 0x0004
+        [Win32.Console]::SetConsoleMode($h, $novo) | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Test-TuiInteractive {
     if ($Yes) { return $false }
-    return (-not [Console]::IsInputRedirected) -and (-not [Console]::IsOutputRedirected)
+    if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { return $false }
+    # Sem ANSI de verdade (conhost classico) os escapes quebram a tela: cai para os scripts
+    # por flags/confirmações simples.
+    return (Test-TuiAnsi)
 }
 
 $script:TuiBg = "`e[48;5;235m"
