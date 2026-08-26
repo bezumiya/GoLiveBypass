@@ -2057,7 +2057,7 @@ ipcMain.handle("install-tor", async () => {
 // endereco errado, ativa o bypass e o Discord fica carregando sem saber por que.
 
 const PROXY_URL_RE =
-  /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})$/i;
+  /^(socks5|socks4|http|https):\/\/(?:(.+)@)?([^:/?#\s@]+):(\d{1,5})(?:-(\d{1,5}))?$/i;
 
 function parseProxyUrl(value: string): {
   scheme: string;
@@ -2068,8 +2068,18 @@ function parseProxyUrl(value: string): {
 } | null {
   const match = PROXY_URL_RE.exec(String(value).trim());
   if (!match) return null;
-  const port = Number(match[4]);
-  if (port < 1 || port > 65535) return null;
+  const portStart = Number(match[4]);
+  if (portStart < 1 || portStart > 65535) return null;
+
+  // Range de portas multiplexado (ex.: 10000-10050): sorteia uma pra testar, igual ao
+  // parseProxy do standalone -- o teste e so uma amostra da saida, nao precisa das 50 portas.
+  let port = portStart;
+  if (match[5] !== undefined) {
+    const portEnd = Number(match[5]);
+    if (portEnd >= portStart && portEnd <= 65535) {
+      port = Math.floor(Math.random() * (portEnd - portStart + 1)) + portStart;
+    }
+  }
 
   const credentials = match[2] ?? "";
   const split = credentials.indexOf(":");
