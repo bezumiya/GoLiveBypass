@@ -888,18 +888,26 @@ function poolStatus() {
     };
 }
 
-async function detectTor() {
+async function detectTor(probeTimeoutMs) {
     // No modo "tor" o endereco vem das settings (a GUI sobe o proprio Tor). Nos outros
     // modos, procura as portas classicas de clientes Tor da maquina.
     const candidatas = routeMode === "tor"
         ? [TOR_ADDR]
         : TOR_PORTS.map(port => "127.0.0.1:" + port);
 
+    // Quando o refresh chama o detectTor (Tor morreu no meio da sessao e o batimento
+    // detectou), o probe do Tor pode estar em estado intermediario (SOCKS5 aceita mas
+    // demora a responder) e timeoutar com 6s. O gateway fica segurado por esse tempo
+    // e o Discord mostra "load infinito". O probe reduzido (3s) detecta a situacao
+    // mais rapido, e o refreshExit cai para recarga antes do Discord desistir.
+    const probeMs = probeTimeoutMs !== undefined ? probeTimeoutMs : PROBE_TIMEOUT_MS;
+    const exitMs = probeTimeoutMs !== undefined ? Math.min(probeTimeoutMs, 4000) : 6000;
+
     for (const addr of candidatas) {
         const proxy = "socks5://" + addr;
         const port = Number(addr.split(":")[1] || 0);
         if (!await listening(port, TOR_PORT_TIMEOUT_MS)) continue;
-        if (await probe(proxy) === null) {
+        if (await probe(proxy, probeMs) === null) {
             log("porta " + port + " esta aberta mas nao respondeu como proxy");
             continue;
         }
@@ -914,7 +922,7 @@ async function detectTor() {
         // seja, a checagem quase nunca barra nada na pratica. Quem escolhe Tor esta pedindo
         // uma saida que nao se identifica; nao sair pelo IP brasileiro o proprio Tor garante.
         if (routeMode === "tor") {
-            const pais = await exitCountryTorCached(proxy, 6000);
+            const pais = await exitCountryTorCached(proxy, exitMs);
             if (pais !== null && excludedCountries.has(pais)) {
                 log("Tor na porta " + port + " recusado: saida em " + pais);
                 continue;
@@ -1391,7 +1399,13 @@ function currentExit() {
         // No modo "tor" o prazo e maior: o bootstrap do Tor leva ~20s, bem mais que o orcamento
         // pensado para uma saida gratuita, e estourar o prazo aqui nao devolve conexao direta
         // (o serveSocks recusa neste modo) -- devolve so uma reconexao a toa do gateway.
+        // O refresh (chamado pelo batimento quando a ativa caiu) usa probe com timeout
+        // curto (3s) para nao segurar o gateway por 12+ segundos quando o Tor oscila
+        // (issue #87: "loading infinito ao assistir a tela estando mto tempo com
+        // discord aberto"). Espera-se o refresh terminar ate TOR_HOLD_BUDGET_MS e so
+        // depois recusa-se: o refresh provavelmente ja terminou e o Tor ja voltou.
         const prazo = routeMode === "tor" ? TOR_HOLD_BUDGET_MS : HOLD_BUDGET_MS;
+        const refreshRunning = routeMode === "tor" ? refreshingExit : null;
 
         const timer = setTimeout(() => {
             const index = waitingForExit.indexOf(deliver);
@@ -1408,6 +1422,27 @@ function currentExit() {
         };
 
         waitingForExit.push(deliver);
+
+        // Se o refresh esta rodando, espera ele terminar. O chosenExit vai ser setado
+        // pelo settleExit (no refreshExit) ou ja' foi setado em outra execucao do chooseExit
+        // (em outro currentExit). Quando o refresh termina, o resolve e' chamado
+        // se a ativa foi setada; senao o timer estoura.
+        if (refreshRunning !== null) {
+            refreshRunning.then(() => {
+                // O refresh terminou. Se o chosenExit foi setado (sucesso), o deliver ja'
+                // foi chamado e o resolve ja' foi feito. Se nao (falha do refresh), o
+                // currentExit continua esperando o timer. O tempo ate agora ja' contou
+                // parte do prazo -- mas como o refresh ja' terminou, qualquer nova conexao
+                // pode prosseguir com a ativa (mesmo "morta") e a recarga (se houver)
+                // fara a troca.
+                if (chosenExit !== null) {
+                    const index = waitingForExit.indexOf(deliver);
+                    if (index >= 0) waitingForExit.splice(index, 1);
+                    clearTimeout(timer);
+                    resolve(chosenExit);
+                }
+            });
+        }
     });
 }
 
@@ -1425,7 +1460,10 @@ function refreshExit() {
         // Modo "tor": a reposicao tambem SO considera o Tor — cair para gratuita aqui
         // trocaria a garantia escolhida pelo usuario por um IP qualquer. Sem Tor no ar,
         // devolve null e o gateway fica segurado ate o Tor voltar.
-        const fresh = routeMode === "tor" ? await detectTor() : await pickFreeExit();
+        // Probe do Tor com timeout curto (3s) para o refresh nao segurar o gateway
+        // por 12+ segundos quando o Tor esta morrendo (issue #87). O probe da escolha
+        // inicial usa o timeout completo (6s) porque vale a pena esperar mais.
+        const fresh = routeMode === "tor" ? await detectTor(3000) : await pickFreeExit();
         if (fresh !== null) {
             settleExit(fresh);
             log("saida nova encontrada: " + safeProxy(fresh));
