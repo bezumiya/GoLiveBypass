@@ -754,13 +754,52 @@ discord_resources() {
         /usr/share/equibop /usr/lib/equibop /usr/lib64/equibop /opt/equibop /opt/Equibop \
         /usr/share/legcord /usr/lib/legcord /usr/lib64/legcord /opt/legcord /opt/Legcord \
         /usr/local/share/vesktop /usr/local/share/equibop /usr/local/share/legcord \
-        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord"
+        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord" \
+        "$HOME/vesktop" "$HOME/equibop" "$HOME/legcord" \
+        /snap/vesktop/current /snap/equibop/current /snap/legcord/current \
+        /opt/vesktop/vesktop /opt/equibop/equibop /opt/legcord/legcord
     do
         [ -d "$raiz" ] || continue
         for sub in "$raiz/resources" "$raiz"; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 printf '%s\n' "$sub"
                 break
+            fi
+        done
+    done
+
+    # Discord "vanilla" (nao-paralelo) tambem pode estar em paths alternativos:
+    # - Snap: /snap/discord/current/resources
+    # - Home direto: ~/discord/resources, ~/Discord/resources
+    # - AppImage montado em /opt
+    for raiz in \
+        /snap/discord/current /snap/discordptb/current /snap/discordcanary/current \
+        "$HOME/discord" "$HOME/Discord" "$HOME/discordptb" "$HOME/DiscordPTB" \
+        "$HOME/discordcanary" "$HOME/DiscordCanary" \
+        /opt/discord/discord /opt/discordptb/discordptb /opt/discordcanary/discordcanary
+    do
+        [ -d "$raiz" ] || continue
+        for sub in "$raiz/resources" "$raiz"; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
+                break
+            fi
+        done
+    done
+
+    # AppImage la e descompacta manualmente (ou via appimaged). Procuramos o app.asar
+    # em subpastas tipicas.
+    for raiz in \
+        "$HOME/Apps" "$HOME/Applications" "$HOME/AppImages" "$HOME/.local/bin" \
+        /opt/apps /opt/Applications /opt/AppImages
+    do
+        [ -d "$raiz" ] || continue
+        for sub in \
+            "$raiz"/*/resources "$raiz"/*/discord-*/app-*/resources \
+            "$raiz"/vesktop*/resources "$raiz"/equibop*/resources "$raiz"/legcord*/resources
+        do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                printf '%s\n' "$sub"
             fi
         done
     done

@@ -540,7 +540,10 @@ discord_dirs() {
         /usr/share/equibop /usr/lib/equibop /usr/lib64/equibop /opt/equibop /opt/Equibop \
         /usr/share/legcord /usr/lib/legcord /usr/lib64/legcord /opt/legcord /opt/Legcord \
         /usr/local/share/vesktop /usr/local/share/equibop /usr/local/share/legcord \
-        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord"
+        "$HOME/.local/share/vesktop" "$HOME/.local/share/equibop" "$HOME/.local/share/legcord" \
+        "$HOME/vesktop" "$HOME/equibop" "$HOME/legcord" \
+        /snap/vesktop/current /snap/equibop/current /snap/legcord/current \
+        /opt/vesktop/vesktop /opt/equibop/equibop /opt/legcord/legcord
     do
         [ -d "$raiz" ] || continue
         for sub in "$raiz/resources" "$raiz"; do
@@ -549,6 +552,49 @@ discord_dirs() {
                 printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
                 count=$((count + 1))
                 break
+            fi
+        done
+    done
+
+    # Discord "vanilla" em paths nao-padroes (snap, home direto, AppImage em /opt).
+    # O standalone so roda em Discord (nao cobre Vesktop/Equibop/Legcord como vanilla),
+    # mas alguns pacotes legacy do Discord (aur/discord_arch_electron) instalam em
+    # /opt/discord/discord. AppImages em /opt/discord/discord. Snap em /snap/discord/current.
+    for raiz in \
+        /snap/discord/current /snap/discordptb/current /snap/discordcanary/current \
+        "$HOME/discord" "$HOME/Discord" "$HOME/discordptb" "$HOME/DiscordPTB" \
+        "$HOME/discordcanary" "$HOME/DiscordCanary" \
+        /opt/discord/discord /opt/discordptb/discordptb /opt/discordcanary/discordcanary
+    do
+        [ -d "$raiz" ] || continue
+        for sub in "$raiz/resources" "$raiz"; do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                flav="discord"; case "$raiz" in *PTB*|*ptb*) flav="discordptb" ;; *Canary*|*canary*) flav="discordcanary" ;; esac
+                printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
+                count=$((count + 1))
+                break
+            fi
+        done
+    done
+
+    # AppImages portateis em ~/Apps/, ~/Applications/, ~/AppImages/, /opt/apps/.
+    for raiz in \
+        "$HOME/Apps" "$HOME/Applications" "$HOME/AppImages" "$HOME/.local/bin" \
+        /opt/apps /opt/Applications /opt/AppImages
+    do
+        [ -d "$raiz" ] || continue
+        for sub in \
+            "$raiz"/*/resources "$raiz"/*/discord-*/app-*/resources \
+            "$raiz"/vesktop*/resources "$raiz"/equibop*/resources "$raiz"/legcord*/resources
+        do
+            if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
+                case "$sub" in
+                    *equibop*) flav="equibop" ;;
+                    *legcord*) flav="legcord" ;;
+                    *) flav="vesktop" ;;
+                esac
+                printf '%s|%s|%s\n' "$sub" "$flav" "paralelo"
+                count=$((count + 1))
             fi
         done
     done
