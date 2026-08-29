@@ -47,6 +47,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   agora existe também no Windows.
 
 ### Corrigido
+- **`Set-RunKey` apagava todas as entradas de inicialização do usuário**: no
+  provider de registro do PowerShell (ao contrário do de arquivos),
+  `New-Item -Path <chave> -Force` numa chave que **já existe** apaga a chave e
+  recria vazia. Como o `Set-RunKey` do instalador e do standalone chamava isso
+  em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` antes de gravar o
+  `GoLiveBypassTor`, toda execução limpava o startup da máquina (Spotify,
+  Steam, Discord…) e deixava só a nossa entrada. Passava despercebido porque os
+  poucos apps que reescrevem a própria entrada a cada abertura (como o Docker
+  Desktop) reaparecem sozinhos, e porque a chave `StartupApproved` — que a tela
+  "Inicializar" do Windows lê — não é tocada e continua listando tudo, então a
+  lista da interface parece intacta. Agora a chave Run só é criada se realmente
+  faltar.
 - **Refresh do Tor em modo `tor` segurava o gateway por até 12s** quando o
   daemon oscilava: `refreshExit` chamava `detectTor()` com timeout de 6s
   para o probe + 6s para `exitCountryTorCached`. Em modo `tor` o bypass

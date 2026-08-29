@@ -745,8 +745,16 @@ function Install-Tor {
 function Set-RunKey {
     try {
         $command = "`"$TorExe`" -f `"$TorTorrc`""
-        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
-        Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'GoLiveBypassTor' -Value $command
+        # ATENCAO: nada de "New-Item -Path <chave> -Force" aqui. No provider de
+        # registro (diferente do de arquivos) o -Force numa chave que ja existe
+        # APAGA a chave e recria vazia, levando junto todas as entradas de
+        # inicializacao do usuario (Spotify, Steam, Discord...).
+        # A chave Run sempre existe no Windows; so criamos se realmente faltar.
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        if (-not (Test-Path -LiteralPath $key)) {
+            New-Item -Path $key -Force | Out-Null
+        }
+        Set-ItemProperty -Path $key -Name 'GoLiveBypassTor' -Value $command
         Write-Ok 'Tor registrado para subir no proximo logon (GoLiveBypassTor).'
     } catch {
         Write-Warn "Nao consegui registrar a inicializacao: $($_.Exception.Message)"
