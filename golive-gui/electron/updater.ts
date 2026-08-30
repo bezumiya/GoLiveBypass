@@ -8,7 +8,7 @@
 // Mac e Linux: o autoUpdater do electron-updater cuida (dmg/zip assinado e AppImage).
 
 import { app, dialog, BrowserWindow } from "electron";
-import { createWriteStream, readFileSync } from "fs";
+import { createWriteStream, readFileSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { rm } from "fs/promises";
 import { tmpdir } from "os";
@@ -149,52 +149,75 @@ function portableExePath(): string | null {
   return current && current.trim() !== "" ? current : null;
 }
 
-export function tryReplace(target: string, downloaded: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const attempt = (tries: number) => {
-      const { rmSync, renameSync, copyFileSync } = require("fs");
-      const oldTarget = `${target}.old`;
-      try {
-        // Remove .old de atualizacoes anteriores (caso o processo antigo ja tenha morrido)
-        try {
-          rmSync(oldTarget, { force: true });
-        } catch {
-          // se ainda estiver bloqueado, ignora
-        }
+export function buildWindowsUpdateScript(
+  target: string,
+  downloaded: string,
+  vbsPath?: string,
+): string {
+  const lines = [
+    `@echo off`,
+    `set "TARGET=${target}"`,
+    `set "DOWNLOADED=${downloaded}"`,
+  ];
+  if (vbsPath) {
+    lines.push(`set "VBS_FILE=${vbsPath}"`);
+  }
+  lines.push(
+    `set "TRIES=30"`,
+    ``,
+    `:loop`,
+    `move /y "%DOWNLOADED%" "%TARGET%" >NUL 2>&1`,
+    `if not errorlevel 1 (`,
+    `    start "" "%TARGET%"`,
+    `    goto finish`,
+    `)`,
+    ``,
+    `set /a TRIES-=1`,
+    `if %TRIES% leq 0 goto finish`,
+    ``,
+    `ping 127.0.0.1 -n 2 >NUL`,
+    `goto loop`,
+    ``,
+    `:finish`,
+  );
+  if (vbsPath) {
+    lines.push(`if exist "%VBS_FILE%" del "%VBS_FILE%" >NUL 2>&1`);
+  }
+  lines.push(`del "%~f0" >NUL 2>&1`, ``);
+  return lines.join("\r\n");
+}
 
-        // Renomeia o exe em uso para .old (Windows NTFS permite renomear executaveis em execucao)
-        renameSync(target, oldTarget);
+export function spawnWindowsUpdateHelper(
+  target: string,
+  downloaded: string,
+): boolean {
+  try {
+    const timestamp = Date.now();
+    const batPath = join(tmpdir(), `GoLiveBypass-update-${timestamp}.bat`);
+    const vbsPath = join(tmpdir(), `GoLiveBypass-update-${timestamp}.vbs`);
 
-        try {
-          // Tenta mover o executavel baixado para o caminho do executavel original
-          try {
-            renameSync(downloaded, target);
-          } catch (err: any) {
-            // Se falhar com EXDEV (volumes/drives diferentes entre tmpdir e target), usa copy + remove
-            if (err && err.code === "EXDEV") {
-              copyFileSync(downloaded, target);
-              rmSync(downloaded, { force: true });
-            } else {
-              throw err;
-            }
-          }
-          resolve(true);
-        } catch (copyErr) {
-          // Se falhou ao colocar o novo executavel no lugar, tenta rollback
-          try {
-            renameSync(oldTarget, target);
-          } catch {
-            // rollback falhou
-          }
-          throw copyErr;
-        }
-      } catch {
-        if (tries <= 0) return resolve(false);
-        setTimeout(() => attempt(tries - 1), RETRY_DELAY_MS);
-      }
-    };
-    attempt(RETRY_COUNT);
-  });
+    const batContent = buildWindowsUpdateScript(target, downloaded, vbsPath);
+    writeFileSync(batPath, batContent, "utf8");
+
+    // O wscript.exe e um executavel de subsistema GUI (nao console), garantindo
+    // que nenhuma janela de terminal (CMD) pisque ou apareca para o usuario.
+    const vbsContent = [
+      `Set WshShell = CreateObject("WScript.Shell")`,
+      `WshShell.Run chr(34) & "${batPath.replace(/\\/g, "\\\\")}" & chr(34), 0, False`,
+    ].join("\r\n");
+    writeFileSync(vbsPath, vbsContent, "utf8");
+
+    const child = spawn("wscript.exe", ["//b", "//nologo", vbsPath], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    return true;
+  } catch (err) {
+    console.error("[updater] erro ao disparar helper de update do Windows:", err);
+    return false;
+  }
 }
 
 async function updateWindowsPortable(url: string, digest: string | null): Promise<boolean> {
@@ -212,21 +235,22 @@ async function updateWindowsPortable(url: string, digest: string | null): Promis
     return false;
   }
 
-  // Conferido antes de encostar no exe em uso: depois do rename nao ha volta, o app se
-  // substituiu. Um arquivo que nao bate e apagado e a versao atual continua valendo.
+  // Conferido antes de encostar no exe em uso: depois da substituicao nao ha volta.
+  // Um arquivo que nao bate e apagado e a versao atual continua valendo.
   if (!digestMatches(downloaded, digest)) {
     await rm(downloaded, { force: true }).catch(() => {});
     return false;
   }
 
-  if (!(await tryReplace(current, downloaded))) {
-    console.error("[updater] nao consegui substituir o exe em uso.");
+  // No Windows, o executavel portable do electron-builder e um launcher NSIS que
+  // mantem um handle aberto no PORTABLE_EXECUTABLE_FILE enquanto o processo estiver vivo.
+  // Disparamos um helper em background desacoplado que aguarda o encerramento do processo
+  // atual, substitui o executavel no disco e o reinicia na versao atualizada.
+  if (!spawnWindowsUpdateHelper(current, downloaded)) {
+    console.error("[updater] nao consegui agendar a substituicao do executavel.");
     return false;
   }
 
-  // Abre a versao nova e encerra a atual. O quit nao reverte o bypass: o novo
-  // processo assume e o before-quit do processo antigo desfaria a injecao.
-  spawn(current, [], { detached: true, stdio: "ignore" }).unref();
   return true;
 }
 
@@ -360,7 +384,13 @@ export async function checkWindowsUpdate(
     if (ok) {
       updateReady = true;
       markQuittingForUpdate();
-      app.quit();
+      try {
+        const win = getMainWindow();
+        if (win && !win.isDestroyed()) {
+          win.destroy();
+        }
+      } catch {}
+      app.exit(0);
     } else {
       console.error("[updater] falha ao aplicar o update portable.");
     }

@@ -241,7 +241,7 @@ function createWindow() {
   });
 
   mainWindow.on("close", (event) => {
-    if (quitting) return;
+    if (quitting || isQuittingForUpdate()) return;
     // Fechar a janela esconde na bandeja / barra de menus e o app continua vivo em segundo
     // plano, nos tres SOs. Quem quer encerrar de verdade usa o "Sair" (que reverte o bypass).
     event.preventDefault();
@@ -605,7 +605,11 @@ app.on("before-quit", (event) => {
   // Durante o auto-update o quit nao pode ser adiado: o processo novo ja foi
   // executado e precisa do lock de instancia unica. Sem esta saida, o app
   // antigo fica vivo e o novo morre — o "fecha mas nao abre".
-  if (isQuittingForUpdate()) return;
+  if (isQuittingForUpdate()) {
+    stopTor();
+    torWatchdogParar();
+    return;
+  }
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
   // Discord na saida, desfazendo o bypass que a instancia principal acabou de aplicar.
   if (!gotLock || cleaningUp) return;

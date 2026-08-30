@@ -56,6 +56,15 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   failed".
 
 ### Corrigido
+- **Falha silenciosa do auto-update no Windows Portable**
+  ([#135](https://github.com/bezumiya/GoLiveBypass/issues/135)): no Windows, o executável
+  portable gerado pelo `electron-builder` utiliza um wrapper NSIS que mantém um handle aberto
+  exclusivo sobre o arquivo executável (`PORTABLE_EXECUTABLE_FILE`) durante toda a sua execução.
+  Tentativas de substituir o executável de dentro do processo Electron ativo falhavam com
+  `EBUSY / Permissão negada`, e o comportamento padrão de ocultar a janela para a bandeja do
+  sistema impedia o encerramento do processo pai. A atualização agora utiliza um helper
+  desacoplado e silencioso via `wscript.exe` que aguarda o encerramento incondicional
+  (`app.exit(0)`), substitui o executável no disco e relança a versão atualizada automaticamente.
 - **"Falha ao injetar" em cliente paralelo (Vesktop/Equibop/Legcord) sem dizer o motivo real**
   ([#123](https://github.com/bezumiya/GoLiveBypass/issues/123),
   [#130](https://github.com/bezumiya/GoLiveBypass/issues/130),
