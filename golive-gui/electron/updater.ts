@@ -149,14 +149,45 @@ function portableExePath(): string | null {
   return current && current.trim() !== "" ? current : null;
 }
 
-function tryReplace(target: string, downloaded: string): Promise<boolean> {
+export function tryReplace(target: string, downloaded: string): Promise<boolean> {
   return new Promise((resolve) => {
     const attempt = (tries: number) => {
-      const { rmSync, renameSync } = require("fs");
+      const { rmSync, renameSync, copyFileSync } = require("fs");
+      const oldTarget = `${target}.old`;
       try {
-        rmSync(target, { force: true });
-        renameSync(downloaded, target);
-        resolve(true);
+        // Remove .old de atualizacoes anteriores (caso o processo antigo ja tenha morrido)
+        try {
+          rmSync(oldTarget, { force: true });
+        } catch {
+          // se ainda estiver bloqueado, ignora
+        }
+
+        // Renomeia o exe em uso para .old (Windows NTFS permite renomear executaveis em execucao)
+        renameSync(target, oldTarget);
+
+        try {
+          // Tenta mover o executavel baixado para o caminho do executavel original
+          try {
+            renameSync(downloaded, target);
+          } catch (err: any) {
+            // Se falhar com EXDEV (volumes/drives diferentes entre tmpdir e target), usa copy + remove
+            if (err && err.code === "EXDEV") {
+              copyFileSync(downloaded, target);
+              rmSync(downloaded, { force: true });
+            } else {
+              throw err;
+            }
+          }
+          resolve(true);
+        } catch (copyErr) {
+          // Se falhou ao colocar o novo executavel no lugar, tenta rollback
+          try {
+            renameSync(oldTarget, target);
+          } catch {
+            // rollback falhou
+          }
+          throw copyErr;
+        }
       } catch {
         if (tries <= 0) return resolve(false);
         setTimeout(() => attempt(tries - 1), RETRY_DELAY_MS);
@@ -277,7 +308,16 @@ export function setupUpdater(
     return;
   }
 
-  // Windows portable: checagem periodica em background.
+  // Windows portable: limpa .old remanescente de atualizacao previa e agenda checagem periodica.
+  const current = portableExePath();
+  if (current) {
+    try {
+      const { rmSync } = require("fs");
+      rmSync(`${current}.old`, { force: true });
+    } catch {
+      // silencioso se nao existir ou estiver bloqueado
+    }
+  }
   setInterval(() => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled), CHECK_INTERVAL_MS);
   void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled);
 }
@@ -319,6 +359,7 @@ export async function checkWindowsUpdate(
     const ok = await updateWindowsPortable(release.url, release.digest);
     if (ok) {
       updateReady = true;
+      markQuittingForUpdate();
       app.quit();
     } else {
       console.error("[updater] falha ao aplicar o update portable.");
