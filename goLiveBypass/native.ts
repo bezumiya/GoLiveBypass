@@ -27,7 +27,7 @@ import { defaultPluginVpnDataDir, PluginVpnController, type ProtonLoginPayload, 
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
 
-const PLUGIN_VERSION = "1.1.12-beta.13";
+const PLUGIN_VERSION = "2.0.0-beta.1";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
 const GITHUB_RELEASES_URL = "https://api.github.com/repos/pdl-clay/GoLiveBypass/releases/latest";
 const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
