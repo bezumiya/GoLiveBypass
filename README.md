@@ -23,10 +23,10 @@ Você não precisa usar todas as opções. Escolha uma delas:
 
 > **Regra rápida:** GUI para simplicidade, standalone para Discord sem mods, plugin para quem já usa um mod.
 
-> **Status da versão 2.0.0:** neste momento, somente a **GUI** está disponível e mantida.
-> O plugin Equicord/Vencord e o standalone CLI estão temporariamente fora do ar enquanto a
-> solução WireGuard por aplicativo é portada para essas variantes. Não instale essas duas
-> opções esperando o comportamento da 2.0.0; elas voltarão após a portabilidade e validação.
+> **Status da versão 2.0.0:** a migração do plugin para a arquitetura WireGuard por aplicativo
+> começou para Windows x64. O código do plugin já está separado da GUI e do standalone, mas os
+> instaladores automáticos permanecem pausados até a validação E2E e a publicação de um pacote.
+> O standalone continua fora do escopo desta migração.
 
 ## 🌟 Versão 2.0.0: Interface Gráfica com WireGuard por aplicativo
 
@@ -142,7 +142,7 @@ paralelos e Flatpak; Equicord/Vencord é preservado e não impede o túnel por n
 
 **Já instalei**
 - [Uso](#uso) — o que fazer depois de instalar
-- [Configuração](#configuração) — região da call, região da transmissão, roteamento, proxy
+- [Configuração](#configuração) — regiões da call/stream e VPN WireGuard isolada
 - [Solução de problemas](#solução-de-problemas) — Discord travado, transmissão que não sobe, plugin sumido
 - [O registro](#o-registro-o-que-o-plugin-anotou) — o arquivo que conta o que aconteceu, para relatar um problema
 
@@ -162,16 +162,17 @@ paralelos e Flatpak; Equicord/Vencord é preservado e não impede o túnel por n
 
 ## Instalação do plugin (recomendado para Equicord, Vencord e Vesktop)
 
-> **Temporariamente indisponível na 2.0.0.** O plugin está pausado enquanto a arquitetura
-> WireGuard por aplicativo é portada e testada nessa variante.
-
-Na 2.0.0 esta variante permanece desativada. Use somente a GUI WireGuard.
+> A VPN do plugin está implementada para Windows x64, mas os instaladores automáticos continuam
+> pausados até a validação E2E. Para instalação manual e configuração, use
+> [`goLiveBypass/COMO-INSTALAR.md`](goLiveBypass/COMO-INSTALAR.md).
 
 <p align="center">
   <img src="assets/instalacao.gif" alt="O instalador acha o Equicord, instala o plugin, compila e o Go Live volta a funcionar" width="720">
 </p>
 
-Um script faz tudo: acha o seu Equicord ou Vencord, instala o plugin, compila e abre o Discord com o Go Live funcionando. Se você não tiver nenhum dos dois, ele pergunta qual você quer e instala junto. Prefere fazer cada etapa à mão? Siga o [passo a passo escrito](#instalação-passo-a-passo-completo).
+O pacote do plugin contém o código do renderer, o controlador WireGuard/WireSock, a integração
+Proton e o `proton-confgen.exe` x64 nos releases. Ele não usa a GUI Electron, não modifica o
+`app.asar` e não lê o estado de rede do standalone.
 
 ### Um comando só
 
@@ -468,12 +469,12 @@ Nenhum dos dois roda comando com sudo sem perguntar antes, e o comando exato apa
 
 ## Uso
 
-1. Abra o Discord normalmente. O roteador local sobe antes do gateway conectar e a saída é escolhida em seguida.
-2. Se você escolheu Tor no instalador, deixe o Tor aberto antes; com proxy gratuita não precisa fazer nada.
-3. Espere o toast. `Go Live is unlocked on this session` significa que o servidor liberou — só o gateway fica na proxy, todo o resto sai direto. `GoLiveBypass could not unlock this session` significa que mesmo recarregando o servidor manteve o bloqueio: confira o registro e, se usa proxy própria, verifique se ela está no ar.
-4. Entre na call e transmita.
+1. Compile e instale o plugin conforme [`goLiveBypass/COMO-INSTALAR.md`](goLiveBypass/COMO-INSTALAR.md).
+2. Ative **GoLiveBypass**. No Windows x64 o plugin prepara o perfil Proton ou personalizado, sobe o WireSock com filtro por aplicativo e reinicia o Discord automaticamente.
+3. Entre em uma call e use câmera/Go Live. O túnel cobre o processo do Discord inteiro, incluindo gateway, login, voz, vídeo e anexos.
+4. Ao desativar o plugin, ele para somente o WireSock que ele próprio controla, limpa o estado de rede e reinicia o Discord.
 
-Se o Discord reconectar o gateway no meio da sessão (queda de rede, suspender o notebook), o socket novo nasce pela mesma saída e o desbloqueio sobrevive. Se a saída morrer, o batimento de 30 em 30 segundos já deixa uma reserva testada pronta para assumir. Só quando nenhuma reserva serve é que a conexão cai para a direta, e aí o plugin procura outra em segundo plano e, se a sessão continuar bloqueada, recarrega sozinho atrás da nova.
+O plugin não roteia a máquina inteira: navegadores, jogos e os demais aplicativos continuam na rede normal. Se houver WireSock ativo ou um serviço registrado com outro perfil, a ativação é recusada para não interferir na GUI, no standalone ou em outro plugin.
 
 ## Configuração
 
@@ -484,66 +485,59 @@ Nas settings do plugin:
   > **Cuidado ao forçar `brazil` aqui.** Há indício de que o servidor de mídia brasileiro é justamente onde a transmissão é recusada: numa sessão em que a call caiu no Brasil o Go Live não subiu, e numa sessão em que caiu em Santiago funcionou. São duas observações, não uma prova, mas o padrão seguro é não forçar. Use este campo se quiser priorizar latência e estiver disposto a perder o Go Live.
 
   Vale saber que isto é uma **preferência**, não uma ordem: o Discord pode ignorar e escolher outra região, e foi o que aconteceu no teste.
-- **Session routing**: o que atravessa a proxy. `Gateway only` (padrão) roteia só o WebSocket do gateway, que é o que libera o Go Live, e deixa o resto do Discord na velocidade máxima. `Gateway and login` também roteia a autenticação, escondendo seu IP real na hora do login — ao custo de uma abertura mais lenta. Nesse modo, se a saída falhar durante o login a conexão **não** cai para a direta: vazar o IP real no login seria o oposto do que a opção promete.
-- **Proxy**: proxy que carrega o gateway, no formato `esquema://host:porta` (`socks5`, `http` ou `https`). Se a sua pedir login, use `esquema://usuario:senha@host:porta`.
-  - Tor, se você usa: `socks5://127.0.0.1:9150` com o **Tor Browser** aberto, ou `socks5://127.0.0.1:9050` para o **daemon** `tor`.
-  - **Deixe vazio** para o plugin detectar um Tor local automaticamente e, se não achar, buscar uma proxy gratuita validada.
-- **Excluded countries**: códigos de país de duas letras separados por vírgula que nunca são usados (padrão: `BR`). O país conferido é o de **saída real**, medido através da proxy, não o que a lista afirma.
+- **VPN mode**: `ProtonVPN` gera um perfil WireGuard pela conta Proton; `Arquivo WireGuard personalizado` usa o `.conf` indicado em seguida.
+- **Custom config path**: caminho absoluto do `.conf`. O plugin copia o arquivo para `%LOCALAPPDATA%\GoLiveBypass\plugin-vpn`, remove DNS global do perfil e adiciona `AllowedApps` somente para o Discord e o `Update.exe` da instalação atual.
+- **Proton username**: usuário da conta ProtonVPN. A sessão fica na pasta privada do plugin; as configurações da GUI não são compartilhadas.
+- **Proton countries**, **free only** e **auto-ping**: filtros da seleção automática do helper Proton. `BR` é sempre excluído da saída.
+
+O painel também permite autenticar, resolver o CAPTCHA em uma janela oficial isolada, otimizar a rota, testar um `.conf` e restaurar a rede. Probes de IP, HTTP e rota são somente diagnósticos no log: não bloqueiam a ativação nem derrubam o Discord.
 
 ## Solução de problemas
 
-- **Discord carregando infinitamente**: não deveria acontecer — sem saída pronta, o roteador segura o gateway por no máximo 12s e depois o solta para a conexão direta. Se mesmo assim persistir, com o Discord fechado abra `%APPDATA%/Equicord/settings/settings.json` (ou `.../Vencord/...`; no Linux `~/.config/Equicord/settings/settings.json`, e com Discord por Flatpak `~/.var/app/com.discordapp.Discord/config/Equicord/settings/settings.json`) e coloque `"GoLiveBypass": { "enabled": false }`. Em `native-settings.json` a única chave deste plugin é `pool` (as saídas guardadas); apagá-la devolve tudo ao estado inicial. Se você usou uma versão anterior, apague também `verifiedProxy`, `bootPending` e `lastKnownProxy`, que não são mais lidas.
-- **"GoLiveBypass is reconnecting behind the proxy"**: a saída ficou pronta depois de o gateway já ter conectado, então a sessão nasceu desprotegida e o servidor manteve o bloqueio. O plugin procura uma saída que responda e recarrega o cliente sozinho para a sessão renascer atrás dela. São no máximo duas tentativas: sem esse teto, um bloqueio que a proxy não resolve viraria recarregamento sem fim.
-- **Meu proxy pede usuário e senha**: coloque no próprio endereço, `socks5://usuario:senha@host:porta`. Funciona para SOCKS5 e para proxy HTTP. Se a senha tiver `@` ou `:`, codifique esses caracteres (`@` vira `%40`, `:` vira `%3A`) — sem isso não dá para saber onde a senha termina. A senha nunca aparece no registro.
-- **"GoLiveBypass could not unlock this session"**: depois das recargas automáticas o servidor continuou bloqueando. O motivo vem junto, entre parênteses: `nenhuma saida respondeu` (nenhuma candidata passou no teste TLS real naquele momento — tente de novo, ou use Tor / uma proxy sua), `tentativas esgotadas` (duas recargas não bastaram), `roteador desligado` (a regra de rota não pegou — veja o registro).
-- **Quer ver o que aconteceu**: rode `/golivebypass` em qualquer canal, ou abra o arquivo em `%LOCALAPPDATA%\GoLiveBypass\golivebypass.log` (veja [O registro](#o-registro-o-que-o-plugin-anotou)). Ele copia um diagnóstico com o estado das travas, da transmissão, da região e o registro do processo principal — qual proxy foi testada, quanto tempo levou, em que país ela sai e por que foi recusada.
+- **WireSock externo detectado**: encerre a GUI, o standalone ou o outro plugin que controla o túnel. O plugin não faz `taskkill` amplo e não assume serviços externos.
+- **Windows x64 necessário**: Linux, macOS, Windows 32-bit e Windows ARM64 permanecem fora desta primeira etapa da migração.
+- **`recovery_required`**: a parada do serviço ou a restauração do lock/DNS não foi confirmada. Não tente iniciar outro perfil; abra o log e use **Restaurar rede** ou reinicie o Windows se o filtro continuar ativo.
+- **CAPTCHA Proton**: o login abre uma janela com origem oficial Proton, sem downloads, permissões ou navegação externa. Fechar a janela cancela a tentativa sem alterar a sessão.
+- **Quer ver o que aconteceu**: rode `/golivebypass` ou abra `%LOCALAPPDATA%\GoLiveBypass\plugin-vpn\plugin-vpn.log` (veja [O registro](#o-registro-o-que-o-plugin-anotou)). O arquivo inclui estado, ownership, início/parada do WireSock e probes log-only; não inclui senha nem token.
 - **A região da call não mudou**: saia e entre de novo no canal. Canais de servidor com região fixada por um admin ignoram sua preferência, e numa call que já está rolando a região já foi decidida.
-- **Captcha ou verificação de telefone no login**: o Discord marca muitos IPs de proxies públicas. Use Tor ou outra proxy.
+- **A VPN não ativou**: confirme que o helper `bin/win32-x64/proton-confgen.exe` veio no pacote do plugin. Em desenvolvimento, o helper precisa ser compilado pelo workflow de release ou disponibilizado em `GOLIVE_PLUGIN_PROTON_CONFGEN`.
 - **`Cannot find matching keyid` ao instalar as dependências**: é o corepack, não o plugin. Ele cria o atalho do `pnpm` antes de saber que versão usar, e na primeira execução busca essa versão no registro do npm conferindo a assinatura com chaves embutidas nele — as que vêm no Node 22 estão vencidas. O instalador detecta isso e instala o pnpm pelo npm. Se estiver fazendo à mão, rode `npm install -g pnpm` e siga com `pnpm install`.
 - **Erro de build `Could not resolve "./plugins/userplugins"`**: você copiou a pasta para dentro de `src/plugins/` por engano. O caminho certo é `src/userplugins/goLiveBypass` — a pasta `userplugins` fica em `src/`, **ao lado** de `plugins`, e pode ser necessário criá-la.
 - **Plugin não aparece na lista**: confirme que a pasta está em `src/userplugins/goLiveBypass` (com `index.tsx`, `native.ts` e `stability.ts`) e que você rodou `pnpm build` + `pnpm inject` e reiniciou o Discord.
 
 ## O registro: o que o plugin anotou
 
-Tudo o que o bypass faz vai para um arquivo, no plugin e no standalone, **no mesmo lugar**:
+O plugin e o standalone têm registros separados. O plugin WireGuard usa uma pasta privada e estável:
 
 | sistema | caminho |
 |---|---|
-| Windows | `%LOCALAPPDATA%\GoLiveBypass\golivebypass.log` |
-| Linux | `~/.local/share/GoLiveBypass/golivebypass.log` |
-| Linux, plugin com Discord por Flatpak | `~/.var/app/com.discordapp.Discord/data/GoLiveBypass/golivebypass.log` |
+| Plugin, Windows x64 | `%LOCALAPPDATA%\GoLiveBypass\plugin-vpn\plugin-vpn.log` |
+| Standalone, Windows | arquivo `golivebypass.log` do caminho legado |
+| Standalone, Linux | arquivo `golivebypass.log` do caminho legado |
 
-A linha do Flatpak não é uma exceção do plugin: ele grava em `$XDG_DATA_HOME/GoLiveBypass`, e dentro do sandbox essa variável aponta para outro lugar. Pelo mesmo motivo as configurações do mod ficam em `~/.var/app/com.discordapp.Discord/config/Equicord/settings/settings.json` (ou `.../Vencord/...`), e não em `~/.config`. O standalone não muda de lugar: o `.js` mora fora do sandbox, e o registro fica ao lado dele.
+O diretório também guarda `wireguard.conf`, `wiresock-discord.conf`, `proton-session.json` e o lock de ownership. A migração da GUI, quando aplicável, copia somente o perfil WireGuard compatível e a sessão Proton uma vez; nenhum settings ou estado de rede é compartilhado depois disso. O standalone continua com seu caminho e comportamento legados.
 
-Ele é cortado sozinho quando passa de 256 KB, então não cresce sem fim.
+O log do plugin é cortado quando passa de 256 KB e mantém uma cauda em memória. Ele registra transições de estado, processo/serviço controlado, resultado da limpeza e probes de rede/rota como diagnóstico — não é prova de IP geográfico nem bloqueia a ativação.
 
-No plugin, `/golivebypass` copia esse mesmo conteúdo já junto com o estado da sessão, pronto para colar num relato. No standalone o arquivo é o único caminho, porque não há interface para um comando.
+No plugin, `/golivebypass` copia o estado atual e o ring buffer do processo principal, pronto para colar num relato. No standalone o arquivo continua sendo o único caminho, porque não há interface para um comando.
 
 O registro responde as perguntas que a tela não responde:
 
-- **qual saída foi escolhida, em quanto tempo e de que país** — e quantas foram testadas e recusadas antes dela
-- **se o servidor atribuiu o bloqueio a você nesta sessão** (`atribuicao do video guard`), que é a diferença entre "a proxy funcionou" e "a proxy subiu tarde demais"
-- **se a sessão precisou ser recarregada**, e por quê
-- **a região que o Discord escolheu** e a lista completa que ele considerou
+- **se a instância é dona do serviço WireSock** ou encontrou outro controlador
+- **se o WireGuard iniciou, parou e restaurou o lock/DNS**
+- **se os probes de rota e conectividade responderam** — sempre como diagnóstico
+- **se o Discord abriu a sessão com o guard de vídeo atribuído**
 
-Um registro típico de uma abertura que deu certo:
+Um registro típico de uma ativação que deu certo:
 
 ```
-============================================================
-abrindo | win32 x64 | electron 42.7.1 | chrome 148.0.7778.280
-configuracao | proxy automatico | roteamento gateway | regiao de call automatica | paises fora BR
-roteador local de pe na porta 51234
-rota aplicada: gateway.discord.gg, remote-auth-gateway.discord.gg pelo roteador local, o resto em DIRECT
-25 candidatas depois do ranqueamento
-socks5://... recusada: saida em BR
-socks5://... passou: 1535ms, saida em DE
-saida escolhida: socks5://...
-sessao aberta | atribuicao do video guard: null
-  o cliente aceita video? supports true | supportsInApp true | desktop true
-o servidor liberou video nesta sessao, gateway por socks5://...
+abrindo plugin VPN | win32 x64 | electron 43.x
+WireSock SDK compatível encontrado | version=3.4.8.1
+serviço WireSock ativo com filtro por aplicativo | allowedApps=...Discord.exe, ...Update.exe
+diagnóstico assíncrono da rede | mode=log-only
+probe de rota do Discord concluído | mode=log-only
+sessão aberta | VPN active | ownership true
 ```
-
-A linha que importa é `atribuicao do video guard: null`. **`null` significa que o servidor nem tentou te bloquear** — foi o que a proxy comprou. Se aparecer `variantId: 2`, o gateway subiu pelo seu IP real, e o plugin vai recarregar para tentar de novo.
 
 ## Reportar um bug (GUI)
 
@@ -579,75 +573,46 @@ Sem GUI, compartilhe o arquivo de [O registro](#o-registro-o-que-o-plugin-anotou
 
 Em agosto de 2026, a ANPD [ordenou que o Discord suspendesse as transmissões ao vivo (Go Live) no Brasil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil), pouco depois de o país ter bloqueado o X (Twitter). Para quem depende dessas plataformas para se comunicar, organizar e denunciar, o recado foi claro: o acesso e a privacidade dos brasileiros na internet podem ser cortados por canetaço.
 
-O GoLiveBypass nasce dessa luta. Ele é uma ferramenta de **privacidade e resistência à censura**: garante que o momento mais sensível da sua sessão — a autenticação, quando sua conta é vinculada ao seu endereço de IP — aconteça atrás de uma proxy anônima.
+O GoLiveBypass nasce dessa luta. Ele é uma ferramenta de **privacidade e resistência à censura**: no plugin, a sessão do Discord pode ser iniciada dentro de um túnel WireGuard por aplicativo, sem transformar a conexão inteira do computador em VPN.
 
-**O que ele entrega, verificado na prática:** como a sessão do Discord nasce inteira atrás da proxy, o **Go Live e a câmera voltam a funcionar** para contas brasileiras — veja a seção abaixo.
+**O que ele entrega:** o patch do cliente e o túnel isolado trabalham juntos para devolver o **Go Live e a câmera** às contas brasileiras, mantendo os demais aplicativos fora do túnel. A primeira implementação do transporte do plugin é Windows x64.
 
 ## Go Live no Brasil: por que funciona
 
 Testes práticos mostram que o bloqueio do Go Live funciona assim:
 
 - O Discord verifica sua região **apenas no momento em que você entra num canal de voz** (`VOICE STATE UPDATE`), usando o **IP da conexão WebSocket do gateway** — e **nunca reavalia** durante a chamada.
-- O WebSocket do gateway é aberto no boot do app. Se ele nasce atrás de uma proxy fora do Brasil, o gate de região libera telas e câmera para contas brasileiras.
-- A mídia (UDP) não passa por verificação nenhuma — ela pode sair direta pelo seu IP real sem derrubar a liberação.
+- O WebSocket do gateway é aberto no boot do app. Se ele nasce pelo túnel WireGuard com uma saída fora do Brasil, o gate de região pode liberar telas e câmera para contas brasileiras.
+- A mídia, o login, os anexos e o restante do processo do Discord seguem o filtro por aplicativo; os demais processos do computador continuam diretos.
 
-Ou seja, o fluxo do GoLiveBypass — **o gateway nasce atrás da proxy e fica nela, enquanto todo o resto sai direto o tempo todo** — reproduz automaticamente o bypass manual "ligar VPN, abrir o Discord, entrar na call, desligar a VPN", sem a parte em que tudo ficava lento.
+Ou seja, o fluxo do GoLiveBypass — **o Discord nasce dentro do WireGuard, enquanto o restante do computador fica normal** — reproduz o bypass manual "ligar VPN, abrir o Discord, entrar na call, desligar a VPN", sem expor os demais aplicativos ao túnel.
 
 **Ressalvas honestas:**
 
-- Se a saída morrer no meio da sessão, o batimento de 30 em 30 segundos costuma perceber antes da sua transmissão e já troca por uma reserva viva — a reconexão do gateway nasce atrás dela e a liberação sobrevive. Só quando *nenhuma* reserva responde é que a conexão cai para a direta, e aí a próxima entrada em canal de voz volta a ser avaliada como BR: o bypass procura outra saída, o plugin detecta o bloqueio na próxima abertura de sessão e recarrega sozinho. Um **Ctrl+R** resolve na hora se você não quiser esperar.
+- Se o serviço WireSock morrer ou a restauração ficar inconclusiva, o plugin entra em `recovery_required` e registra o motivo. Ele não troca silenciosamente de saída, não bloqueia o Discord e não aplica um filtro amplo ao computador; use **Restaurar rede** e o log para concluir a recuperação.
 - Isso depende de comportamento atual do Discord, que pode mudar a qualquer momento.
 - Usar proxy/VPN para contornar a restrição pode violar os Termos de Serviço do Discord. Risco de punição à conta é baixo, mas existe — considere usar uma conta secundária.
 
 ## Avisos importantes
 
-- **Só funciona no Discord para computador** com Equicord ou Vencord injetado, incluindo o Discord instalado por Flatpak. **Vesktop** tem suporte manual — veja [Instalação no Vesktop](#instalação-no-vesktop). Equibop e Snap não: o Equibop traz o mod embutido e não carrega de um checkout, e o Snap fica dentro de um squashfs somente leitura. Não funciona na versão de navegador/extensão.
-- **Proxies gratuitas são fracas para anonimato**: o operador da proxy vê seus metadados de conexão, muitas estão mortas ou lentas, e o Discord pode pedir captcha para IPs de proxies públicas. Para anonimato real, **use Tor**.
+- **O transporte do plugin funciona nesta etapa somente no Discord desktop Windows x64** com Equicord ou Vencord injetado. Linux, macOS, Vesktop, Equibop, Snap e navegador continuam fora desta migração de transporte.
 - Usar clientes modificados viola os Termos de Serviço do Discord. Use por sua conta e risco.
-- A proxy carrega **só o gateway** (e também o login, se você ativar isso na configuração). Todo o resto — API, CDN, anexos, atualizações e a mídia das calls — sai direto com seu IP real o tempo todo.
-- **O plugin nunca te deixa sem Discord.** Quem conversa com a proxy é um roteador local do plugin: se a saída falhar, aquela conexão cai para a direta e a busca por outra recomeça em segundo plano. O pior caso é abrir o Discord *sem* Go Live, nunca ficar sem conseguir abrir.
+- O WireGuard do plugin carrega o processo inteiro do Discord por aplicativo. A GUI, navegadores, jogos e os demais programas ficam fora do filtro.
+- `network-lock` fica desativado de propósito para preservar a rede normal do computador. Se a inicialização falhar, a operação é abortada; estado ativo significa que o processo/serviço próprio foi iniciado, não prova geográfica do IP de saída.
+- A conta Proton e os perfis `.conf` são segredos do usuário. O plugin mantém esses arquivos em uma pasta privada e não os envia para a API do projeto.
 
 ## Como funciona
 
-São duas travas independentes, e o plugin desarma as duas de formas diferentes.
+O plugin mantém duas responsabilidades separadas:
 
-### Trava 1: o cliente se auto-bloqueia
+1. O patch do renderer mantém a interface de câmera/Go Live coerente com o experimento de vídeo do Discord e preserva as preferências de região da call/stream.
+2. O processo principal controla uma sessão WireGuard/WireSock por aplicativo. O perfil usa a rota padrão, mas `AllowedApps` limita o túnel ao `Discord.exe`, ao `Update.exe` da instalação atual e, quando disponível, a um helper temporário de diagnóstico.
 
-O Discord embarca um experimento de usuário que desliga vídeo. Quando o servidor te coloca nele, o cliente desabilita sozinho os botões de câmera e Go Live: é o `MediaEngineStore.supportsInApp(VIDEO)` que passa a retornar falso, e com ele o `canGoLive`.
+Ao ativar, o controlador valida ou gera o perfil, reserva o lock global, sanitiza DNS/AllowedApps, configura o serviço com `network-lock disabled`, confirma o ownership e reinicia o Discord. Ao desativar, ele para apenas serviços e PIDs cujo comando aponta para o perfil privado, reseta o network lock, limpa DNS somente dos adaptadores WireSock/ProTUN e confirma que não sobrou processo.
 
-O plugin esvazia a tabela de variações desse experimento. Qualquer bucket que o servidor atribua passa a cair na configuração padrão, que tem vídeo ligado. Isso destrava o cliente inteiro de uma vez, porque todos os consumidores leem do mesmo lugar.
+O estado `active` é deliberadamente operacional: significa que o serviço e o processo próprio foram confirmados. Os probes de DNS, HTTPS e rota são executados em segundo plano e ficam no log como evidência auxiliar; uma falha de probe não bloqueia a ativação, não troca a saída no meio da call e não encerra o Discord.
 
-### Trava 2: o servidor recusa a transmissão
-
-Destravar o cliente não basta: o servidor decide separadamente se você pode transmitir, e essa decisão é tomada **uma única vez, quando você entra no canal de voz**, a partir do IP de origem da **conexão de gateway** (o WebSocket que carrega o `VOICE_STATE_UPDATE`). Depois disso não há reavaliação: o servidor de voz só transporta mídia por UDP.
-
-Por isso o plugin proxia **só o gateway**:
-
-1. Na abertura do app, o plugin sobe um **roteador SOCKS local** (só escuta em `127.0.0.1`) e instala uma regra PAC que aponta unicamente os hosts de gateway para ele. Todo o resto segue a regra que o seu sistema já usava.
-2. O roteador escolhe a saída — a sua proxy, um Tor local, ou uma gratuita testada — e segura o gateway por **até 12 segundos** enquanto isso. Estourado o prazo, aquela conexão sai direta: perde-se o Go Live daquela sessão, nunca o Discord.
-3. O gateway nasce atrás da saída e **permanece roteado pela sessão inteira**: se a rede oscilar e o WebSocket reconectar, ele renasce pela mesma saída e a liberação sobrevive. Enquanto a sessão está de pé, um **batimento a cada 30 segundos** reconfere a saída ativa e as reservas e promove uma reserva viva assim que a ativa falha — antes de a reconexão precisar dela. Só se nada responder é que a conexão cai para a direta, e tudo isso vai para o registro.
-4. Cerca de 1,5s depois da sessão abrir (a atribuição do experimento só é reavaliada alguns ticks após o `CONNECTION_OPEN`), o plugin confere o veredito no servidor e te diz num toast se a sessão ficou liberada de verdade. Se não ficou, ele recarrega o cliente atrás da saída — no máximo duas vezes, para nunca virar tela de carregamento infinita.
-
-O momento ainda importa, mas a corrida mudou de lado: quem espera é o socket do gateway, segurado pelo roteador, e não a abertura inteira do app.
-
-### Como as proxies gratuitas são escolhidas
-
-- A lista da ProxyScrape já traz `alive`, `uptime` e `timeout`. O plugin **ranqueia por esses campos** (uptime >= 90, timeout <= 1500ms) em vez de sortear a lista.
-- Descarta a porta 4145: numa amostra medida, 14 de 14 proxies nessa porta interceptavam TLS com certificado forjado.
-- Testa as candidatas **em lotes de 12 correndo juntas, e a primeira que responde bem ganha** — testar uma por uma somava dezenas de segundos bem na janela em que o gateway conecta.
-- O teste é um **handshake TLS real através do túnel**: o `cdn-cgi/trace` da Cloudflare prova túnel, certificado válido, **país de saída real** e IP de saída numa conexão só; em seguida uma conexão ao `gateway.discord.gg` prova que o Discord é alcançável por ela (qualquer resposta HTTP serve — o gateway responde 404 a um GET comum, e 404 já prova o caminho).
-- O país conferido é o de **saída real**, medido através da proxy, porque o `countryCode` da lista descreve o IP de entrada, que frequentemente é diferente do de saída.
-
-Medido: escolher aleatoriamente e testar só o handshake acerta 12% das vezes; ranquear e exigir TLS real acerta 60%. Ainda assim, um Tor local ganha de qualquer lista gratuita, e é por isso que o plugin o prefere.
-
-### Proteções contra travar o Discord
-
-- **Quem decide o fallback é o roteador, não o Chromium.** A regra PAC não tem alternativa do tipo `PROXY;DIRECT`: se a saída falha, a conexão cai para a direta *dentro* do roteador, com registro. Um proxy morto nunca deixa o Discord preso na tela de abertura — e nunca faz o Chromium desistir da regra em silêncio.
-- **Orçamento de espera por conexão**: o gateway aguarda uma saída por no máximo 12s; estourado, sai direto. Só o socket do gateway espera — a abertura do app nunca é segurada.
-- **Reservas mantidas vivas (batimento)**: até 5 saídas ficam guardadas num pote em `native-settings.json`, sob `pool`. A cada **30 segundos**, com a sessão já aberta, a saída ativa e todas as reservas são reconferidas com um túnel de verdade até o gateway do Discord. Um falso negativo isolado nunca troca a saída ativa: tanto standalone quanto plugin exigem **dois batimentos consecutivos** antes de assumir uma reserva **testada há 30 segundos** ou retirar a saída morta do pote. Isso evita reconectar o gateway no meio da reentrada de uma Live (issues #170/#171). Quando sobra menos de uma reserva viva de folga, o pote é reabastecido em segundo plano — sem trocar a saída ativa, que é o IP que o servidor já aceitou nesta sessão.
-- **Reservas correndo juntas, não em fila**: quando a saída ativa não entrega uma conexão, todas as reservas são tentadas **ao mesmo tempo** e a primeira que responder leva. Em fila, com 2,5s de prazo cada, a troca podia somar mais de dez segundos — tempo de sobra para o Chromium desistir do roteador.
-- **Reutilizar só depois de testar de novo**: no boot, as saídas guardadas são revalidadas (orçamento de 2,5s) antes de valerem. Descobrir uma do zero leva de 8 a 23 segundos; o que causava o travamento antigo era reaplicar uma proxy morta às cegas, e isso não acontece mais.
-- **A regra de proxy do sistema é respeitada**: se ela varia por host (proxy corporativo ou PAC de verdade), o plugin se recusa a ligar o roteador em vez de atropelar a política da rede.
+O modo Proton usa o `proton-confgen.exe` x64 empacotado no release para autenticar, consultar o plano e selecionar uma rota. O modo personalizado aceita somente um `.conf` WireGuard válido com rota padrão. A sessão Proton, o perfil e o lock vivem em `%LOCALAPPDATA%\GoLiveBypass\plugin-vpn`, sem compartilhar settings com a GUI ou com o standalone.
 
 ## Dependências: o que baixar e como instalar
 
@@ -702,14 +667,15 @@ Se der erro de permissão no Windows, abra o PowerShell **como administrador** e
 O plugin **só funciona no app de computador** (ele usa recursos do Electron que o navegador não tem):
 
 - **Discord normal**: baixe em [discord.com/download](https://discord.com/download) (stable, PTB ou Canary servem). O Flatpak (`com.discordapp.Discord`) também serve, do sistema ou do usuário; ou
-- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles, mas o **Vesktop tem suporte manual** — veja [Instalação no Vesktop](#instalação-no-vesktop).
+- **Vesktop/Equibop**: apps alternativos que já trazem o mod embutido. Os instaladores daqui não mexem neles; o patch do plugin pode ser carregado manualmente, mas o transporte VPN desta etapa não foi validado nesses hosts.
 - **Não funciona** no Discord aberto no navegador nem no celular.
 
-### Opcional: Tor — só se você quiser mais estabilidade
+### Componentes da VPN do plugin
 
-**Não é necessário.** Por padrão o plugin escolhe e testa uma proxy gratuita sozinho, sem nenhuma dependência extra.
-
-O Tor é só uma opção para quem quer mais estabilidade: ele é mais rápido e não morre no meio do caminho como as proxies públicas. Se você já tiver o [Tor Browser](https://www.torproject.org/download/) aberto, o plugin detecta sozinho em `127.0.0.1:9150`; o daemon `tor` fica em `9050`.
+O transporte desta migração exige **Windows x64**. O pacote de release traz o
+`proton-confgen.exe` x64; o plugin baixa o SDK oficial do WireSock somente quando
+necessário, confere o SHA-256 fixado e pede elevação do Windows para instalar o serviço.
+Não instale Tor, proxy SOCKS ou PAC para usar este caminho.
 
 ## Instalação: passo a passo completo
 
@@ -777,8 +743,8 @@ O instalador abre uma janelinha perguntando **qual Discord** você usa (Stable, 
 1. Abra o Discord
 2. Vá em **Configurações → Equicord (ou Vencord) → Plugins** e ative **GoLiveBypass**
 3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso na seção [Configuração](#configuração) antes de mudar)
-4. Reinicie o Discord por completo (bandeja, Quit). O roteador local sobe antes do gateway conectar, e só ele passa pela proxy
-5. Entre num canal de voz: **Go Live e câmera liberados**. Quem escolhe o servidor de voz é o Discord, e pode não ser o brasileiro. Não force `brazil` em **Voice region** sem ler o aviso na seção Configuração
+4. Ative o plugin; ele prepara o WireGuard/WireSock e reinicia o Discord automaticamente
+5. Entre num canal de voz: **Go Live e câmera liberados** quando o servidor aceitar a saída do túnel. Quem escolhe o servidor de voz é o Discord, e pode não ser o brasileiro. Não force `brazil` em **Voice region** sem ler o aviso na seção Configuração
 
 ## Instalação no Vesktop
 
@@ -844,20 +810,21 @@ Isso gera a pasta `dist/` com o Vencord modificado já incluindo o plugin.
 1. Abra o Vesktop
 2. Vá em **Configurações → Vencord → Plugins** e ative **GoLiveBypass**
 3. Deixe **Voice region** em `Automatic`, que é o padrão (leia o aviso na seção [Configuração](#configuração) antes de mudar)
-4. Reinicie o Vesktop por completo (bandeja, Quit)
-5. Entre num canal de voz: **Go Live e câmera liberados**
+4. Reinicie o Vesktop por completo (bandeja, Quit); a VPN do plugin ainda não foi validada E2E neste host alternativo
+5. Entre num canal de voz: o patch do plugin pode liberar **Go Live e câmera**, mas o transporte WireGuard desta etapa é suportado oficialmente somente no Discord desktop Windows x64
 
 ## Estrutura
 
 ```
 goLiveBypass/
-├── index.tsx                      # renderer: patches do video guard e do stream, seletor de região,
-│                                  #   override do RTCRegionStore, veredito da sessão, eventos de fluxo
-├── native.ts                      # processo principal: roteador SOCKS local em 127.0.0.1, PAC por host,
-                                   #   escolha da saída com teste TLS real, pote de reservas, registro,
-                                   #   nova tentativa com recarga
-└── stability.ts                   # decisões puras/fail-closed: Tor estrito, morte manual confirmada e
-                                   #   guarda do falso estado de Live/erro 2001
+├── index.tsx                      # renderer: patch do video guard, regiões, painel VPN e diagnóstico
+├── native.ts                      # facade Electron: CAPTCHA isolado, updater e controller da VPN
+├── vpn-controller.ts              # estado, ownership, migração pontual, watchdog e reinício
+├── vpn-windows.ts                 # WireSock/WFP, AllowedApps, serviço e restauração de rede
+├── vpn-proton.ts                  # sidecar Proton, sessão, seleção de rota e CAPTCHA
+├── vpn-types.ts                   # contratos puros, validação e sanitização do perfil
+├── stability.ts                   # guarda pura do falso estado de Live/erro 2001
+└── bin/win32-x64/proton-confgen.exe # helper x64 incluído nos releases
 
 installer/
 ├── GoLiveBypass-Installer.bat     # Windows: dois cliques, libera a execução e chama o .ps1
@@ -954,18 +921,16 @@ aparecem medindo, não lendo.
 
 # English
 
-**GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**. On every launch it brings up a small local SOCKS router (loopback only) and points only Discord's gateway WebSocket hosts at it; the router carries that traffic through an exit outside Brazil — your own proxy, a local Tor, or a free proxy picked and tested for you — while **everything else stays direct at full speed**. Discord's region gate, evaluated once at voice-channel join from the gateway origin IP and never re-evaluated mid-call, then unlocks Go Live and camera. As a bonus, the login itself can optionally be routed too, hiding your real IP during authentication.
+**GoLiveBypass** is an **Equicord/Vencord** plugin, made by a Brazilian developer, that **restores Go Live and camera for Brazilian Discord users**. Its first migrated transport targets Windows x64: the main process brings up an isolated WireGuard/WireSock profile whose `AllowedApps` contains only the current Discord executable, its updater and an optional route-probe helper. Browsers, games and other processes remain on the normal network. The plugin does not use the legacy SOCKS/PAC/Tor transport.
 
-It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). Because the gateway stays routed for the whole session, reconnects are born behind the same exit and the unlock survives network hiccups; if the exit dies, the router fails over to a tested reserve or fails open to a direct connection — never leaving you unable to open Discord. If the server still reports the session blocked, the plugin reloads the client behind the exit, at most twice. Bypassing the restriction may violate Discord's ToS.
+It was written after Brazil's data protection authority (ANPD) [ordered Discord to suspend live streaming (Go Live) in Brazil](https://www.gov.br/anpd/pt-br/assuntos/noticias/em-medida-preventiva-anpd-determina-que-discord-suspenda-transmissoes-ao-vivo-no-brasil) in August 2026, shortly after the country blocked X (Twitter). The tunnel starts and stops with the plugin and the Discord process is restarted automatically so the whole session uses the selected profile. If service ownership or network restoration cannot be confirmed, the plugin reports a recovery state instead of taking over another WireSock instance. Bypassing the restriction may violate Discord's ToS.
 
-- Desktop Discord with Equicord or Vencord injected, Flatpak included. **Vesktop is supported manually** — see [Instalação no Vesktop](#instalação-no-vesktop). Equibop and Snap are not: Equibop bundles the mod instead of loading it from a checkout, and Snap lives in a read-only squashfs. Not available on the browser extension.
-- Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. Tor is optional, not required: by default the plugin picks and validates a free proxy on its own.
-- **Your calls stay on the region you pick.** Creating the session abroad makes Discord rank foreign voice servers, so the plugin overrides the three `RTCRegionStore` getters that feed `preferred_region` / `preferred_regions` in the gateway `VOICE_STATE_UPDATE`. The override is evaluated at read time, so Discord's latency test cannot undo it, and it writes nothing into Discord's persisted state, so the region is not left pinned after you remove the plugin. Restored on `stop()`.
-- Proxy order: your manual proxy, then the exits saved from last boots (revalidated), then a local Tor (`127.0.0.1:9150` for Tor Browser, `9050` for the daemon), then a validated free proxy.
-- Free proxies are weak for anonymity — prefer Tor.
-- Free proxies are ranked by the `alive` / `uptime` / `timeout` metadata the list already returns, port 4145 is dropped (measured 14/14 TLS interception), candidates race in batches of 12 and the first good one wins, and the test is a real TLS handshake through the tunnel against Cloudflare's trace (proving tunnel, valid certificate, real exit country and exit IP in one connection) followed by a reachability check against `gateway.discord.gg`. Up to 5 verified exits are kept for 24h in a pool. Measured: random pick with a handshake-only test works 12% of the time, ranked with a real TLS test works 60%.
-- It cannot leave you unable to open Discord: the fallback decision lives inside the local router, not in the PAC (no `PROXY;DIRECT` for Chromium to silently prefer), a per-connection 12s stall budget fails open to direct, reserve exits take over mid-session, and a system proxy policy that varies per host (corporate PAC) makes the plugin refuse to enable rather than trample it.
-- Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. On **Vesktop**, skip `pnpm inject` and point Vesktop's *Vencord Location* at your build's `dist` folder instead (see [Instalação no Vesktop](#instalação-no-vesktop)).
+- Desktop Discord with Equicord or Vencord injected; the migrated VPN is Windows x64 only. The renderer patch may load in other Electron hosts, but Vesktop and non-Windows VPN behavior are not validated by this migration.
+- Dependencies: Git, Node.js 22+, pnpm 11 (via `corepack enable`), and a desktop Discord client. The release package includes `proton-confgen.exe`; WireSock is installed on demand with a pinned official hash.
+- **Your calls stay on the region you pick.** The plugin keeps its `RTCRegionStore` preference override separate from the VPN controller and restores it on `stop()`.
+- The plugin stores its WireGuard profile, Proton session and ownership lock in `%LOCALAPPDATA%\GoLiveBypass\plugin-vpn`; it does not read GUI settings or standalone state except for the one-time compatible-file migration described above.
+- DNS/HTTPS/route probes are diagnostic-only. They are logged for troubleshooting and do not block activation, change the route during a call, or stop Discord.
+- Install: copy the `goLiveBypass` folder into `src/userplugins/` of your Equicord or Vencord clone, then `pnpm install && pnpm build && pnpm inject`, fully restart Discord, and enable **GoLiveBypass** in plugin settings. The automatic installer and the standalone remain paused/separate in this migration.
 - Made by **bezumiya** — [GitHub](https://github.com/bezumiya/GoLiveBypass), [Twitter](https://twitter.com/obezumiya), Discord `1366453661970071633`.
 - Thanks to **[mazxxy](https://github.com/mazxxy)** for the idea that became the project's backbone: a local SOCKS5 with an embedded PAC routing only the gateway through the proxy ([#3](https://github.com/bezumiya/GoLiveBypass/pull/3), merged for authorship — the lines were later rewritten, but the design is his).
 - Thanks to **[mazxxy](https://github.com/mazxxy)** for the idea this project is built on: he was the first to notice that `session.setProxy` applies to the whole session, and proposed the design still in use — a local SOCKS5 with an embedded PAC routing **only the gateway** through the proxy. Thanks to **[Vithor](https://github.com/Vith0r)** for the installer: he wrote the first GoLiveBypass installer on his own and showed that the whole setup could be automated in a single script. Thanks to **[cleo-dev](https://github.com/cleo-dev)** for the graphical app, built from scratch. Thanks to **[Eduardo Vasconcelos](https://github.com/EduardoVasconceloss)** for the [StreamFix](https://github.com/EduardoVasconceloss/StreamFix) fork: his adversarial reviews found real bugs (verdict read too early, retry ceiling raced, system proxy policy trampled) and he ported the local SOCKS router into the plugin — fixes and improvements adopted here. Thanks to **[gabrigode](https://github.com/gabrigode)** for the Linux installer improvements: Flatpak support for system and user installs, including the sandbox filesystem override. Thanks to **[StellaThimoty](https://github.com/StellaThimoty)** for finding and testing the manual Vesktop path, and to **[pdl-clay](https://github.com/pdl-clay)** for turning it into the step-by-step guide in this README. Thanks to **[Victor Mello](https://github.com/victorsvart)** for the [GUI-MacOS](https://github.com/victorsvart/GoLiveBypass-GUI-MacOS) fork: He ported the GUI app to MacOS. Thanks to **[Claude](https://claude.com/claude-code)** for the hand on the code: much of this was written and debugged alongside it, mostly the bugs that only show up when you measure instead of read.

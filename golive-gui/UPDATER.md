@@ -1,15 +1,17 @@
 # Auto-update do GoLiveBypass — guia do mantenedor
 
-O app se atualiza sozinho consultando as **releases do GitHub** (`api.github.com`),
-sem servidor intermediário. Este documento explica como configurar, publicar e
-testar — inclui o que é obrigatório para o auto-update funcionar em cada SO.
+O app recebe um **pulso SSE** da API Go quando uma release é publicada e então
+consulta as **releases do GitHub** (`api.github.com`) diretamente. A API não
+entrega executáveis nem digests: ela só acorda o updater. Este documento explica
+como configurar, publicar e testar — inclui o que é obrigatório para o
+auto-update funcionar em cada SO.
 
 ## Como funciona
 
 | SO | Mecanismo | Requisito |
 |----|-----------|-----------|
-| Windows | Updater **portable** próprio (`electron/updater.ts`): consulta a release, baixa e confere o `.exe`, agenda a troca via `PORTABLE_EXECUTABLE_FILE` depois da saída do processo e reabre | Nenhum (não precisa assinar) |
-| Linux | `electron-updater` nativo (AppImageUpdater) com **download diferencial** (blockMap) | Nenhum |
+| Windows | Updater **portable** próprio (`electron/updater.ts`): recebe o pulso, consulta a release, baixa e confere o `.exe`, deixa o update pendente e agenda a troca via `PORTABLE_EXECUTABLE_FILE` somente após o pedido de reinício | Nenhum (não precisa assinar) |
+| Linux | `electron-updater` nativo (AppImageUpdater) com **download diferencial** (blockMap), acordado pelo pulso | Nenhum |
 | macOS | **desligado por enquanto** — ver abaixo | **Obrigatório: app assinado** (sem assinatura o download falha) |
 
 O `publish` está configurado em `golive-gui/package.json`:
@@ -22,6 +24,32 @@ O `publish` está configurado em `golive-gui/package.json`:
   "releaseType": "release"
 }
 ```
+
+## API do pulso
+
+A GUI conecta em:
+
+```text
+https://api.skyplaceia.com/bugs/v1/updates/stream
+```
+
+O servidor mantém o SSE público com limite de 100 conexões, no máximo 2 por IP
+e heartbeat de 20 segundos. A conexão reconecta com backoff quando a API cai.
+O fallback continua existindo: a GUI consulta o updater no boot e uma vez por
+hora. Se o GitHub ainda não tiver propagado o asset na hora do webhook, há duas
+retentativas em 30 s e 120 s.
+
+No deploy da API, configure `GITHUB_WEBHOOK_SECRET` e o webhook do repositório:
+
+```text
+POST https://api.skyplaceia.com/bugs/v1/updates/github/webhook
+X-GitHub-Event: release
+```
+
+O webhook deve usar `application/json`, o mesmo segredo HMAC e somente o evento
+**Release**. A API aceita apenas `action=published`, `draft=false` e o
+`GITHUB_REPO` configurado. Consulte [api/deploy/README.md](../api/deploy/README.md)
+para o checklist do servidor.
 
 ## Publicar uma release (fluxo do CI)
 
@@ -81,10 +109,13 @@ desabilitado (o app funciona, mas não atualiza sozinho).
 
 O fluxo de atualização avisa antes de instalar:
 
-- **Mac/Linux**: o download corre em background; ao terminar, aparece um diálogo
+- **Linux**: o download corre em background; ao terminar, aparece um diálogo
   *"GoLiveBypass X.Y.Z foi baixada — Reiniciar agora?"* — só instala com o OK
-- **Windows portable**: ao detectar a versão nova, pergunta *"Atualizar agora?"*
-  antes de baixar/substituir
+- **Windows portable**: ao receber o pulso, baixa e valida em background; ao
+  terminar, pergunta *"Reiniciar agora?"*. Se o usuário escolher **Depois** ou
+  o app estiver apenas na bandeja, o arquivo fica guardado com seu digest e o
+  item **Reiniciar para atualizar** aparece na bandeja. A preferência de
+  atualizações desliga o pulso e as consultas automáticas.
 
 ## Teste E2E (procedimento validado)
 
@@ -130,8 +161,9 @@ npm run build:win          # ou publish:win com GH_TOKEN
 gh release create v1.1.5-test --repo SEU_FORK/GoLiveBypass \
   dist-app/GoLiveBypass.exe dist-app/latest.yml
 
-# 3. Roda o exe antigo (1.0.0); ele detecta a 1.1.5, pergunta "Atualizar agora?",
-#    baixa/confere, encerra o processo, troca o exe pelo helper externo e reabre
+# 3. Roda o exe antigo (1.0.0); o webhook acorda a consulta, ele baixa/confere,
+#    pergunta "Reiniciar agora?", encerra o processo, troca o exe pelo helper
+#    externo e reabre. Escolha "Depois" e confira o item da bandeja.
 #    a versão nova
 ```
 
@@ -140,8 +172,9 @@ gh release create v1.1.5-test --repo SEU_FORK/GoLiveBypass \
   portable) para achar o exe em uso — sem ela o update é pulado
 - O helper externo espera até 90 tentativas, com aproximadamente 1s entre elas,
   e só move o exe atual depois que o processo antigo liberou a imagem
-- Teste também o fluxo "Depois": o app continua rodando e a checagem periódica
-  (a cada 4h) oferece de novo
+- Teste também o fluxo "Depois": o app continua rodando, o update permanece
+  pendente após reiniciar a GUI e o item da bandeja permite aplicar sem novo
+  download
 
 ### macOS — procedimento
 

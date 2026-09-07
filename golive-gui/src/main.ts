@@ -87,7 +87,7 @@ declare global {
       loginProton: (payload: { username: string; password?: string; twoFactorCode?: string }) => Promise<{ success: boolean; code?: string; message?: string; error?: string; retryable?: boolean }>;
       onProtonCaptchaStatus: (callback: (status: string) => void) => void;
       logoutProton: () => Promise<boolean>;
-      optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; requestId?: string }) => Promise<{
+      optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; refreshOnStartup?: boolean; requestId?: string }) => Promise<{
         success: boolean;
         server?: string;
         country?: string;
@@ -115,6 +115,7 @@ declare global {
         country: string;
         freeOnly: boolean;
         autoPing: boolean;
+        autoFailover: boolean;
         lastServer?: any;
       }>;
       getProtonPlan: (options?: { force?: boolean }) => Promise<{
@@ -127,6 +128,7 @@ declare global {
         error?: string;
       }>;
       setProtonSettings: (settings: any) => Promise<boolean>;
+      onProtonFailoverNotice?: (callback: (notice: { message: string }) => void) => unknown;
     }
   }
 }
@@ -205,6 +207,7 @@ let hasSelectedConf = false;
 const appVersionEl = document.getElementById('appVersion');
 const startupToggle = document.getElementById('startupToggle') as HTMLInputElement;
 const autoUpdateToggle = document.getElementById('autoUpdateToggle') as HTMLInputElement | null;
+const autoFailoverToggle = document.getElementById('autoFailoverToggle') as HTMLInputElement | null;
 const updateChannelRow = document.getElementById('updateChannelRow') as HTMLElement | null;
 const updateChannelToggle = document.getElementById('updateChannelToggle') as HTMLInputElement | null;
 const settingsBtn = document.getElementById('settingsBtn') as HTMLButtonElement | null;
@@ -236,6 +239,7 @@ function syncThemeOptions() {
 function openSettingsDialog() {
   if (!settingsDialog) return;
   syncThemeOptions();
+  void refreshAutoFailover();
   settingsDialog.hidden = false;
   settingsClose?.focus();
 }
@@ -470,6 +474,15 @@ async function refreshAutoUpdate() {
     if (updateChannelToggle) {
       updateChannelToggle.checked = (await window.api.getUpdateChannel()) === 'beta';
     }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function refreshAutoFailover() {
+  try {
+    const settings = await window.api.getProtonSettings();
+    if (autoFailoverToggle) autoFailoverToggle.checked = settings.autoFailover !== false;
   } catch (err) {
     console.error(err);
   }
@@ -847,6 +860,7 @@ async function refreshProtonState(forcePlan = false) {
   try {
     const s = await window.api.getProtonSettings();
     if (generation !== protonStateGeneration) return;
+    if (autoFailoverToggle) autoFailoverToggle.checked = s.autoFailover !== false;
     if (protonCountrySelect) {
       protonCountrySelect.value = s.country || '';
     }
@@ -1050,7 +1064,7 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
 
   try {
     const country = protonCountrySelect?.value || '';
-    const res = await window.api.optimizeProtonRoute({ country, autoPing: true, speedTest, reuseMeasured: onStartup, requestId: protonOptimizationRequestId });
+    const res = await window.api.optimizeProtonRoute({ country, autoPing: true, speedTest, refreshOnStartup: onStartup, requestId: protonOptimizationRequestId });
 
     if (res.deferred) {
       closeProtonMeasurementDialog(!onStartup);
@@ -1318,6 +1332,15 @@ autoUpdateToggle?.addEventListener('change', async () => {
   }
 });
 
+autoFailoverToggle?.addEventListener('change', async () => {
+  if (!autoFailoverToggle) return;
+  try {
+    await window.api.setProtonSettings({ autoFailover: autoFailoverToggle.checked });
+  } catch {
+    autoFailoverToggle.checked = !autoFailoverToggle.checked;
+  }
+});
+
 // Canal de atualizacao: opt-in dos testadores para receber prereleases (beta).
 updateChannelToggle?.addEventListener('change', async () => {
   if (updateChannelToggle) {
@@ -1326,6 +1349,9 @@ updateChannelToggle?.addEventListener('change', async () => {
 });
 
 window.api.onRefreshAutoUpdate?.(refreshAutoUpdate);
+window.api.onProtonFailoverNotice?.((notice) => {
+  if (notice?.message) setProtonFeedback(notice.message, 'err');
+});
 
 // ---------------------------------------------------------------------------
 // Modo desenvolvedor: so o toggle aqui. Logs e report ficam numa janela aparte.

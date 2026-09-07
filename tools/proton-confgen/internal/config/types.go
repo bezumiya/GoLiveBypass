@@ -66,4 +66,11 @@ type Config struct {
 	CheckSession   bool
 	CheckPlan      bool
 	LoginOnly      bool
+
+	// Route pool mode generates several ping-ranked profiles without opening
+	// concurrent tunnels. It is used by the GUI's Proton Free failover path.
+	RoutePool          bool
+	RoutePoolSize      int
+	RoutePoolOutputDir string
+	ExcludedServers    []string
 }

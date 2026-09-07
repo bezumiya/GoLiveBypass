@@ -47,7 +47,7 @@ import { ipcRenderer } from 'electron';
   onProtonCaptchaStatus: (callback: (status: string) => void) =>
     ipcRenderer.on('proton-captcha-status', (_event, status: string) => callback(status)),
   logoutProton: () => ipcRenderer.invoke('logout-proton'),
-  optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; requestId?: string }) =>
+  optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; refreshOnStartup?: boolean; requestId?: string }) =>
     ipcRenderer.invoke('optimize-proton-route', options),
   cancelProtonOptimization: (requestId: string) => ipcRenderer.invoke('cancel-proton-optimization', requestId),
   onProtonOptimizationProgress: (callback: (progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => void) => {
@@ -58,4 +58,6 @@ import { ipcRenderer } from 'electron';
   getProtonSettings: () => ipcRenderer.invoke('get-proton-settings'),
   getProtonPlan: (options?: { force?: boolean }) => ipcRenderer.invoke('get-proton-plan', options),
   setProtonSettings: (settings: any) => ipcRenderer.invoke('set-proton-settings', settings),
+  onProtonFailoverNotice: (callback: (notice: { message: string }) => void) =>
+    ipcRenderer.on('proton-failover-notice', (_event, notice: { message: string }) => callback(notice)),
 };

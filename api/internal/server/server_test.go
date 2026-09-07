@@ -1,8 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -36,15 +41,16 @@ func newTestApp(t *testing.T, cfg *config.Config, f *fakeIssues) *echo.Echo {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		APIToken:        "segredo",
-		GitHubToken:     "gh",
-		GitHubRepo:      "owner/repo",
-		Labels:          []string{"bug"},
-		Port:            "8080",
-		RateLimitPerMin: 1000,
-		BlockSeconds:    300,
-		MaxLogBytes:     262144,
-		LogLevel:        "info",
+		APIToken:            "segredo",
+		GitHubToken:         "gh",
+		GitHubWebhookSecret: "webhook-secret",
+		GitHubRepo:          "owner/repo",
+		Labels:              []string{"bug"},
+		Port:                "8080",
+		RateLimitPerMin:     1000,
+		BlockSeconds:        300,
+		MaxLogBytes:         262144,
+		LogLevel:            "info",
 	}
 }
 
@@ -69,6 +75,90 @@ func TestHealthz(t *testing.T) {
 	}
 	if got := strings.TrimSpace(rec.Body.String()); got != `{"status":"ok"}` {
 		t.Errorf("body = %s", got)
+	}
+}
+
+func signedWebhook(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func webhookBody(action, repo, tag string, draft, prerelease bool) []byte {
+	return []byte(fmt.Sprintf(`{"action":%q,"repository":{"full_name":%q},"release":{"tag_name":%q,"draft":%t,"prerelease":%t,"published_at":"2026-09-07T12:00:00Z"}}`, action, repo, tag, draft, prerelease))
+}
+
+func TestGitHubWebhookAndUpdateStream(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{})
+	ts := httptest.NewServer(e)
+	defer ts.Close()
+
+	body := webhookBody("published", "owner/repo", "v2.0.6", false, false)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/updates/github/webhook", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Event", "release")
+	req.Header.Set("X-GitHub-Delivery", "delivery-1")
+	req.Header.Set("X-Hub-Signature-256", signedWebhook(body, "webhook-secret"))
+	webhookResponse, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webhookResponse.Body.Close()
+	if webhookResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, want 202", webhookResponse.StatusCode)
+	}
+
+	duplicate, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/updates/github/webhook", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate.Header.Set("X-GitHub-Event", "release")
+	duplicate.Header.Set("X-GitHub-Delivery", "delivery-1")
+	duplicate.Header.Set("X-Hub-Signature-256", signedWebhook(body, "webhook-secret"))
+	duplicateResponse, err := ts.Client().Do(duplicate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateResponse.Body.Close()
+	if duplicateResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("webhook duplicado status = %d, want 204", duplicateResponse.StatusCode)
+	}
+
+	streamResponse, err := ts.Client().Get(ts.URL + "/v1/updates/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streamResponse.Body.Close()
+	if streamResponse.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", streamResponse.StatusCode)
+	}
+	reader := bufio.NewReader(streamResponse.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "event: release\n" {
+		t.Fatalf("primeira linha SSE = %q", line)
+	}
+	if line, err = reader.ReadString('\n'); err != nil || !strings.HasPrefix(line, "id: delivery-1") {
+		t.Fatalf("id SSE = %q, erro = %v", line, err)
+	}
+}
+
+func TestGitHubWebhookRejectsInvalidSignature(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{})
+	body := webhookBody("published", "owner/repo", "v2.0.6", false, false)
+	req := httptest.NewRequest(http.MethodPost, "/v1/updates/github/webhook", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "release")
+	req.Header.Set("X-GitHub-Delivery", "delivery-invalid")
+	req.Header.Set("X-Hub-Signature-256", "sha256=0000000000000000000000000000000000000000000000000000000000000000")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }
 

@@ -16,6 +16,10 @@ const guiHtml = read("golive-gui/index.html");
 const pluginNative = read("goLiveBypass/native.ts");
 const pluginRenderer = read("goLiveBypass/index.tsx");
 const pluginStability = read("goLiveBypass/stability.ts");
+const pluginController = read("goLiveBypass/vpn-controller.ts");
+const pluginProton = read("goLiveBypass/vpn-proton.ts");
+const pluginTypes = read("goLiveBypass/vpn-types.ts");
+const pluginWindows = read("goLiveBypass/vpn-windows.ts");
 const linuxInstaller = read("installer/golivebypass-installer.sh");
 const windowsInstaller = read("installer/GoLiveBypass-Installer.ps1");
 const manifest = JSON.parse(read("goLiveBypass/manifest.json"));
@@ -74,23 +78,43 @@ test("GUI contem exatamente a fonte standalone sincronizada", () => {
         "bypass.ts nao contem a string standalone atual");
 });
 
-test("plugin reconhece Tor manual como modo estrito", () => {
-    assert.match(pluginNative, /function strictManualTor\(\): string \| null/);
-    assert.match(pluginNative, /isStrictManualTor\(manual, isTorProxy\)/);
+test("plugin usa WireGuard/WireSock e nao o transporte legado", () => {
+    assert.match(pluginNative, /PluginVpnController/);
+    assert.match(pluginNative, /getVpnStatus/);
+    assert.match(pluginNative, /before-quit/);
+    assert.match(pluginRenderer, /vpnMode/);
+    assert.doesNotMatch(pluginNative, /session\.defaultSession|setProxy|createServer|NativeSettings|TOR_PORTS|pac_script|socks5:\/\//);
+    assert.doesNotMatch(pluginRenderer, /sessionRouting|excludedCountries|retryWithProxy|setProxy|pac_script|socks5:\/\//);
 });
 
-test("plugin nao busca reserva quando Tor estrito falha", () => {
-    const relay = section(pluginNative, "async function serveRequest", "function pacScript");
-    assert.match(relay, /if \(upstream === null && strictTor === null && !activeManual\)/);
-    assert.match(relay, /if \(upstream === null && strictTor !== null\)[\s\S]*?return client\.destroy\(\);/);
+test("plugin mantém AllowedApps estreito e network-lock desativado", () => {
+    assert.match(pluginTypes, /formatAllowedApps/);
+    assert.match(pluginTypes, /#@ws:AllowedApps/);
+    assert.match(pluginWindows, /-network-lock disabled/);
+    assert.match(pluginController, /discordAllowedApps/);
+    assert.match(pluginController, /Update\.exe/);
 });
 
-test("manual do plugin nao troca ou abre DIRECT em uma unica falha", () => {
-    const relay = section(pluginNative, "async function serveRequest", "function pacScript");
-    assert.match(relay, /MANUAL_RELAY_TUNNEL_TIMEOUT_MS/);
-    assert.match(relay, /if \(upstream === null && activeManual\)[\s\S]*?return client\.destroy\(\);/);
-    assert.match(pluginNative, /MANUAL_HEARTBEAT_TIMEOUT_MS/);
-    assert.match(pluginNative, /confirmedDeadManuals\.add\(active\)/);
+test("plugin bloqueia WireSock externo e respeita o slot global do serviço", () => {
+    assert.match(pluginWindows, /allServicesOwned/);
+    assert.match(pluginWindows, /allProcessesOwned/);
+    assert.match(pluginWindows, /assertPluginServiceSlot/);
+    assert.match(pluginController, /blocked_external/);
+});
+
+test("plugin mantém estado privado, migração única compatível e recuperação", () => {
+    assert.match(pluginController, /migration-v1\.json/);
+    assert.match(pluginController, /proton-session\.json/);
+    assert.match(pluginController, /gui-compatible-profile-only/);
+    assert.match(pluginController, /recovery_required/);
+    assert.match(pluginNative, /defaultPluginVpnDataDir/);
+});
+
+test("plugin trata CAPTCHA somente no desafio Proton oficial", () => {
+    assert.match(pluginProton, /parseCaptchaUrl/);
+    assert.match(pluginProton, /validateCaptchaResponse/);
+    assert.match(pluginNative, /allowedCaptchaNavigation/);
+    assert.match(pluginNative, /nodeIntegration: false/);
 });
 
 test("standalone mantem manual ate dois batimentos e usa prazo largo", () => {
@@ -98,22 +122,6 @@ test("standalone mantem manual ate dois batimentos e usa prazo largo", () => {
     assert.match(standalone, /function refreshExit\(manualConfirmedDead = false\)/);
     assert.match(standalone, /refreshExit\(true\)/);
     assert.match(standalone, /isManualAddress\(active\) \? MANUAL_HEARTBEAT_TIMEOUT_MS : RELAY_TIMEOUT_MS/);
-});
-
-test("plugin nao abre DIRECT quando Tor estrito esta sem circuito", () => {
-    const relay = section(pluginNative, "async function serveRequest", "function pacScript");
-    assert.match(relay, /isLoginHost \|\| strictTor !== null[\s\S]*?\? null[\s\S]*?: await openDirect/);
-});
-
-test("plugin nao caca gratuitas em modo Tor estrito", () => {
-    const hunt = section(pluginNative, "function huntReserves", "// ------------------------------------------------------------------ o roteador local");
-    assert.match(hunt, /if \(strictManualTor\(\) !== null\) return;/);
-});
-
-test("plugin exige morte confirmada antes de trocar qualquer proxy ativa", () => {
-    assert.match(pluginNative, /shouldReplaceActiveExit\(\{/);
-    assert.match(pluginStability, /missedBeats >= input\.maxMissedBeats/);
-    assert.match(pluginNative, /#170\/#171/);
 });
 
 test("guarda 2001 exige UI afirmativa e store nativa conhecida", () => {
@@ -183,7 +191,7 @@ test("updater localiza pnpm e recompila pelo cmd.exe no Windows", () => {
     assert.match(pluginNative, /shell: false/);
     assert.match(pluginNative, /env,/);
     assert.match(pluginNative, /failure\.message/);
-    assert.match(pluginNative, /falha ao recompilar userplugin/);
+    assert.match(pluginNative, /não consegui recompilar o plugin/);
 });
 
 test("TUI do plugin separa verificar de atualizar", () => {
@@ -200,20 +208,12 @@ test("TUI standalone tem consulta e update separados", () => {
     assert.match(read("standalone/GoLiveBypass-Standalone.ps1"), /Invoke-StandaloneUpdate/);
 });
 
-test("shutdown() do plugin zera os mutexes de busca de saida (choosing/hunting) e cancela enableOnce em voo", () => {
-    // choosing/hunting sao mutexes de PROMESSA ("ja tem uma busca em voo?"), nao um
-    // booleano. Sem resetar no shutdown, um toggle rapido desligar->ligar do plugin (sem
-    // debounce na UI) podia fazer a reativacao reaproveitar calada uma busca de saida
-    // ainda em andamento de ANTES do desligamento -- ela so comeca busca nova quando o
-    // campo esta null, e a sessao nova ficava dependendo do tempo de uma busca que nao
-    // reflete mais a configuracao/intencao atual. Da mesma forma, shutdown cancela qualquer
-    // enableOnce em voo (++enableSeq, enabling = null) e reseta retries = 0.
-    const shutdownBody = section(pluginNative, "export async function shutdown(", "\n}");
-    assert.match(shutdownBody, /choosing\s*=\s*null/);
-    assert.match(shutdownBody, /hunting\s*=\s*null/);
-    assert.match(shutdownBody, /\+\+enableSeq/);
-    assert.match(shutdownBody, /enabling\s*=\s*null/);
-    assert.match(shutdownBody, /retries\s*=\s*0/);
+test("shutdown do plugin restaura a rede própria e não mata WireSock externo", () => {
+    assert.match(pluginNative, /controller\.shutdown\(true\)/);
+    assert.match(pluginNative, /controller\.shutdown\(false\)/);
+    assert.match(pluginController, /stopOwnedWireSock/);
+    assert.match(pluginController, /inspection\.active && !inspection\.owned/);
+    assert.match(pluginController, /recovery_required/);
 });
 
 test("standalone --uninstall desliga o Tor mesmo com falha parcial de elevacao", () => {
@@ -235,16 +235,13 @@ test("standalone --uninstall desliga o Tor mesmo com falha parcial de elevacao",
     assert.ok(failedGateIndex === -1 || removeTorIndex < failedGateIndex);
 });
 
-test("paridade de portas Tor: TOR_PORTS inclui a porta 9060 no standalone e no plugin", () => {
+test("standalone mantem a porta Tor 9060", () => {
     assert.match(standalone, /const TOR_PORTS = \[9060,/);
-    assert.match(pluginNative, /const TOR_PORTS = \[9060,/);
 });
 
-test("readOverTls escuta evento close para nao segurar o probe no fechamento limpo", () => {
+test("readOverTls do standalone escuta evento close para nao segurar o probe", () => {
     const standaloneReadOverTls = section(standalone, "function readOverTls(", "\n}");
-    const pluginReadOverTls = section(pluginNative, "function readOverTls(", "\n}");
     assert.match(standaloneReadOverTls, /tls\.on\("close",/);
-    assert.match(pluginReadOverTls, /tls\.on\("close",/);
 });
 
 process.stdout.write(`1..${passed}\n`);

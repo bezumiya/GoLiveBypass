@@ -125,6 +125,8 @@ describe("guarda de ativacao duplicada", () => {
     expect(activation).not.toContain("requireFunctionalWindowsRoute");
     expect(activation).not.toContain("prepareDiscordScopeProbes");
     expect(activation.indexOf("await startWireSockService")).toBeLessThan(activation.indexOf('startDiscordAndConfirm(installs, "ativacao")'));
+    expect(activation.indexOf('waitForWindowsRouteSettle(windowsGeneration, "ativacao")')).toBeGreaterThan(activation.indexOf("await startWireSockService"));
+    expect(activation.indexOf('waitForWindowsRouteSettle(windowsGeneration, "ativacao")')).toBeLessThan(activation.indexOf('startDiscordAndConfirm(installs, "ativacao")'));
     expect(activation.indexOf('startDiscordAndConfirm(installs, "ativacao")')).toBeLessThan(activation.indexOf("startWindowsRouteWatchdog()"));
 
     const readinessStart = src.indexOf("async function waitForWindowsWgReady");

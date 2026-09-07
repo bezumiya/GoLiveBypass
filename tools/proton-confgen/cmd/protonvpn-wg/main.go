@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -177,6 +178,8 @@ func run() error {
 		return listServers(cfg, vpnClient)
 	case cfg.RenewSerial != "":
 		return renewSerial(cfg, vpnClient)
+	case cfg.RoutePool:
+		return generateRoutePool(cfg, vpnClient)
 	default:
 		return generateConfig(cfg, vpnClient)
 	}
@@ -371,6 +374,129 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 	fmt.Printf("Certificate: %s, expires %s\n",
 		mode, time.Unix(vpnInfo.ExpirationTime, 0).UTC().Format("2006-01-02 15:04 UTC"))
 	fmt.Printf("\nSuccessfully generated config for %s\n", server.ExitCountry)
+	return nil
+}
+
+// generateRoutePool prepares reserve profiles for the GUI. It performs only
+// the regional ping ranking and config generation: no temporary WireGuard
+// interface is opened while the user's active tunnel is carrying Discord.
+func generateRoutePool(cfg *config.Config, vpnClient *vpn.Client) error {
+	if cfg.RoutePoolOutputDir == "" {
+		return fmt.Errorf("route-pool-output-dir is required")
+	}
+	if err := os.MkdirAll(cfg.RoutePoolOutputDir, 0o700); err != nil {
+		return fmt.Errorf("failed to create route pool directory: %w", err)
+	}
+
+	keyPair, err := ed25519.NewKeyPair()
+	if err != nil {
+		return fmt.Errorf("failed to generate route-pool key pair: %w", err)
+	}
+	cfg.ClientPrivateKey = keyPair.ToX25519Base64()
+
+	// Session-only certificates avoid accumulating persistent dashboard devices
+	// each time a reserve is renewed. The GUI still stores the generated profiles
+	// locally with restrictive permissions.
+	vpnInfo, err := vpnClient.GetCertificate(keyPair)
+	if err != nil {
+		return fmt.Errorf("failed to get route-pool VPN certificate: %w", err)
+	}
+	servers, err := vpnClient.GetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get route-pool servers: %w", err)
+	}
+
+	excluded := make(map[string]struct{}, len(cfg.ExcludedServers))
+	for _, name := range cfg.ExcludedServers {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			excluded[name] = struct{}{}
+		}
+	}
+	selector := vpn.NewServerSelector(cfg)
+	candidates, pings, err := selector.SpeedCandidatesWithProgressExcluding(servers, cfg.RoutePoolSize, excluded, nil)
+	if err != nil {
+		return err
+	}
+
+	type routeJSON struct {
+		Success   bool    `json:"success"`
+		Server    string  `json:"server"`
+		Country   string  `json:"country"`
+		City      string  `json:"city"`
+		Tier      string  `json:"tier"`
+		Load      int     `json:"load"`
+		Score     float64 `json:"score"`
+		PingMs    int     `json:"pingMs"`
+		Endpoint  string  `json:"endpoint"`
+		ConfFile  string  `json:"confFile"`
+		ExpiresAt int64   `json:"expiresAt"`
+	}
+	routes := make([]routeJSON, 0, len(candidates))
+	created := make([]string, 0, len(candidates))
+	for index := range candidates {
+		candidate := &candidates[index]
+		pingMs := pings[candidate.Name]
+		// An unmeasured fallback is not a validated reserve. If the account has
+		// fewer live regions than requested, fail the pool atomically instead of
+		// pretending that an unknown route is ready for a silent swap.
+		if pingMs <= 0 || pingMs >= 999 {
+			continue
+		}
+		physical := vpn.GetBestWireGuardPhysicalServer(candidate)
+		if physical == nil || physical.EntryIP == "" || physical.X25519PublicKey == "" {
+			continue
+		}
+		output := filepath.Join(cfg.RoutePoolOutputDir, fmt.Sprintf("route-%02d.conf", len(routes)))
+		wasPresent := false
+		if _, statErr := os.Stat(output); statErr == nil {
+			wasPresent = true
+		}
+		routeCfg := *cfg
+		routeCfg.OutputFile = output
+		routeCfg.RoutePool = false
+		routeCfg.NoSave = true
+		generator := wireguard.NewConfigGenerator(&routeCfg)
+		if err := generator.Generate(candidate, physical, cfg.ClientPrivateKey, vpnInfo); err != nil {
+			if !wasPresent {
+				_ = os.Remove(output)
+			}
+			return fmt.Errorf("failed to generate reserve route %s: %w", candidate.Name, err)
+		}
+		if !wasPresent {
+			created = append(created, output)
+		}
+		routes = append(routes, routeJSON{
+			Success:   true,
+			Server:    candidate.Name,
+			Country:   candidate.ExitCountry,
+			City:      candidate.City,
+			Tier:      api.GetTierName(candidate.Tier),
+			Load:      candidate.Load,
+			Score:     candidate.Score,
+			PingMs:    pingMs,
+			Endpoint:  fmt.Sprintf("%s:%d", physical.EntryIP, constants.WireGuardPort),
+			ConfFile:  output,
+			ExpiresAt: vpnInfo.ExpirationTime,
+		})
+	}
+	if len(routes) < cfg.RoutePoolSize {
+		for _, file := range created {
+			_ = os.Remove(file)
+		}
+		return fmt.Errorf("only %d validated reserve routes were available; need %d", len(routes), cfg.RoutePoolSize)
+	}
+
+	if cfg.JSONOutput {
+		data, _ := json.Marshal(map[string]any{
+			"success":   true,
+			"routes":    routes,
+			"expiresAt": vpnInfo.ExpirationTime,
+		})
+		fmt.Println(string(data))
+		return nil
+	}
+	fmt.Printf("Generated %d ping-validated Proton route reserves in %s\n", len(routes), cfg.RoutePoolOutputDir)
 	return nil
 }
 

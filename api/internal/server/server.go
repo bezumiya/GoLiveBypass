@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v5/middleware"
 
 	"github.com/bezumiya/GoLiveBypass/api/internal/config"
+	"github.com/bezumiya/GoLiveBypass/api/internal/updates"
 )
 
 func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Echo {
@@ -19,8 +20,12 @@ func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Ech
 	e.Use(middleware.RequestLogger())
 
 	store := newBlockStore(cfg)
-	h := &handler{cfg: cfg, issues: issues, store: store}
+	h := &handler{cfg: cfg, issues: issues, store: store, updates: updates.NewBroker()}
 	e.GET(cfg.BasePath+"/healthz", h.health)
+
+	updateV1 := e.Group(cfg.BasePath + "/v1/updates")
+	updateV1.POST("/github/webhook", h.githubWebhook, middleware.BodyLimit(1024*1024))
+	updateV1.GET("/stream", h.updateStream)
 
 	v1 := e.Group(cfg.BasePath+"/v1",
 		authMiddleware(cfg.APIToken),

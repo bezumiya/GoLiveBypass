@@ -6,9 +6,34 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.6-beta.1] - 2026-09-07
+
+### Failover automático de rotas Proton Free
+
+- A GUI Windows/Linux mantém um pool local de até duas reservas ping-validadas além da rota ativa. A preparação ocorre depois da abertura do Discord e não cria túneis concorrentes.
+- Após falha sustentada do peer WireGuard, a GUI troca a rota sem fechar o processo do Discord: Linux reaplica o peer com `wg setconf` e Windows reinicia somente o serviço WireSock. Cada candidata precisa confirmar handshake antes de ser promovida.
+- O recurso fica ativo por padrão e pode ser desligado em Preferências. É exclusivo do Proton Free; há uma única renovação do pool por sessão. Se todas as candidatas falharem, o Discord permanece aberto e a GUI exibe um aviso discreto.
+- Perfis Proton gerenciados passaram a usar `PersistentKeepalive = 10` para fornecer um sinal de liveness compatível com a janela de 10–15 segundos. Probes HTTP, IP e geolocalização continuam somente diagnósticos.
+
+### Migração da VPN para o plugin
+
+- O plugin Vencord/Equicord ganhou um controlador WireGuard/WireSock autônomo para Windows x64, com ProtonVPN e `.conf` personalizado, lock de ownership, reinício completo do Discord e restauração verificável da rede.
+- O filtro `AllowedApps` fica restrito ao `Discord.exe`, ao `Update.exe` da instalação atual e, quando disponível, ao helper temporário de diagnóstico. Probes de IP, DNS, HTTPS e rota são log-only.
+- Sessão Proton, perfil, lock e logs ficam no namespace privado `GoLiveBypass/plugin-vpn`. Uma única migração compatível importa apenas `wireguard.conf` e `proton-session.json` da GUI; settings e estado legado não são compartilhados.
+- O `proton-confgen.exe` x64 passa a ser incluído no zip do plugin pelo workflow de release. O standalone, o `app.asar` e a cópia gerada `golive-gui/electron/bypass.ts` não foram alterados por esta migração.
+
+### Inicialização do túnel WireGuard
+
+- Windows e Linux aguardam dois segundos para o túnel se acomodar antes de abrir o Discord, evitando que o updater seja iniciado durante a conexão inicial. A espera é local e limitada; probes de IP, HTTP e handshake continuam apenas diagnósticos.
+
 ### Atualização automática do Windows
 
 - O updater portable baixa o executável, confere o SHA-256 e agenda a troca em um helper externo. A substituição agora ocorre somente depois que o processo antigo encerra, evitando `EBUSY` ao renomear o próprio `.exe`; falhas mantêm a versão atual aberta e ficam registradas no log.
+
+### Pulso de atualização
+
+- A API Go recebe o webhook de `release.published` do GitHub, valida o HMAC e distribui um evento SSE para as GUIs conectadas. O cliente reconecta com backoff, faz duas tentativas após o pulso e mantém a consulta direta ao GitHub como fonte de verdade.
+- A checagem de segurança passou para uma vez por hora. No Windows, o executável validado por SHA-256 fica pendente até o usuário escolher **Reiniciar para atualizar**; a preferência de updates pode desligar o SSE e as consultas automáticas sem interromper o app.
 
 ### Detecção do plano Proton
 
@@ -26,7 +51,7 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - A lista de medição e o cartão da rota selecionada exibem os servidores no formato compacto `PAÍS#servidor` (por exemplo, `US#189`), mantendo o nome original internamente para seleção e cache.
 - Cada rota visível ganhou uma bandeira SVG correspondente ao país, com fallback compacto para novos códigos que a Proton venha a disponibilizar.
 - O diálogo de otimização acompanha a paleta da aplicação nos temas claro e escuro, usando superfícies, bordas e estados semânticos existentes no lugar do destaque roxo.
-- Medições são reutilizadas quando conta, filtros, versão do critério e perfil salvo correspondem. A versão do critério foi incrementada para exigir o novo preflight completo de doze rotas; resultados anteriores são medidos novamente uma vez. Não há expiração diária. Otimização manual mede novamente. Uma busca automática sem cache é adiada quando o bypass está ativo, para não interromper uma chamada.
+- Medições são reutilizadas quando conta, filtros, versão do critério e perfil salvo correspondem em fluxos que pedem reaproveitamento. A versão do critério foi incrementada para exigir o novo preflight completo de doze rotas; resultados anteriores são medidos novamente uma vez. Não há expiração diária. A abertura/login repetem a otimização quando o bypass está inativo; se ele já estiver ativo, a medição é adiada para não interromper uma chamada. A otimização manual mede novamente.
 - Geração temporária e cancelamento aguardando o encerramento do helper preservam o perfil anterior em falhas. O login permanece válido se a medição falhar. A medição continua isolada por WireGuard/netstack, sem alterar a rota do host; diagnósticos de IP/HTTP do Discord continuam somente nos logs.
 - Mantidos até 4 MiB de download e 1 MiB de upload por candidato, 12 segundos por candidato, verificação rápida de até 6 segundos por rota (handshake e HTTPS zero-byte, até quatro túneis em paralelo, com retentativa serial das falhas transitórias), 180 segundos para a triagem e os testes e limite externo de 210 segundos. A velocidade começa pelos seis menores pings aprovados e usa as demais rotas já aprovadas como reserva até completar seis medições válidas. O resultado descreve o caminho até o endpoint de medição naquele momento, sem garantir a qualidade de cada transmissão.
 - Windows/Linux compartilham a seleção e a interface. O helper CLI oferece `-progress-json` em stderr e `-speed-test-trace` para acompanhar no terminal, sem mudar seu JSON final. Standalones e plugin legado não usam esse seletor Proton; não receberam uma tela nem mudanças de recuperação de rede.
@@ -35,6 +60,16 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Loop de estabilidade Linux
 
+- **Bazzite/Flatpak:** a abertura do Discord oficial agora entra diretamente no namespace
+  WireGuard com `setsid`, preservando o barramento da sessão Wayland e o portal do usuário;
+  o launcher não passa mais por uma unidade `systemd` do sistema, que podia encerrar o
+  `bwrap` antes de o cliente aparecer. A confirmação consulta `flatpak ps` e usa o PID do
+  sandbox para o status, com espera de até 20 segundos para cold starts. Se a abertura falhar,
+  o processo é fechado antes da remoção do namespace para não deixar um cliente órfão. A GUI
+  também remove sequências ANSI corrompidas (como `�[36m`) das mensagens de erro. A triagem
+  do detector foi validada em CachyOS com Flatpak simulado; a aceitação em uma sessão Bazzite
+  real ainda depende do log do usuário, especialmente se o `bwrap` estiver sendo bloqueado por
+  política de namespaces do sistema.
 - Adicionada a matriz descartável `tests/test-linux-matrix.sh` para Ubuntu 24.04/22.04, Debian 13/12, Fedora 43/42 e Arch atual, com caso histórico fixado em 2025-09-01. O runner valida o preflight JSON, detecta binários presentes mas inutilizáveis, audita bibliotecas antigas/AppImage e executa a prova de namespace sem alterar a rede do host.
 - O preflight agora sugere o comando correto por família: `apt-get update`/instalação mínima, `dnf makecache --refresh`, `zypper --non-interactive refresh` ou `pacman -S --needed`. A GUI continua instalando apenas dependências ausentes; não há upgrade global nem `pacman -Sy` parcial. DNF e Zypper atualizam somente os metadados antes da instalação.
 - Adicionado `tests/test-linux-vm.sh` para VMs libvirt preparadas, com preflight/reparo por SSH, conferência da rota default do host e hook opt-in para uma sessão Premium sem registrar credenciais. Distrobox fica como reprodução auxiliar, não como prova de isolamento.

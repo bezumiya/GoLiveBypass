@@ -89,7 +89,12 @@ describe("wiring do canal no updater e no workflow", () => {
     const updater = fs.readFileSync(path.resolve(process.cwd(), "electron/updater.ts"), "utf8");
     expect(updater).toContain('const REPO = "pdl-clay/GoLiveBypass"');
     expect(updater).toContain('autoUpdater.allowPrerelease = canalAtual() === "beta"');
+    expect(updater).toContain("autoUpdater.autoInstallOnAppQuit = false");
     expect(updater).toContain("escolherRelease(releases, app.getVersion(), canal)");
+    expect(updater).toContain("CHECK_INTERVAL_MS = 60 * 60 * 1000");
+    expect(updater).toContain("createUpdatePulseClient");
+    expect(updater).toContain("UPDATE_STREAM_URL");
+    expect(updater).toContain("pending-windows-update.json");
     expect(updater).not.toContain("attemptReplace(current, downloaded)");
     // a comparacao por string que faria downgrade foi embora
     expect(updater).not.toContain("const isNewer = latest !== current;");
@@ -123,7 +128,7 @@ describe("wiring do canal no updater e no workflow", () => {
 
   it("nao consulta releases durante npm run dev", () => {
     const updater = fs.readFileSync(path.resolve(process.cwd(), "electron/updater.ts"), "utf8");
-    expect(updater).toMatch(/const isDev = !app\.isPackaged;[\s\S]{0,300}if \(isDev\) \{[\s\S]{0,300}return;/);
+    expect(updater).toMatch(/const isDev = !app\.isPackaged;[\s\S]{0,300}if \(isDev\) \{[\s\S]{0,300}return(?: null)?;/);
     expect(updater).not.toContain("autoUpdater.forceDevUpdateConfig = true");
   });
 });

@@ -5,6 +5,7 @@ import path from "node:path";
 const root = path.resolve(process.cwd(), "..");
 const matrix = fs.readFileSync(path.join(root, "tests/test-linux-matrix.sh"), "utf8");
 const vm = fs.readFileSync(path.join(root, "tests/test-linux-vm.sh"), "utf8");
+const loop = fs.readFileSync(path.join(root, "tests/run-linux-stability-loop.sh"), "utf8");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/linux-stability.yml"), "utf8");
 
 describe("contrato do laboratorio Linux", () => {
@@ -27,6 +28,7 @@ describe("contrato do laboratorio Linux", () => {
   it("mantem containers descartaveis e sem rede do host", () => {
     expect(matrix).toContain("--rm");
     expect(matrix).toContain("-v \"$ROOT:/repo:ro\"");
+    expect(matrix).toContain("APPIMAGE_STRICT_LIBS");
     expect(matrix).not.toMatch(/--network(?:=|\s+)host/);
     expect(matrix).not.toMatch(/-v\s+\/(?:etc|run|sys|proc)(?:[:\s]|$)/);
   });
@@ -44,5 +46,14 @@ describe("contrato do laboratorio Linux", () => {
     expect(workflow).toContain("./tests/test-linux-matrix.sh --quick");
     expect(workflow).not.toMatch(/publish:(?:win|linux|mac)/);
     expect(workflow).not.toContain("--publish always");
+  });
+
+  it("mantem o loop continuo sob sinal explicito de parada", () => {
+    expect(loop).toContain('while [[ ! -e "$STOP_FILE" ]]');
+    expect(loop).toContain("cycles.jsonl");
+    expect(loop).toContain("--once");
+    expect(loop).toContain("LAST_APPIMAGE_SIGNATURE");
+    expect(loop).toContain("APPIMAGE_LDD_MISSING");
+    expect(loop).not.toMatch(/MAX_CYCLES|MAX_ROUNDS/);
   });
 });

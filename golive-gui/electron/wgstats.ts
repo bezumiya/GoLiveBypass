@@ -9,12 +9,13 @@
 //
 // `wg show <iface> dump` (via wireguard-tools) e a fonte de verdade: linha do peer traz
 // latest-handshake (epoch, 0 = nunca), transfer-rx/tx (bytes acumulados desde a interface
-// subir). Um handshake com mais de ~180s (o dobro do keepalive persistente de 25s que o
-// bypass configura) enquanto ha trafego de Discord e o sinal mais direto de tunel morto ou
-// endpoint inalcancavel — mais confiavel que qualquer probe HTTP, que pode falhar por dezenas
-// de motivos ja cobertos (DNS, roteamento, timeout curto).
+// subir). Um handshake com mais de ~180s (folga ampla sobre o PersistentKeepalive dos perfis
+// gerados pelo helper, 10s; perfis legados/customizados podem usar outro valor) enquanto ha
+// trafego de Discord e o sinal mais direto de tunel morto ou endpoint inalcancavel — mais
+// confiavel que qualquer probe HTTP, que pode falhar por dezenas de motivos ja cobertos (DNS,
+// roteamento, timeout curto).
 
-import { execSync } from "child_process";
+import { execFile, execSync } from "child_process";
 import * as logger from "./logger";
 
 export interface WgTunnelStats {
@@ -133,6 +134,27 @@ export function getWgStatsWindows(): WgTunnelStats {
   } catch (err) {
     return { ...SEM_DADOS, error: `wg.exe indisponivel ou sem interface: ${String((err as Error)?.message ?? err).split("\n")[0]}` };
   }
+}
+
+/**
+ * Asynchronous Windows reader for the failover loop. The diagnostic watchdog
+ * intentionally keeps its synchronous implementation and cadence unchanged.
+ */
+export function getWgStatsAsync(): Promise<WgTunnelStats> {
+  if (process.platform !== "win32") return Promise.resolve(getWgStatsLinux());
+  return new Promise((resolve) => {
+    execFile("wg", ["show", "wgdiscord", "dump"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 4000,
+    }, (error, stdout) => {
+      if (error) {
+        resolve({ ...SEM_DADOS, error: `wg.exe indisponivel ou sem interface: ${String(error.message || error).split("\n")[0]}` });
+        return;
+      }
+      resolve(parseWgDump(String(stdout || "")));
+    });
+  });
 }
 
 export function getWgStats(): WgTunnelStats {

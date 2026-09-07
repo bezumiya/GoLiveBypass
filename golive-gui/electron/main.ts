@@ -14,21 +14,29 @@ import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { homedir, EOL } from "os";
 import fs from "fs";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { execFileSync, execSync, spawn, spawnSync } from "child_process";
 import { runScript } from "./linux-helper";
-import { setupUpdater, isQuittingForUpdate } from "./updater";
+import {
+  applyPendingUpdate,
+  isQuittingForUpdate,
+  isUpdateReady,
+  setupUpdater,
+  type UpdaterController,
+} from "./updater";
 import * as logger from "./logger";
 import * as discordscan from "./discordscan";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
-import { ensureWireSockInstalled, getWireSockConnectionStatus, getWireSockAdapterTraffic, hasWireSockAdapterTrafficIncrease, isWireSockActive, startWireSockService, recoverWireSockNetwork, type WireSockConnectionStatus } from "./wiresock";
-import { classifyWgReadiness, getWgStats, iniciarWgStatsWatchdog, pararWgStatsWatchdog, type WgTunnelStats } from "./wgstats";
+import { ensureWireSockInstalled, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, type WireSockConnectionStatus } from "./wiresock";
+import { classifyWgReadiness, getWgStats, getWgStatsAsync, iniciarWgStatsWatchdog, pararWgStatsWatchdog, type WgTunnelStats } from "./wgstats";
+import { classifyFailoverHealth, FailoverHealthTracker, FAILOVER_ROUTE_TIMEOUT_MS, FAILOVER_SAMPLE_INTERVAL_MS, routeCandidateUsable, routePoolDirectory, readRoutePoolManifest, makeRoutePoolManifest, routePoolMatches, ROUTE_POOL_RESERVE_COUNT, ROUTE_POOL_TOTAL, safeRoutePoolPath, writeRoutePoolManifest, type ProtonRouteMetadata, type ProtonRoutePoolManifest } from "./route-failover";
 import { validateWgConfContent } from "./wg-validator";
 import * as proton from "./proton";
 import { ProtonOptimizationCoordinator } from "./proton-optimization";
 import { findWindowsDiscordInstall } from "./windows-discord-install";
 import { waitForProcessRunning, waitForProcessStopped, type ProcessProbeState } from "./wait-condition";
+import { TUNNEL_STARTUP_SETTLE_MS, waitForTunnelStartupSettle } from "./tunnel-startup";
 import { linuxPreflightRepairable, parseLinuxPreflight, linuxPreflightMessage, type LinuxPreflight } from "./linux-preflight";
 import { classifyLinuxHealth } from "./linux-health";
 import { PROTON_CAPTCHA_IPC_CHANNEL, isAllowedProtonCaptchaNavigation, parseProtonCaptchaChallenge, validateProtonCaptchaResponse } from "./proton-captcha";
@@ -124,6 +132,19 @@ let windowsRouteState: WindowsRouteState = "inactive";
 let windowsRouteGeneration = 0;
 let windowsRouteWatchdogTimer: ReturnType<typeof setInterval> | null = null;
 let windowsRouteWatchdogInFlight = false;
+
+// Failover automatico e separado dos watchdogs diagnosticos: ele observa apenas
+// a saude do peer WireGuard e so troca depois de falha sustentada. O pool local
+// nunca e usado para custom/Premium e nao compartilha estado com o plugin.
+let protonFailoverTimer: ReturnType<typeof setInterval> | null = null;
+let protonFailoverInFlight = false;
+let protonFailoverInFlightGeneration = 0;
+let protonFailoverGeneration = 0;
+let protonFailoverTracker: FailoverHealthTracker | null = null;
+let protonFailoverPreviousAdapterTraffic: ReturnType<typeof getWireSockAdapterTraffic> = null;
+let protonFailoverDisabled = false;
+let protonRoutePoolBuild: Promise<void> | null = null;
+let protonRoutePoolAbort: AbortController | null = null;
 function withWireSockLifecycle<T>(operation: string, task: () => Promise<T>): Promise<T> {
   const run = wireSockLifecycleQueue.then(async () => {
     logger.info("wiresock", "inicio de operacao serializada", { operation });
@@ -234,6 +255,7 @@ let mainWindow: BrowserWindow | null = null;
 let logWindow: BrowserWindow | null = null;
 let suppressLogClosedNotify = false;
 let tray: Tray | null = null;
+let updaterController: UpdaterController | null = null;
 
 // Fechar a janela esconde na bandeja (Windows) / barra de menus (Mac); so o Sair do menu
 // desliga o app (e reverte o bypass, como o fechar da janela fazia antes). Sem a trava, o X
@@ -523,6 +545,26 @@ async function refreshTray() {
     const status = IS_LINUX ? await linuxStatus() : getStatus();
     cachedStatus = status;
     const label = statusLabel(status);
+    const updateMenuItems = isUpdateReady()
+      ? [{
+          label: "Reiniciar para atualizar",
+          click: () => {
+            void applyPendingUpdate().then((ok) => {
+              if (!ok) {
+                void dialog.showMessageBox({
+                  type: "warning",
+                  title: "Atualização pendente",
+                  message: "Não foi possível reiniciar para aplicar a atualização.",
+                  detail: "A versão atual continua funcionando. Tente novamente mais tarde.",
+                  buttons: ["OK"],
+                });
+              } else {
+                refreshTray().catch(() => {});
+              }
+            });
+          },
+        }]
+      : [];
     tray.setToolTip(`GoLiveBypass v${app.getVersion()} — ${label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
@@ -546,11 +588,13 @@ async function refreshTray() {
           checked: readAutoUpdate(),
           click: (item) => {
             saveAutoUpdate(item.checked);
+            updaterController?.setEnabled(item.checked);
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send("refresh-auto-update");
             }
           },
         },
+        ...updateMenuItems,
         { type: "separator" },
         // Sair pela bandeja / barra de menus reverte so o que e nosso.
         {
@@ -771,7 +815,12 @@ if (!gotLock) {
     app.on("activate", showWindow);
     // Checa por atualizacao na release do GitHub (Windows portable: baixa e substitui;
     // Mac/Linux: autoUpdater nativo). Roda sozinho e em silencio se nao houver nada.
-    setupUpdater(() => mainWindow, () => readAutoUpdate(), () => readUpdateChannel());
+    updaterController = setupUpdater(
+      () => mainWindow,
+      () => readAutoUpdate(),
+      () => readUpdateChannel(),
+      () => { void refreshTray(); },
+    );
   });
 }
 
@@ -784,7 +833,9 @@ app.on("before-quit", (event) => {
   //
   protonOptimizations.invalidate();
   invalidateProtonPlanCache();
+  stopProtonFailoverMonitor();
   if (isQuittingForUpdate()) return;
+  updaterController?.setEnabled(false);
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
   // Discord na saida, desfazendo o bypass que a instancia principal acabou de aplicar.
   if (!gotLock || cleaningUp) return;
@@ -1268,6 +1319,16 @@ async function startDiscordAndConfirm(installs: DiscordInstall[], operation: str
   return started;
 }
 
+async function waitForWindowsRouteSettle(generation: number, operation: string): Promise<void> {
+  logger.info("wiresock", "tunel criado; aguardando estabilizacao antes do Discord", {
+    operation,
+    delay_ms: TUNNEL_STARTUP_SETTLE_MS,
+    mode: "startup-settle",
+  });
+  await waitForTunnelStartupSettle();
+  assertWindowsRouteGeneration(generation);
+}
+
 // O _app.asar so existe quando alguem ja injetou: e o Discord original guardado de lado. Se ele
 // existe e o app.asar nao e nosso, quem esta ali e outro mod.
 function isOurInjection(resources: string) {
@@ -1523,7 +1584,7 @@ async function executarAtivacao(event: any) {
         }
         assertWindowsRouteGeneration(windowsGeneration);
         await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs));
-        assertWindowsRouteGeneration(windowsGeneration);
+        await waitForWindowsRouteSettle(windowsGeneration, "ativacao");
         if (!(await startDiscordAndConfirm(installs, "ativacao"))) {
           throw new Error("O Discord não iniciou após preparar o túnel.");
         }
@@ -1615,9 +1676,11 @@ async function executarAtivacao(event: any) {
   // So Windows (WireSock) tem tunel WireGuard de verdade aqui — macOS ainda e o mecanismo
   // legado de PAC/Tor, sem interface wg nenhuma para vigiar.
   if (IS_WINDOWS) iniciarWgStatsWatchdog(wgStatsProvider);
+  startProtonFailoverMonitor();
 }
 
 async function deactivateAll() {
+  stopProtonFailoverMonitor();
   pararWgStatsWatchdog();
   stopWindowsRouteWatchdog();
   windowsRouteStarted = false;
@@ -1820,6 +1883,479 @@ function wgStatsProvider(): Promise<WgTunnelStats> | WgTunnelStats {
   return IS_LINUX ? linuxWgStats() : getWgStats();
 }
 
+function protonRouteNumber(value: unknown, fallback = 0): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function currentProtonRouteMetadata(settings: Record<string, unknown>): ProtonRouteMetadata | undefined {
+  const raw = settings.protonLastServer as Record<string, unknown> | undefined;
+  const server = typeof raw?.server === "string" ? raw.server.trim() : "";
+  const endpoint = typeof raw?.endpoint === "string" ? raw.endpoint.trim() : "";
+  if (!server || !endpoint) return undefined;
+  return {
+    success: true,
+    server,
+    country: typeof raw?.country === "string" ? raw.country : String(settings.protonCountry || ""),
+    city: typeof raw?.city === "string" ? raw.city : "",
+    tier: typeof raw?.tier === "string" ? raw.tier : "Free",
+    load: protonRouteNumber(raw?.load),
+    score: protonRouteNumber(raw?.score),
+    pingMs: protonRouteNumber(raw?.pingMs),
+    endpoint,
+    confFile: path.join(settingsDir(), "wireguard.conf"),
+    expiresAt: Number.isFinite(Number(raw?.expiresAt)) ? Number(raw?.expiresAt) : undefined,
+    generatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : undefined,
+  };
+}
+
+function protonPoolFilter(settings: Record<string, unknown>, username: string) {
+  return {
+    username,
+    country: typeof settings.protonCountry === "string" ? settings.protonCountry : "",
+    freeOnly: true,
+    autoPing: settings.protonAutoPing !== false,
+  };
+}
+
+function validProtonPoolReserves(manifest: ProtonRoutePoolManifest): ProtonRouteMetadata[] {
+  const poolDir = routePoolDirectory(settingsDir());
+  const seen = new Set<string>();
+  const valid: ProtonRouteMetadata[] = [];
+  for (const candidate of manifest.reserves) {
+    const safe = safeRoutePoolPath(poolDir, candidate.confFile);
+    if (!safe || !fs.existsSync(safe) || !routeCandidateUsable(candidate) || seen.has(candidate.server)) continue;
+    seen.add(candidate.server);
+    valid.push({ ...candidate, confFile: safe });
+  }
+  return valid;
+}
+
+function cleanupProtonPoolOrphans(manifest: ProtonRoutePoolManifest): void {
+  const poolDir = routePoolDirectory(settingsDir());
+  const referenced = new Set<string>([
+    ...(manifest.active?.confFile ? [path.resolve(manifest.active.confFile)] : []),
+    ...manifest.reserves.map((route) => path.resolve(route.confFile)),
+  ]);
+  try {
+    for (const entry of fs.readdirSync(poolDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^route-.*\.conf$/i.test(entry.name)) continue;
+      const file = path.resolve(path.join(poolDir, entry.name));
+      if (!referenced.has(file)) fs.rmSync(file, { force: true });
+    }
+  } catch (error) {
+    logger.warn("proton", "limpeza.do.pool.falhou", { erro: String((error as Error)?.message ?? error) });
+  }
+}
+
+function clearProtonRoutePool(): void {
+  const poolDir = routePoolDirectory(settingsDir());
+  try { fs.rmSync(poolDir, { recursive: true, force: true }); } catch (error) {
+    logger.warn("proton", "limpeza.do.pool.falhou", { erro: String((error as Error)?.message ?? error) });
+  }
+}
+
+function notifyProtonFailover(message: string): void {
+  logger.warn("proton", "failover.aviso", { message, mode: "discreet" });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send("proton-failover-notice", { message }); } catch {}
+  }
+}
+
+function routePoolManifestForCurrent(
+  settings: Record<string, unknown>,
+  username: string,
+): ProtonRoutePoolManifest {
+  const filter = protonPoolFilter(settings, username);
+  const current = currentProtonRouteMetadata(settings);
+  const existing = readRoutePoolManifest(settingsDir());
+  const manifest = routePoolMatches(existing, filter)
+    ? existing as ProtonRoutePoolManifest
+    : makeRoutePoolManifest(filter, current);
+  if (current) manifest.active = current;
+  const activeName = manifest.active?.server;
+  manifest.reserves = validProtonPoolReserves(manifest)
+    .filter((route) => route.server !== activeName && !manifest.quarantined.includes(route.server));
+  return manifest;
+}
+
+function beginProtonRoutePoolSession(settings: Record<string, unknown>, username: string): void {
+  const manifest = routePoolManifestForCurrent(settings, username);
+  // A new activation gets one fresh pool renewal budget. Reserve files may be
+  // reused when their identity and expiry still match the account/filter.
+  manifest.renewalUsed = false;
+  manifest.disabled = false;
+  writeRoutePoolManifest(settingsDir(), manifest);
+}
+
+async function buildProtonRoutePoolNow(
+  generation: number,
+  count: number,
+  markRenewal = false,
+): Promise<boolean> {
+  if (generation !== protonFailoverGeneration || quitting) return false;
+  const settings = readSharedSettings();
+  if (settings.vpnMode === "custom" || settings.protonAutoFailover === false) return false;
+  const username = typeof settings.protonUsername === "string" ? settings.protonUsername.trim() : "";
+  if (!username) return false;
+
+  const poolDir = routePoolDirectory(settingsDir());
+  fs.mkdirSync(poolDir, { recursive: true, mode: 0o700 });
+  let manifest = routePoolManifestForCurrent(settings, username);
+  if (markRenewal) {
+    manifest.renewalUsed = true;
+    writeRoutePoolManifest(settingsDir(), manifest);
+  }
+
+  const excluded = new Set<string>([
+    ...(manifest.active?.server ? [manifest.active.server] : []),
+    ...manifest.reserves.map((route) => route.server),
+    ...manifest.quarantined,
+  ]);
+  const controller = protonRoutePoolAbort;
+  let result: Awaited<ReturnType<typeof proton.generateProtonRoutePool>>;
+  try {
+    result = await proton.generateProtonRoutePool(settingsDir(), {
+      username,
+      countries: typeof settings.protonCountry === "string" ? settings.protonCountry || undefined : undefined,
+      freeOnly: true,
+      autoPing: settings.protonAutoPing !== false,
+      size: Math.max(1, Math.min(3, Math.floor(count))),
+      excludeServers: [...excluded],
+      signal: controller?.signal,
+    });
+  } catch (error) {
+    logger.warn("proton", "pool.background.failed", { erro: String((error as Error)?.message ?? error) });
+    return false;
+  }
+  if (generation !== protonFailoverGeneration || quitting || !result.success || !result.stagingDir || !result.routes) {
+    if (!result.success) logger.warn("proton", "pool.background.rejected", { erro: result.error || "resposta inválida" });
+    if (result.stagingDir) {
+      try { fs.rmSync(result.stagingDir, { recursive: true, force: true }); } catch {}
+    }
+    return false;
+  }
+
+  const promoted: ProtonRouteMetadata[] = [];
+  try {
+    for (const route of result.routes) {
+      const source = safeRoutePoolPath(result.stagingDir, route.confFile);
+      if (!source || !fs.existsSync(source) || !routeCandidateUsable(route) || excluded.has(route.server)) continue;
+      const target = path.join(poolDir, `route-${Date.now()}-${randomUUID()}.conf`);
+      try {
+        fs.renameSync(source, target);
+      } catch {
+        fs.copyFileSync(source, target);
+        fs.rmSync(source, { force: true });
+      }
+      try { fs.chmodSync(target, 0o600); } catch {}
+      promoted.push({ ...route, confFile: target });
+      excluded.add(route.server);
+    }
+  } finally {
+    try { fs.rmSync(result.stagingDir, { recursive: true, force: true }); } catch {}
+  }
+
+  if (generation !== protonFailoverGeneration || promoted.length < count) {
+    logger.warn("proton", "pool.background.incompleto", { solicitadas: count, preparadas: promoted.length });
+    return false;
+  }
+  manifest.reserves = [...manifest.reserves, ...promoted].slice(-ROUTE_POOL_RESERVE_COUNT);
+  manifest.createdAt = new Date().toISOString();
+  manifest.disabled = false;
+  writeRoutePoolManifest(settingsDir(), manifest);
+  cleanupProtonPoolOrphans(manifest);
+  logger.info("proton", "pool.background.ready", { reservas: manifest.reserves.length });
+  return true;
+}
+
+function scheduleProtonRoutePoolBuild(generation: number, count: number): void {
+  if (protonRoutePoolBuild || count <= 0 || generation !== protonFailoverGeneration) return;
+  if (!protonRoutePoolAbort) protonRoutePoolAbort = new AbortController();
+  const task = buildProtonRoutePoolNow(generation, count).catch((error) => {
+    logger.warn("proton", "pool.background.error", { erro: String((error as Error)?.message ?? error) });
+  });
+  let tracked: Promise<void>;
+  tracked = task.finally(() => {
+    if (protonRoutePoolBuild === tracked) {
+      protonRoutePoolBuild = null;
+      protonRoutePoolAbort = null;
+    }
+  });
+  protonRoutePoolBuild = tracked;
+}
+
+async function waitForLinuxFailoverHandshake(timeoutMs = FAILOVER_ROUTE_TIMEOUT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const stats = await linuxWgStats();
+    if (stats.ok && stats.handshakeAgoS !== null && stats.handshakeAgoS <= 45) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+function promoteProtonCandidate(candidate: ProtonRouteMetadata): void {
+  const canonical = path.join(settingsDir(), "wireguard.conf");
+  const temp = `${canonical}.${randomUUID()}.tmp`;
+  try {
+    fs.copyFileSync(candidate.confFile, temp);
+    try { fs.chmodSync(temp, 0o600); } catch {}
+    fs.renameSync(temp, canonical);
+  } catch (error) {
+    try { fs.rmSync(temp, { force: true }); } catch {}
+    throw error;
+  }
+}
+
+async function applyProtonFailoverCandidate(
+  candidate: ProtonRouteMetadata,
+  generation: number,
+): Promise<boolean> {
+  const canonical = path.join(settingsDir(), "wireguard.conf");
+  if (!fs.existsSync(canonical) || !fs.existsSync(candidate.confFile)) return false;
+  if (generation !== protonFailoverGeneration || quitting) return false;
+
+  const installs = IS_WINDOWS ? getDiscordInstalls() : [];
+  const windowsGeneration = windowsRouteGeneration;
+  if (IS_WINDOWS) {
+    if (windowsRouteState !== "active" || !windowsRouteStarted || !isWireSockActive() || !discordIsRunning()) return false;
+    stopWindowsRouteWatchdog();
+  } else if (IS_LINUX) {
+    stopLinuxHealthWatchdog();
+  }
+  pararWgStatsWatchdog();
+  const switchProfile = async (profile: string): Promise<boolean> => {
+    if (IS_WINDOWS) {
+      assertWindowsRouteGeneration(windowsGeneration);
+      await switchWireSockService(settingsDir(), profile, windowsAllowedAppPaths(installs));
+      assertWindowsRouteGeneration(windowsGeneration);
+      return (await waitForWindowsWgReady(FAILOVER_ROUTE_TIMEOUT_MS)).verified;
+    }
+    const refreshed = await runScript(["--refresh-route-from", profile, "--non-interactive"]);
+    if (refreshed.code !== 0) return false;
+    return waitForLinuxFailoverHandshake();
+  };
+
+  windowsRouteState = IS_WINDOWS ? "preparing" : windowsRouteState;
+  refreshWindowStatus();
+  let candidateReady = false;
+  try {
+    candidateReady = await switchProfile(candidate.confFile);
+    if (!candidateReady) throw new Error("handshake não confirmado no tempo limite");
+    if (generation !== protonFailoverGeneration || quitting) throw new Error("troca cancelada por uma operação mais recente");
+    promoteProtonCandidate(candidate);
+    windowsRouteState = IS_WINDOWS ? "active" : windowsRouteState;
+    logger.info("proton", "failover.rota.aplicada", { server: candidate.server, endpoint: candidate.endpoint });
+    return true;
+  } catch (error) {
+    logger.warn("proton", "failover.rota.rejeitada", { server: candidate.server, erro: String((error as Error)?.message ?? error) });
+    try {
+      const restored = await switchProfile(canonical);
+      if (!restored) throw new Error("handshake da rota anterior não confirmado");
+      windowsRouteState = IS_WINDOWS ? "active" : windowsRouteState;
+      logger.info("proton", "failover.rollback.ok", { server: candidate.server });
+    } catch (rollbackError) {
+      if (IS_WINDOWS) windowsRouteState = "recovery_required";
+      logger.error("proton", "failover.rollback.falhou", { erro: String((rollbackError as Error)?.message ?? rollbackError) });
+    }
+    return false;
+  } finally {
+    if (IS_WINDOWS && windowsRouteState === "preparing") windowsRouteState = "active";
+    if (IS_WINDOWS && windowsRouteState === "active") startWindowsRouteWatchdog();
+    if (IS_LINUX && !quitting) startLinuxHealthWatchdog();
+    if (!quitting && generation === protonFailoverGeneration) iniciarWgStatsWatchdog(wgStatsProvider);
+    refreshWindowStatus();
+  }
+}
+
+async function attemptProtonFailover(generation: number): Promise<void> {
+  if (generation !== protonFailoverGeneration || protonFailoverDisabled || quitting) return;
+  if (protonRoutePoolBuild) await protonRoutePoolBuild.catch(() => {});
+  if (generation !== protonFailoverGeneration || protonFailoverDisabled || quitting) return;
+
+  const settings = readSharedSettings();
+  const username = typeof settings.protonUsername === "string" ? settings.protonUsername.trim() : "";
+  if (settings.vpnMode === "custom" || !username || settings.protonAutoFailover === false) return;
+  const plan = await resolveProtonPlan(username);
+  if (plan.status !== "free") return;
+
+  let manifest = routePoolManifestForCurrent(settings, username);
+  if (!manifest.active) manifest.active = currentProtonRouteMetadata(settings);
+  let candidates = validProtonPoolReserves(manifest);
+
+  // Pool exhaustion gets exactly one fresh generation. The persisted flag makes
+  // a failed renewal terminal for this activation, avoiding an API/retry loop.
+  if (candidates.length === 0 && !manifest.renewalUsed) {
+    manifest.renewalUsed = true;
+    writeRoutePoolManifest(settingsDir(), manifest);
+    // A renovação ocorre dentro da fila de lifecycle, mas ainda precisa de um
+    // AbortController próprio: uma desativação/login pode acontecer enquanto
+    // o helper está consultando a API e não deve deixá-lo rodando por minutos.
+    const renewalController = protonRoutePoolAbort ?? new AbortController();
+    if (!protonRoutePoolAbort) protonRoutePoolAbort = renewalController;
+    try {
+      await buildProtonRoutePoolNow(generation, ROUTE_POOL_TOTAL, true);
+    } finally {
+      if (protonRoutePoolAbort === renewalController) protonRoutePoolAbort = null;
+    }
+    manifest = routePoolManifestForCurrent(readSharedSettings(), username);
+    candidates = validProtonPoolReserves(manifest);
+  }
+
+  if (candidates.length === 0) {
+    manifest.disabled = true;
+    writeRoutePoolManifest(settingsDir(), manifest);
+    protonFailoverDisabled = true;
+    notifyProtonFailover("A rota Proton Free caiu e não foi encontrada uma reserva disponível. O Discord continua aberto; tente otimizar a rota quando puder.");
+    return;
+  }
+
+  const failedNames = new Set<string>();
+  for (const candidate of candidates) {
+    if (generation !== protonFailoverGeneration || quitting) return;
+    if (await applyProtonFailoverCandidate(candidate, generation)) {
+      const oldName = manifest.active?.server;
+      manifest.active = { ...candidate, confFile: path.join(settingsDir(), "wireguard.conf") };
+      manifest.reserves = validProtonPoolReserves(manifest).filter((route) => route.server !== candidate.server && !failedNames.has(route.server));
+      if (oldName && oldName !== candidate.server) manifest.quarantined = [...manifest.quarantined, oldName].slice(-32);
+      manifest.disabled = false;
+      writeRoutePoolManifest(settingsDir(), manifest);
+      updateSharedSettings({
+        protonLastServer: {
+          ...candidate,
+          confFile: path.join(settingsDir(), "wireguard.conf"),
+          measurementUsername: username.toLocaleLowerCase("en-US"),
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      protonFailoverTracker?.reset();
+      scheduleProtonRoutePoolBuild(generation, Math.max(0, ROUTE_POOL_RESERVE_COUNT - manifest.reserves.length));
+      return;
+    }
+    failedNames.add(candidate.server);
+    manifest.reserves = manifest.reserves.filter((route) => route.server !== candidate.server);
+    manifest.quarantined = [...manifest.quarantined, candidate.server].slice(-32);
+    writeRoutePoolManifest(settingsDir(), manifest);
+  }
+
+  manifest.disabled = true;
+  writeRoutePoolManifest(settingsDir(), manifest);
+  protonFailoverDisabled = true;
+  notifyProtonFailover("As reservas Proton Free não responderam. O Discord continua aberto e nenhuma nova tentativa automática será feita nesta sessão.");
+  cleanupProtonPoolOrphans(manifest);
+}
+
+async function collectProtonFailoverSample(generation: number): Promise<void> {
+  if (generation !== protonFailoverGeneration || !protonFailoverTracker || quitting || protonFailoverDisabled) return;
+  const settings = readSharedSettings();
+  if (settings.vpnMode === "custom" || settings.protonAutoFailover === false) return;
+
+  let sample;
+  if (IS_LINUX) {
+    const status = await linuxStatus();
+    const stats = await linuxWgStats();
+    sample = {
+      discordRunning: status === "ACTIVE",
+      tunnelActive: status === "ACTIVE",
+      stats,
+      statsFailureEvidence: /namespace inativo|sem peer|interface .*inativ/i.test(stats.error || ""),
+    };
+  } else if (IS_WINDOWS) {
+    const discordRunning = discordIsRunning();
+    const [traffic, wireSock, stats, tunnelActive] = await Promise.all([
+      getWireSockAdapterTrafficAsync(),
+      getWireSockConnectionStatusAsync(),
+      getWgStatsAsync(),
+      isWireSockActiveAsync(),
+    ]);
+    const trafficIncreasing = hasWireSockAdapterTrafficIncrease(protonFailoverPreviousAdapterTraffic, traffic);
+    protonFailoverPreviousAdapterTraffic = traffic;
+    sample = {
+      discordRunning,
+      // Se uma leitura assíncrona do processo falhar, o estado WireSock ainda
+      // pode estar apenas indeterminado. Só o estado explicitamente
+      // desconectado deve transformar essa falha diagnóstica em uma amostra
+      // negativa; assim não trocamos uma rota por causa de um timeout local.
+      tunnelActive: windowsRouteState === "active" && windowsRouteStarted &&
+        (tunnelActive || wireSock.state !== "disconnected"),
+      stats,
+      wireSock,
+      trafficIncreasing,
+    };
+  } else {
+    return;
+  }
+
+  const health = classifyFailoverHealth(sample);
+  const observation = protonFailoverTracker.observe(health);
+  if (health === "failed" || observation.trigger) {
+    logger.warn("proton", "failover.health", {
+      health,
+      consecutive_failures: observation.consecutiveFailures,
+      grace: observation.inGracePeriod,
+    });
+  }
+  if (!observation.trigger || generation !== protonFailoverGeneration) return;
+  await withWireSockLifecycle("failover-proton", () => attemptProtonFailover(generation));
+}
+
+function stopProtonFailoverMonitor(): void {
+  protonFailoverGeneration += 1;
+  if (protonFailoverTimer !== null) clearInterval(protonFailoverTimer);
+  protonFailoverTimer = null;
+  protonFailoverTracker = null;
+  protonFailoverInFlight = false;
+  protonFailoverInFlightGeneration = 0;
+  protonFailoverPreviousAdapterTraffic = null;
+  protonFailoverDisabled = false;
+  if (protonRoutePoolAbort) protonRoutePoolAbort.abort();
+  // Libera imediatamente a referência da sessão antiga para que uma nova
+  // ativação ou mudança de filtro possa iniciar outra geração. O finally da
+  // tarefa antiga só limpa o estado se ainda for a mesma Promise.
+  protonRoutePoolBuild = null;
+  protonRoutePoolAbort = null;
+}
+
+function startProtonFailoverMonitor(): void {
+  if (!IS_WINDOWS && !IS_LINUX) return;
+  stopProtonFailoverMonitor();
+  const generation = protonFailoverGeneration;
+  void (async () => {
+    const settings = readSharedSettings();
+    if (settings.vpnMode === "custom" || settings.protonAutoFailover === false) return;
+    const username = typeof settings.protonUsername === "string" ? settings.protonUsername.trim() : "";
+    if (!username) return;
+    const plan = await resolveProtonPlan(username);
+    if (generation !== protonFailoverGeneration || plan.status !== "free" || quitting) return;
+    const active = IS_LINUX ? await linuxStatus() === "ACTIVE" : windowsRouteState === "active" && windowsRouteStarted && isWireSockActive() && discordIsRunning();
+    if (!active || generation !== protonFailoverGeneration) return;
+    protonFailoverTracker = new FailoverHealthTracker();
+    protonFailoverTracker.reset();
+    protonFailoverTimer = setInterval(() => {
+      if (protonFailoverInFlight) return;
+      protonFailoverInFlight = true;
+      protonFailoverInFlightGeneration = generation;
+      void collectProtonFailoverSample(generation)
+        .catch((error) => logger.warn("proton", "failover.sample.error", { erro: String((error as Error)?.message ?? error) }))
+        .finally(() => {
+          if (generation === protonFailoverInFlightGeneration && generation === protonFailoverGeneration) protonFailoverInFlight = false;
+        });
+    }, FAILOVER_SAMPLE_INTERVAL_MS);
+    // The first sample is useful for arming the grace window, not for an immediate swap.
+    protonRoutePoolAbort = new AbortController();
+    protonFailoverInFlight = true;
+    protonFailoverInFlightGeneration = generation;
+    void collectProtonFailoverSample(generation)
+      .catch((error) => logger.warn("proton", "failover.sample.error", { erro: String((error as Error)?.message ?? error) }))
+      .finally(() => {
+        if (generation === protonFailoverInFlightGeneration && generation === protonFailoverGeneration) protonFailoverInFlight = false;
+      });
+    beginProtonRoutePoolSession(settings, username);
+    scheduleProtonRoutePoolBuild(generation, ROUTE_POOL_RESERVE_COUNT);
+  })().catch((error) => logger.warn("proton", "failover.setup.error", { erro: String((error as Error)?.message ?? error) }));
+}
+
 export interface WindowsRouteReadiness {
   verified: boolean;
   state: "connected" | "unverified" | "disconnected";
@@ -1924,7 +2460,7 @@ function linuxStatus(): Promise<string> {
         // que a varredura do bootstrap volte a formar um loop de logs.
         const assinatura = JSON.stringify({ status, netns: netnsAtivo, discords: discords.map((d: Record<string, unknown>) => [d.path, d.state, d.running]) });
         if (linuxStatusLogAllowed(assinatura)) {
-          const stderrLimpo = (stderr ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+          const stderrLimpo = stripAnsiCodes(stderr ?? "");
           for (const linha of stderrLimpo.split("\n")) {
             const t = linha.replace(/^[[:space:]]*\[\!\]\s*/, "").trim();
             if (!t || /^(GoLiveBypass standalone|Go Live e camera de volta|CachyOS|Ubuntu|Arch|Fedora|Debian)/.test(t)) continue;
@@ -2005,8 +2541,18 @@ function linuxPreflight(force = false): Promise<LinuxPreflight> {
 // distro imutavel (Bluefin/Bazzite preenchem LD_PRELOAD da sessao: "ERROR: ld.so: object ...
 // cannot be preloaded" em cada filho) ocupava o fim do stderr e escondia o erro de verdade
 // (issue #108) -- filtrado aqui antes de qualquer tail.
+// O standalone colore o stderr com ANSI. Em algumas sessões Wayland/Flatpak o
+// byte ESC chega ao Electron como U+FFFD, deixando sequências literais como
+// "�[36m" na mensagem. Removemos os dois formatos antes de mostrar o erro.
+function stripAnsiCodes(value: string): string {
+  return value
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/(?:\x1b|\u009b)\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\uFFFD?\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
 function tailErroScript(stderr: string, linhas: number): string {
-  const uteis = stderr
+  const uteis = stripAnsiCodes(stderr)
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
@@ -2096,9 +2642,11 @@ async function linuxActivate(onChunk: (c: string) => void) {
   iniciarWgStatsWatchdog(linuxWgStats);
   startLinuxHealthWatchdog();
   linuxStatusCache = null;
+  startProtonFailoverMonitor();
 }
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
+  stopProtonFailoverMonitor();
   const { code, stderr } = await runScript(["--uninstall"], onChunk);
   if (code !== 0) {
     // Sem manter o marker: o disco continua "nosso"; o boot seguinte reverte a orfa assim
@@ -3117,7 +3665,9 @@ export function readUpdateChannel(): "stable" | "beta" {
 // IPC de autoUpdate
 ipcMain.handle("get-auto-update", () => readAutoUpdate());
 ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
-  saveAutoUpdate(enabled !== false);
+  const enabledValue = enabled !== false;
+  saveAutoUpdate(enabledValue);
+  updaterController?.setEnabled(enabledValue);
   refreshTray().catch(() => {});
 });
 
@@ -3126,6 +3676,7 @@ ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
 ipcMain.handle("get-update-channel", () => readUpdateChannel());
 ipcMain.handle("set-update-channel", (_event, canal: unknown) => {
   saveUpdateChannel(typeof canal === "string" ? canal : "stable");
+  updaterController?.setChannel(readUpdateChannel());
 });
 
 // ------------------------------------------------------------------ teste de proxy (Personalizado / VPS)
@@ -3986,10 +4537,12 @@ ipcMain.handle("get-vpn-mode", async () => {
 ipcMain.handle("set-vpn-mode", async (_event, mode: "proton" | "custom") => {
   if (mode !== "proton" && mode !== "custom") throw new Error("Modo VPN inválido.");
   protonOptimizations.invalidate();
-  return withWireSockLifecycle("modo-vpn", async () => {
+  stopProtonFailoverMonitor();
+  const result = await withWireSockLifecycle("modo-vpn", async () => {
     updateSharedSettings({ vpnMode: mode });
     return mode;
   });
+  return result;
 });
 
 ipcMain.handle("get-proton-settings", async () => {
@@ -4001,6 +4554,7 @@ ipcMain.handle("get-proton-settings", async () => {
     country: (s.protonCountry as string) || "",
     freeOnly: s.protonFreeOnly !== false,
     autoPing: s.protonAutoPing !== false,
+    autoFailover: s.protonAutoFailover !== false,
     lastServer: s.protonLastServer,
   };
 });
@@ -4015,14 +4569,25 @@ ipcMain.handle("get-proton-plan", async (_event, options?: { force?: boolean }) 
 ipcMain.handle("set-proton-settings", async (_event, settings: any) => {
   protonOptimizations.invalidate();
   if (typeof settings?.username === "string") invalidateProtonPlanCache();
-  return withWireSockLifecycle("preferencias-proton", async () => {
+  const filterChanged = typeof settings?.username === "string" ||
+    typeof settings?.country === "string" ||
+    typeof settings?.freeOnly === "boolean" ||
+    typeof settings?.autoPing === "boolean";
+  if (filterChanged || settings?.autoFailover === false) stopProtonFailoverMonitor();
+  if (typeof settings?.username === "string" || typeof settings?.country === "string" || typeof settings?.freeOnly === "boolean" || typeof settings?.autoPing === "boolean") {
+    clearProtonRoutePool();
+  }
+  const result = await withWireSockLifecycle("preferencias-proton", async () => {
     const patch: Record<string, unknown> = {};
     if (typeof settings?.username === "string") patch.protonUsername = settings.username;
     if (typeof settings?.country === "string") patch.protonCountry = settings.country;
     if (typeof settings?.freeOnly === "boolean") patch.protonFreeOnly = settings.freeOnly;
     if (typeof settings?.autoPing === "boolean") patch.protonAutoPing = settings.autoPing;
+    if (typeof settings?.autoFailover === "boolean") patch.protonAutoFailover = settings.autoFailover;
     return updateSharedSettings(patch);
   });
+  if (!filterChanged && settings?.autoFailover === true) startProtonFailoverMonitor();
+  return result;
 });
 
 ipcMain.handle("check-proton-session", async (_event, username?: string) => {
@@ -4146,6 +4711,8 @@ let protonLoginGeneration = 0;
 ipcMain.handle("login-proton", async (event, payload: { username: string; password?: string; twoFactorCode?: string }) => {
   protonOptimizations.invalidate();
   invalidateProtonPlanCache();
+  stopProtonFailoverMonitor();
+  clearProtonRoutePool();
   await withWireSockLifecycle("aguardar-selecao-login", async () => {});
   const generation = ++protonLoginGeneration;
   let res = await proton.loginProton(settingsDir(), payload.username, payload.password, payload.twoFactorCode);
@@ -4200,12 +4767,14 @@ ipcMain.handle("logout-proton", async () => {
   protonLoginGeneration++;
   protonOptimizations.invalidate();
   invalidateProtonPlanCache();
+  stopProtonFailoverMonitor();
   return withWireSockLifecycle("logout-proton", async () => {
     const sessionFile = proton.getProtonSessionFile(settingsDir());
     try {
       if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
     } catch {}
     updateSharedSettings({ protonLastServer: undefined });
+    clearProtonRoutePool();
     return true;
   });
 });
@@ -4216,6 +4785,7 @@ type ProtonOptimizationOptions = {
   autoPing?: boolean;
   speedTest?: boolean;
   reuseMeasured?: boolean;
+  refreshOnStartup?: boolean;
   requestId?: string;
 };
 
@@ -4259,10 +4829,13 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
       const freeOnly = plan.status !== "premium";
       const autoPing = options?.autoPing !== undefined ? options.autoPing : (s.protonAutoPing !== false);
 
-      // Reuse is explicit: startup and login measure only when no compatible result exists.
+      // A abertura/login deve confirmar a rota novamente quando o túnel está
+      // inativo. O reaproveitamento continua disponível apenas para fluxos que
+      // o solicitam explicitamente (por exemplo, "continuar sem medir").
       const previous = s.protonLastServer;
       const speedTest = options?.speedTest !== false;
-      if (options?.reuseMeasured && proton.canReuseMeasuredProfile(settingsDir(), previous, { username, country, freeOnly, autoPing })) {
+      const refreshOnStartup = options?.refreshOnStartup === true;
+      if (!refreshOnStartup && options?.reuseMeasured && proton.canReuseMeasuredProfile(settingsDir(), previous, { username, country, freeOnly, autoPing })) {
         return { ...previous, success: true };
       }
       // Continuing without a new test keeps only a profile matching the current
@@ -4274,7 +4847,7 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
 
       const status = IS_LINUX ? await linuxStatus() : getStatus();
       if (signal.aborted) return { success: false, cancelled: true };
-      if (options?.reuseMeasured && (status === "ACTIVE" || (IS_WINDOWS && isWireSockActive()))) {
+      if ((options?.reuseMeasured || refreshOnStartup) && (status === "ACTIVE" || (IS_WINDOWS && isWireSockActive()))) {
         return { success: true, deferred: true };
       }
       sendProgress({ phase: "ping", total: 0, tested: 0, succeeded: 0 });
@@ -4363,7 +4936,7 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
             }
             assertWindowsRouteGeneration(generation);
             await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs));
-            assertWindowsRouteGeneration(generation);
+            await waitForWindowsRouteSettle(generation, "troca-rota-proton");
             if (!(await startDiscordAndConfirm(installs, "troca-rota-proton"))) {
               throw new Error("a nova rota foi comprovada, mas o Discord não iniciou");
             }

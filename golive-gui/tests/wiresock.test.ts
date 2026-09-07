@@ -42,6 +42,15 @@ describe("WireSock no Windows", () => {
     expect(src).not.toContain("return `AllowedApps = ${allowedApps}`");
   });
 
+  it("tem um caminho de troca que não copia candidato para o wireguard.conf canônico", () => {
+    const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
+    const start = src.indexOf("export async function switchWireSockService");
+    const body = src.slice(start, src.indexOf("export interface WireSockCleanupResult", start));
+    expect(body).toContain("applyWireSockProfile");
+    expect(body).toContain("O perfil de failover WireSock está fora");
+    expect(body).not.toContain("ensureWireGuardConf");
+  });
+
   it("oculta os processos auxiliares e as elevacoes do WireGuard", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
     expect(src).toContain("windowsHide: true");

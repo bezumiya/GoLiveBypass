@@ -24,6 +24,7 @@ DNS = {{.DNS}}
 PublicKey = {{.PublicKey}}
 AllowedIPs = {{.AllowedIPs}}
 Endpoint = {{.Endpoint}}:{{.Port}}
+PersistentKeepalive = 10
 `
 
 // configData holds the data for the WireGuard config template

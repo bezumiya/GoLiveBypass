@@ -15,6 +15,7 @@
 #   ./golivebypass-standalone.sh --ensure-dependencies  (GUI, instala so o necessario)
 #   ./golivebypass-standalone.sh --probe
 #   ./golivebypass-standalone.sh --refresh-route
+#   ./golivebypass-standalone.sh --refresh-route-from <profile.conf>  (GUI)
 #   ./golivebypass-standalone.sh --check-update
 #   ./golivebypass-standalone.sh --update
 
@@ -62,6 +63,9 @@ WG_CONF_CLI=""
 NETNS_NAME="discord-vpn"
 WG_IF="wg-discord"
 NONINTERACTIVE=0
+# Janela curta para o namespace/interface e o primeiro caminho WireGuard se
+# acomodarem antes de o Electron do Discord iniciar o updater.
+TUNNEL_STARTUP_SETTLE_SECONDS=2
 
 # iproute2 imprime tanto "nome" quanto "nome (id: N)" em `ip netns list`.
 # Comparar o primeiro campo evita rejeitar o formato sem sufixo e tambem evita
@@ -678,6 +682,7 @@ while [ $# -gt 0 ]; do
         # falham como telemetria indisponivel e deixam a sessao intacta.
         --non-interactive) NONINTERACTIVE=1 ;;
         --refresh-route) MODE="refresh" ;;
+        --refresh-route-from) MODE="refresh"; WG_CONF_CLI="${2:-}"; shift ;;
         --check-update) MODE="check-update" ;;
         --update) MODE="update" ;;
         --json) JSON=1 ;;
@@ -1210,6 +1215,35 @@ flatpak_app_id() {
     return 1
 }
 
+# O processo principal de um Flatpak pode ficar escondido pelo namespace de PID do
+# bubblewrap. `pgrep -x Discord` nem sempre o encontra, embora o launcher já tenha
+# criado a sessão. O `flatpak ps` consulta o supervisor da sessão do usuário e é a
+# fonte de verdade para o reconhecimento do cliente nesse caso.
+flatpak_running_id() {
+    local wanted="${1:-}"
+    [ -n "$wanted" ] && have flatpak || return 1
+    flatpak ps --columns=application 2>/dev/null \
+        | awk -v wanted="$wanted" '$0 == wanted { found=1; exit } END { exit found ? 0 : 1 }'
+}
+
+# Retorna o PID do processo dentro do sandbox. O child-pid é preferido porque é o
+# processo que herda o namespace de rede; o wrapper fica no host em alguns runtimes.
+flatpak_pid_for_id() {
+    local wanted="${1:-}" pid="" columns
+    [ -n "$wanted" ] && have flatpak || return 1
+    # `child-pid` existe nas versões atuais; o PID do wrapper é um fallback para
+    # instalações Flatpak mais antigas que ainda não expõem essa coluna.
+    for columns in child-pid pid; do
+        pid="$(flatpak ps --columns="$columns,application" 2>/dev/null \
+            | awk -v wanted="$wanted" '$2 == wanted { print $1; exit }')"
+        case "$pid" in
+            ''|*[!0-9]*) continue ;;
+            *) printf '%s\n' "$pid"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 flatpak_is_user_install() {
     have flatpak && flatpak info --user "$1" >/dev/null 2>&1
 }
@@ -1341,8 +1375,9 @@ asar_is_ours() {
 # existir: pos-migracao pra WireGuard, "Discord carregando infinito" e mais provavel de ser
 # tunel morto ou saturado (endpoint gratuito compartilhado) do que o gateway zumbi do proxy
 # legado -- e sem isto nao havia NENHUM jeito de diferenciar os dois num report. Handshake mais
-# velho que ~180s (o dobro do dobro do PersistentKeepalive=25 do bypass) com o namespace de pe
-# e o sinal mais direto de tunel morto ou endpoint inalcancavel.
+# velho que ~180s (folga ampla sobre o PersistentKeepalive=10 dos perfis gerados pelo helper;
+# perfis legados/customizados podem usar outro valor) com o namespace de pe e o sinal mais
+# direto de tunel morto ou endpoint inalcancavel.
 #
 # So leitura (nunca falha fechado): sem privilegio ou sem namespace, devolve ok:false com o
 # motivo em vez de travar o --status inteiro -- os passos que de fato mudam algo (elevate) tem
@@ -1436,7 +1471,13 @@ discord_running() {
 # do cliente (ex.: /usr/lib/equibop/app.asar). O padrao casa "/flav/app.asar" (o main) e
 # "/flav/arrpc" (o helper): nao casa o proprio script nem o shell que o invocou.
 running_flav() {
-    local flav="$1"
+    local flav="$1" flatpak_id="${2:-}"
+    # No Bazzite/Fedora Atomic o portal pode manter o processo Electron dentro do
+    # sandbox mesmo quando o nome dele não aparece no namespace de PID do host.
+    # Consultar o ID exato também evita aceitar outro Discord aberto fora do túnel.
+    if [ -n "$flatpak_id" ] && flatpak_running_id "$flatpak_id"; then
+        return 0
+    fi
     case "$flav" in
         vesktop|equibop|legcord)
             pgrep -f "/$flav/app.asar" >/dev/null 2>&1 || pgrep -f "/$flav/arrpc" >/dev/null 2>&1
@@ -1452,7 +1493,10 @@ running_flav() {
 # Retorna o PID do cliente deste flavour. Usado pelo status para nao confundir um
 # Discord normal (fora do namespace) com a sessao protegida pelo WireGuard.
 discord_pid_flav() {
-    local flav="$1" pid pattern
+    local flav="$1" flatpak_id="${2:-}" pid pattern
+    if [ -n "$flatpak_id" ] && pid="$(flatpak_pid_for_id "$flatpak_id" 2>/dev/null || true)"; then
+        [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
+    fi
     case "$flav" in
         vesktop|equibop|legcord)
             for pattern in "/$flav/app.asar" "/$flav/arrpc"; do
@@ -1917,15 +1961,38 @@ refresh_wireguard_route() {
         fail "Interface WireGuard '$WG_IF' nao esta ativa."
     fi
 
-    local wg_file="$INSTALL_DIR/wireguard.conf" tmp_conf
-    [ -f "$wg_file" ] || fail "Nenhuma configuracao WireGuard encontrada."
+    local wg_file="${WG_CONF_CLI:-$INSTALL_DIR/wireguard.conf}" tmp_conf addresses address
+    [ -f "$wg_file" ] || fail "Nenhuma configuracao WireGuard encontrada em $wg_file."
+    case "$wg_file" in
+        "$INSTALL_DIR"/*) ;;
+        *) fail "Perfil de troca WireGuard fora da pasta de dados do GoLiveBypass." ;;
+    esac
+    # Uma reserva pode ter sido gerada com outro certificado e, portanto, outro
+    # endereco interno. O namespace/interface continuam vivos, mas o endereco
+    # precisa acompanhar a chave/peer reaplicados pelo wg setconf.
+    addresses="$(grep -E '^[[:space:]]*Address[[:space:]]*=' "$wg_file" | sed -E 's/^[[:space:]]*Address[[:space:]]*=[[:space:]]*//' | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | sed '/^$/d' || true)"
+    [ -n "$addresses" ] || fail "O perfil de troca nao informa nenhum endereco WireGuard."
     tmp_conf="$(mktemp)"
-    grep -vE "^(Address|DNS)" "$wg_file" > "$tmp_conf"
+    if ! grep -vE "^(Address|DNS)" "$wg_file" > "$tmp_conf"; then
+        rm -f "$tmp_conf"
+        fail "Nao consegui ler o perfil WireGuard selecionado."
+    fi
     if ! elevate ip netns exec "$NETNS_NAME" wg setconf "$WG_IF" "$tmp_conf"; then
         rm -f "$tmp_conf"
         fail "Nao consegui reaplicar a nova rota WireGuard."
     fi
     rm -f "$tmp_conf"
+    if ! elevate ip -n "$NETNS_NAME" addr flush dev "$WG_IF"; then
+        fail "Nao consegui atualizar o endereco da interface WireGuard."
+    fi
+    while IFS= read -r address; do
+        [ -n "$address" ] || continue
+        if ! elevate ip -n "$NETNS_NAME" addr add "$address" dev "$WG_IF"; then
+            fail "Nao consegui aplicar o endereco WireGuard $address."
+        fi
+    done <<EOF
+$addresses
+EOF
     ok "Rota WireGuard atualizada sem reiniciar o Discord."
 }
 
@@ -1969,6 +2036,11 @@ log_wireguard_readiness() {
         printf '%s route.diagnostic mode=log-only %s\n' "$(date -Iseconds)" "${probe:-sem resposta}"
     ) >> "$INSTALL_DIR/logs/wireguard-diagnostics.log" 2>&1 < /dev/null &
     return 0
+}
+
+wait_for_tunnel_startup() {
+    printf '  Aguardando o tunel WireGuard estabilizar (%ss)...\n' "$TUNNEL_STARTUP_SETTLE_SECONDS" >&2
+    sleep "$TUNNEL_STARTUP_SETTLE_SECONDS"
 }
 
 teardown_wireguard_netns() {
@@ -2021,7 +2093,7 @@ start_discord() {
     local linha="${1:-}"
     local resources=""
     local flav=""
-    local id
+    local id=""
     local exe
 
     resources="${linha%%\|*}"
@@ -2045,7 +2117,7 @@ start_discord() {
     rm -f "$_USER_HOME/.config/discordcanary/Singleton"* 2>/dev/null || true
 
     local target_cmd=""
-    if [ -n "$resources" ] && id="$(flatpak_app_id "$resources")" && have flatpak; then
+    if [ -n "$resources" ] && have flatpak && id="$(flatpak_app_id "$resources")"; then
         target_cmd="flatpak run $id"
     elif [ -n "$linha" ]; then
         flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
@@ -2075,7 +2147,21 @@ start_discord() {
 
     [ -n "$target_cmd" ] || return 1
 
-    if have systemd-run; then
+    if [ -n "$id" ]; then
+        # Flatpak depende do barramento e do portal da sessão gráfica do usuário.
+        # Uma unidade transitória do systemd do sistema (o caminho anterior) inicia
+        # o launcher como root e perde essa sessão no Bazzite, fazendo o bwrap sair
+        # antes de o Discord aparecer. Entrar no namespace diretamente preserva o
+        # ambiente Wayland/DBus e ainda mantém o tráfego isolado no WireGuard.
+        printf '[%s] launch=flatpak-direct app=%s\n' "$(date -Is)" "$id" >>"$discord_log"
+        if have setsid; then
+            elevate setsid -f ip netns exec "$NETNS_NAME" sudo -u "$run_user" env $run_env \
+                sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
+        else
+            elevate ip netns exec "$NETNS_NAME" sudo -u "$run_user" env $run_env \
+                sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null &
+        fi
+    elif have systemd-run; then
         # O arquivo captura o stderr/stdout do cliente para diferenciar crash,
         # atualizacao e encerramento pelo portal. --collect evita unidades
         # antigas acumuladas sem habilitar restart automatico.
@@ -2096,19 +2182,20 @@ start_discord() {
             sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1
     else
         elevate ip netns exec "$NETNS_NAME" sudo -u "$run_user" env $run_env \
-            sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 &
+            sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null &
     fi
     printf '  Log do Discord: %s\n' "$discord_log" >&2
 }
 
-# systemd-run confirma apenas que a unidade foi aceita; o processo Electron pode
-# falhar logo depois (DISPLAY/Wayland, atualização em andamento ou Flatpak sem
+# O launcher confirma apenas que o processo foi solicitado; o Electron pode falhar
+# logo depois (DISPLAY/Wayland, atualização em andamento, bwrap ou Flatpak sem
 # override). Aguarde o processo real antes de declarar a ativação concluída.
 wait_discord_started() {
-    local linha="${1:-}" flav="" tentativas=20
+    local linha="${1:-}" flav="" flatpak_id="" tentativas=40
     flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
+    flatpak_id="$(printf '%s' "$linha" | cut -d'|' -f4)"
     while [ "$tentativas" -gt 0 ]; do
-        if running_flav "$flav"; then return 0; fi
+        if running_flav "$flav" "$flatpak_id"; then return 0; fi
         tentativas=$((tentativas - 1))
         [ "$tentativas" -gt 0 ] && sleep 0.5
     done
@@ -2311,7 +2398,7 @@ if [ "$MODE" = "status" ]; then
             running="nao"
             in_namespace="nao"
             discord_pid=""
-            if discord_pid="$(discord_pid_flav "$flav" 2>/dev/null)"; then
+            if discord_pid="$(discord_pid_flav "$flav" "$id" 2>/dev/null)"; then
                 running="sim"
                 if discord_pid_in_netns "$discord_pid"; then in_namespace="sim"; fi
             fi
@@ -2471,6 +2558,7 @@ if [ "$injected" -eq 0 ]; then
 fi
 
 # HTTP/handshake probes are informational and must not gate Discord startup.
+wait_for_tunnel_startup
 log_wireguard_readiness
 
 # Modo portatil: reabre o Discord ja com o bypass ativo (mesmo comportamento do app do Windows).
@@ -2478,6 +2566,10 @@ log_wireguard_readiness
 start_discord "$(printf '%s\n' "$FOUND" | head -1)"
 if ! wait_discord_started "$(printf '%s\n' "$FOUND" | head -1)"; then
     warn "O WireGuard ficou pronto, mas o processo do Discord nao iniciou."
+    # Se o launcher chegou a criar um sandbox, mas o reconhecimento expirou, feche-o
+    # antes de remover o namespace. Assim não deixamos um Flatpak órfão usando uma
+    # interface WireGuard sem o nome discord-vpn.
+    stop_discord || true
     teardown_wireguard_netns
     fail "Discord nao iniciou dentro do namespace WireGuard. Verifique o log em $INSTALL_DIR/logs."
 fi

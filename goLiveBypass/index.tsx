@@ -12,7 +12,7 @@ import { Logger } from "@utils/Logger";
 import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
-import { Button, Constants, MaskedLink, React, RestAPI, SearchableSelect, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
+import { Button, Constants, MaskedLink, React, RestAPI, SearchableSelect, TextInput, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
 
 import {
     evaluateStreamClaim,
@@ -61,9 +61,6 @@ const RTCConnectionStore: DiagnosticStore = findStoreLazy("RTCConnectionStore");
 
 const VIDEO_GUARD = "2026-08-video-guard";
 
-// O experimento so e reavaliado alguns ticks apos o CONNECTION_OPEN; perguntar na hora exata
-// respondia "bloqueado" mesmo em sessao ja liberada, e o plugin recarregava a toa.
-const VERDICT_DELAY_MS = 1500;
 const PLUGIN_VERSION = "1.1.12-beta.13";
 
 const AUTOMATIC = "";
@@ -71,7 +68,6 @@ const VOICE_KEYS: "voiceRegion"[] = ["voiceRegion"];
 const STREAM_KEYS: "streamRegion"[] = ["streamRegion"];
 
 let original: RegionStore | undefined;
-let lastScope: string | null = null;
 let streamClaimTimer: ReturnType<typeof setInterval> | null = null;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let streamClaimState: StreamClaimState = initialStreamClaimState();
@@ -143,9 +139,10 @@ function StreamRegionPicker() {
 function AboutPlugin() {
     return (
         <>
+            <VpnPanel />
             <PluginUpdateSettings />
             <Paragraph>
-                Made by bezumiya. Source and issues on <MaskedLink href="https://github.com/bezumiya/GoLiveBypass">GitHub</MaskedLink>, and I post about it on <MaskedLink href="https://twitter.com/obezumiya">Twitter</MaskedLink>.
+                Feito por bezumiya. Código e issues no <MaskedLink href="https://github.com/bezumiya/GoLiveBypass">GitHub</MaskedLink>, e novidades no <MaskedLink href="https://twitter.com/obezumiya">Twitter</MaskedLink>.
             </Paragraph>
         </>
     );
@@ -226,29 +223,162 @@ const settings = definePluginSettings({
         component: StreamRegionPicker,
         default: AUTOMATIC
     },
-    sessionRouting: {
+    vpnMode: {
         type: OptionType.SELECT,
-        description: "What goes through the proxy. Only the gateway is what unlocks Go Live, and it keeps the rest of Discord at full speed. Adding the login also hides your real address while you authenticate, at the cost of a slower start.",
+        description: "Rota WireGuard isolada para este Discord. O restante do computador continua usando a rede normal.",
         options: [
-            { label: "Gateway only, fastest", value: "gateway", default: true },
-            { label: "Gateway and login, hides your address while you sign in", value: "login" }
+            { label: "ProtonVPN (recomendado)", value: "proton", default: true },
+            { label: "Arquivo WireGuard personalizado", value: "custom" }
         ]
     },
-    proxy: {
+    customConfigPath: {
         type: OptionType.STRING,
-        description: "Proxy that carries the gateway connection, like socks5://127.0.0.1:9050 for Tor. Add a login as socks5://user:password@host:port when your proxy needs one. Leave empty and a free proxy is picked and tested for you, which means a stranger carries your login.",
-        default: "",
-        // Aceita usuario e senha antes do @. O trecho e casado com ganancia para a senha poder
-        // conter @ e :, que e comum em credencial gerada por provedor.
-        isValid: (value: string) => value.trim() === "" || /^(socks5|https?):\/\/(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}$/.test(value.trim())
-            || "Use socks5://host:porta, ou socks5://usuario:senha@host:porta se o seu proxy pedir login."
+        description: "Caminho absoluto de um .conf WireGuard. Ele será copiado para a pasta privada do plugin e filtrado somente para os executáveis deste Discord.",
+        default: ""
     },
-    excludedCountries: {
+    protonUsername: {
         type: OptionType.STRING,
-        description: "Two letter country codes, comma separated, whose proxies are never used. The real exit address is checked, not the one the list claims.",
-        default: "BR"
+        description: "Usuário da conta ProtonVPN. A sessão fica somente na pasta privada do plugin.",
+        default: ""
+    },
+    protonCountry: {
+        type: OptionType.STRING,
+        description: "Países Proton preferidos, em códigos de duas letras separados por vírgula. Vazio deixa o Proton escolher.",
+        default: "",
+        isValid: (value: string) => value.trim() === "" || value.trim().split(",").every(part => /^[A-Za-z]{2}$/.test(part.trim()))
+            || "Use códigos de país de duas letras, por exemplo US, NL."
+    },
+    protonFreeOnly: {
+        type: OptionType.BOOLEAN,
+        description: "Usar somente servidores gratuitos na seleção automática do Proton.",
+        default: true
+    },
+    protonAutoPing: {
+        type: OptionType.BOOLEAN,
+        description: "Escolher primeiro servidores Proton com menor latência.",
+        default: true
     }
 });
+
+interface PluginVpnStatus {
+    state: string;
+    active: boolean;
+    message: string;
+    externalReason: string | null;
+    lastDiagnostic: { detail: string; ok: boolean; kind: string } | null;
+}
+
+function VpnPanel() {
+    const [status, setStatus] = useState<PluginVpnStatus | null>(null);
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+    const [twoFactorCode, setTwoFactorCode] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [optimizing, setOptimizing] = useState(false);
+
+    const refresh = async () => {
+        if (!Native) return;
+        try {
+            const [nextStatus, saved] = await Promise.all([Native.getVpnStatus(), Native.getProtonSettings()]);
+            setStatus(nextStatus as PluginVpnStatus);
+            const savedRecord = saved as { protonUsername?: unknown; sessionUsername?: unknown };
+            const savedUsername = typeof savedRecord.protonUsername === "string" && savedRecord.protonUsername
+                ? savedRecord.protonUsername
+                : savedRecord.sessionUsername;
+            if (!username && typeof savedUsername === "string" && savedUsername) setUsername(savedUsername);
+        } catch (error) {
+            logger.error("Falha ao ler o estado da VPN do plugin", error);
+        }
+    };
+
+    useEffect(() => {
+        void refresh();
+        const timer = setInterval(() => void refresh(), 5_000);
+        return () => clearInterval(timer);
+    }, []);
+
+    const call = async (operation: () => Promise<unknown>, successMessage?: string) => {
+        if (busy) return;
+        setBusy(true);
+        try {
+            const result = await operation() as { success?: boolean; error?: string; message?: string };
+            if (result.success === false) throw new Error(result.error || result.message || "Operação VPN recusada.");
+            if (successMessage) showToast(successMessage, Toasts.Type.SUCCESS);
+            await refresh();
+        } catch (error) {
+            showToast(`GoLiveBypass: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const login = async () => {
+        if (!Native || busy || optimizing) return;
+        setBusy(true);
+        try {
+            const result = await Native.loginProton({ username, password, twoFactorCode });
+            if (!result.success) throw new Error(result.error || result.message || "Login Proton recusado.");
+            setPassword("");
+            setTwoFactorCode("");
+            showToast("Sessão Proton salva na pasta privada do plugin.", Toasts.Type.SUCCESS);
+            await refresh();
+        } catch (error) {
+            showToast(`Login Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const optimize = async () => {
+        if (!Native || busy || optimizing) return;
+        setOptimizing(true);
+        try {
+            const result = await Native.optimizeProtonRoute({
+                requestId: `plugin-${Date.now()}`,
+                speedTest: true,
+                country: settings.store.protonCountry,
+                freeOnly: settings.store.protonFreeOnly,
+                autoPing: settings.store.protonAutoPing
+            });
+            if (!result.success) throw new Error(result.error || "Não foi possível otimizar a rota Proton.");
+            showToast("Rota Proton otimizada. O Discord será reiniciado para aplicar o túnel.", Toasts.Type.SUCCESS);
+            await refresh();
+        } catch (error) {
+            showToast(`Otimização Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+        } finally {
+            setOptimizing(false);
+        }
+    };
+
+    if (!Native) return <Paragraph>A parte desktop do plugin não está disponível nesta instalação.</Paragraph>;
+
+    const statusLabel = status?.active ? `Ativa · ${status.message}` : status?.message || "Consultando o estado da VPN…";
+    return (
+        <section>
+            <Paragraph><strong>VPN do plugin</strong> — {statusLabel}</Paragraph>
+            {status?.state === "blocked_external" && <Paragraph>WireSock externo detectado. O plugin não vai pará-lo nem assumir seu túnel.</Paragraph>}
+            {status?.state === "recovery_required" && <Paragraph>A última limpeza não foi confirmada. Verifique o log antes de tentar novamente.</Paragraph>}
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <TextInput value={username} onChange={setUsername} placeholder="Usuário ProtonVPN" disabled={busy || optimizing} />
+                <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" type="password" disabled={busy || optimizing} />
+                <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" disabled={busy || optimizing} />
+                <div>
+                    <Button onClick={() => void login()} disabled={busy || optimizing || !username.trim()}>Entrar no Proton</Button>{" "}
+                    <Button onClick={() => void optimize()} disabled={busy || optimizing || !username.trim()}>{optimizing ? "Otimizando…" : "Otimizar rota"}</Button>{" "}
+                    <Button onClick={() => void call(() => Native.logoutProton(), "Sessão Proton removida.")} disabled={busy || optimizing}>Sair</Button>
+                </div>
+                <div>
+                    <Button onClick={() => void call(() => Native.enable())} disabled={busy || optimizing}>Ativar agora</Button>{" "}
+                    <Button onClick={() => void call(() => Native.restoreNetwork(), "Rede restaurada.")} disabled={busy || optimizing}>Restaurar rede</Button>{" "}
+                    <Button onClick={() => void call(() => Native.testWireGuardConfig(settings.store.customConfigPath))} disabled={busy || optimizing}>Testar .conf</Button>
+                </div>
+            </div>
+            <Paragraph>
+                Windows x64 apenas por enquanto. O túnel usa AllowedApps somente para o executável do Discord e o Update.exe; probes de rota são apenas diagnóstico.
+            </Paragraph>
+        </section>
+    );
+}
 
 function forcedRegion() {
     const region = settings.store.voiceRegion;
@@ -336,80 +466,17 @@ function recordSession() {
     record(`  regiao preferida ${ask(RTCRegionStore, "getPreferredRegion")} | lista ${JSON.stringify(ask(RTCRegionStore, "getPreferredRegions"))} | override instalado ${original !== undefined}`);
 }
 
-// Sem refazer o gateway a sessao fica bloqueada ate o proximo reinicio -- o socket que
-// importa ja nasceu fora da rota. Recarregar e a unica saida, e o processo principal limita
-// quantas vezes isso pode acontecer.
-async function retryBehindExit() {
-    if (!Native) return;
-
-    try {
-        const result = await Native.retryWithProxy(settings.store.excludedCountries);
-        record(result.retried
-            ? `recarregando para o gateway renascer atras da saida (tentativa ${result.attempt})`
-            : `nao da para tentar de novo: ${result.reason}`);
-
-        if (result.retried) {
-            showToast(`GoLiveBypass is reconnecting behind the proxy (attempt ${result.attempt}).`);
-            return;
-        }
-
-        // O processo principal recusou recarregar de proposito: ha midia recente (call ou
-        // transmissao em andamento) e reconectar o gateway agora travaria o video ate um
-        // Ctrl+R manual, ou pior, derrubaria a chamada. Toast neutro (sem FAILURE) -- nao e um
-        // erro, e uma escolha de seguranca.
-        if (result.reason === "chamada em andamento") {
-            showToast("GoLiveBypass: this session is still blocked, but you're in a call or stream right now. Won't restart Discord automatically -- reload manually (Ctrl+R) once you hang up, or it sorts itself out on the next reconnect.");
-            return;
-        }
-
-        showToast(`GoLiveBypass could not unlock this session (${result.reason}). Open your proxy, then restart Discord from the tray.`, Toasts.Type.FAILURE);
-    } catch (error) {
-        logger.error("Failed to reach the desktop process", error);
-    }
-}
-
-// Incrementado a cada CONNECTION_OPEN: uma reconexao antes do timer anterior disparar
-// invalida o veredito antigo, entao so a chamada mais recente age.
-let sessionGeneration = 0;
-
-async function reportSession() {
-    if (!Native) return;
-
-    const generation = ++sessionGeneration;
+function reportSession() {
     recordSession();
+    if (!Native) return;
 
-    let exit: string | null = null;
-    try {
-        ({ exit, scope: lastScope } = await Native.sessionOpened());
-    } catch (error) {
-        logger.error("Failed to reach the desktop process", error);
-        return;
-    }
-
-    // Try no corpo inteiro do timer: excecao aqui dentro escapa sem virar rejeicao pegavel,
-    // e um rename em alguma loja faria o plugin ficar mudo em vez de registrar o erro.
-    setTimeout(() => {
-        if (generation !== sessionGeneration) return;
-
-        try {
-            if (videoIsBlocked()) {
-                record(`o servidor continuou bloqueando video nesta sessao, saida do gateway: ${exit ?? "nenhuma"}`);
-                retryBehindExit();
-                return;
-            }
-
-            record(exit === null
-                ? "o servidor liberou video sem precisar de proxy"
-                : `o servidor liberou video nesta sessao, gateway por ${exit}`);
-            Native.sessionWorked().catch(error => logger.error("Failed to reach the desktop process", error));
-
-            showToast(exit === null
-                ? "Go Live is unlocked on this session, no proxy was needed."
-                : "Go Live is unlocked on this session. Only the gateway stays on the proxy, everything else is direct now.", Toasts.Type.SUCCESS);
-        } catch (error) {
-            logger.error("Failed to read the video guard verdict for this session", error);
-        }
-    }, VERDICT_DELAY_MS);
+    // A conexão do gateway não muda a rota: o túnel WireGuard já nasceu antes do
+    // Discord conectar e continua isolado por aplicativo. Este registro é somente
+    // diagnóstico e não tenta recarregar ou trocar a saída no meio da mídia.
+    Native.getVpnStatus().then(status => {
+        record(`sessao aberta | VPN ${status.state} | ativa ${status.active} | ownership ${status.owned}`);
+        if (videoIsBlocked()) record("o servidor ainda reporta o guard de video; nenhuma troca automatica de rede foi feita");
+    }).catch(error => logger.error("Falha ao consultar a VPN do plugin", error));
 }
 
 function ask(store: object, method: string, ...args: unknown[]) {
@@ -534,19 +601,18 @@ async function buildReport() {
     lines.push(`override instalado ${original !== undefined}`);
 
     lines.push("", "== configuracao ==");
-    const { proxy, sessionRouting, voiceRegion, streamRegion, excludedCountries } = settings.store;
-    lines.push(`proxy "${proxy}" | roteamento "${sessionRouting}" | regiao de call "${voiceRegion}" | regiao de stream "${streamRegion}" | paises fora "${excludedCountries}"`);
+    const { vpnMode, customConfigPath, protonUsername, protonCountry, protonFreeOnly, protonAutoPing, voiceRegion, streamRegion } = settings.store;
+    lines.push(`VPN "${vpnMode}" | conf personalizada "${customConfigPath ? "definida" : "vazia"}" | usuário Proton "${protonUsername ? "definido" : "vazio"}" | países "${protonCountry}" | somente grátis ${protonFreeOnly} | auto-ping ${protonAutoPing} | região de call "${voiceRegion}" | região de stream "${streamRegion}"`);
 
     lines.push("", "== processo principal ==");
     if (!Native) {
         lines.push("indisponivel, o plugin esta rodando sem a parte desktop");
     } else {
-        // O que o CONNECTION_OPEN devolveu, nao uma pergunta nova: um diagnostico que mexe no
-        // roteamento estragaria a sessao que a pessoa esta tentando descrever.
-        lines.push(`escopo na abertura da sessao: ${lastScope ?? "a sessao nao abriu com o plugin no ar"}`);
-
         try {
-            lines.push(`saida do gateway agora: ${await Native.getActiveProxy() ?? "nenhuma"}`);
+            const status = await Native.getVpnStatus();
+            lines.push(`VPN agora: ${status.state} | ativa ${status.active} | ownership ${status.owned} | geração ${status.generation}`);
+            if (status.externalReason) lines.push(`motivo externo: ${status.externalReason}`);
+            if (status.lastDiagnostic) lines.push(`último diagnóstico: ${status.lastDiagnostic.kind} | ok ${status.lastDiagnostic.ok} | ${status.lastDiagnostic.detail}`);
             lines.push(await Native.getLog() || "sem registros");
         } catch (error) {
             lines.push(`nao consegui falar com o processo principal: ${error instanceof Error ? error.message : String(error)}`);
@@ -558,7 +624,7 @@ async function buildReport() {
 
 export default definePlugin({
     name: "GoLiveBypass",
-    description: "Turns Go Live and camera back on for Brazilian accounts by neutralising Discord's video guard, and keeps your calls on the region you pick.",
+    description: "Turns Go Live and camera back on for Brazilian accounts, and provides an isolated WireGuard VPN for this Discord only.",
     authors: [{ name: "bezumiya", id: 1366453661970071633n }],
     tags: ["Voice", "Privacy"],
     settings,
@@ -604,8 +670,7 @@ export default definePlugin({
         },
 
         LOGOUT() {
-            record("voce saiu da conta, preparando a rota para o proximo login");
-            Native?.sessionClosed().catch(error => logger.error("Failed to reach the desktop process", error));
+            record("voce saiu da conta; a VPN do plugin permanece isolada e nao troca a rota automaticamente");
         }
     },
 
@@ -624,11 +689,9 @@ export default definePlugin({
             }).catch(() => { });
         }, 8_000);
 
-        // Cobre ativar o plugin com o Discord ja aberto: no boot o processo principal ja
-        // chama isto sozinho, e la as duas chamadas dividem uma unica subida.
         Native?.enable().then(result => {
             if (result?.success === false)
-                showToast("GoLiveBypass could not start its local router. Details are in the log file.", Toasts.Type.FAILURE);
+                showToast(`GoLiveBypass não conseguiu ativar a VPN: ${result.error || result.message || "veja o log"}`, Toasts.Type.FAILURE);
         }).catch(error => logger.error("Failed to reach the desktop process", error));
     },
 

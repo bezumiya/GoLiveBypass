@@ -9,6 +9,7 @@ import * as logger from './logger';
 import { randomUUID } from 'crypto';
 import { StringDecoder } from 'string_decoder';
 import type { RouteProbeResult } from './route-proof';
+import type { ProtonRouteMetadata } from './route-failover';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
@@ -649,6 +650,97 @@ export async function generateOptimalProtonConfig(
     : undefined) || res.stderr || res.stdout || 'Falha ao selecionar e gerar configuração ProtonVPN.';
   logger.error('proton', 'erro ao gerar configuração ótima', { codigo_saida: res.code, resposta_json: Boolean(res.json) });
   return { success: false, error: errMsg };
+}
+
+export interface ProtonRoutePoolResult {
+  success: boolean;
+  stagingDir?: string;
+  routes?: ProtonRouteMetadata[];
+  expiresAt?: number;
+  error?: string;
+}
+
+/**
+ * Generates ping-ranked reserve profiles in an isolated directory. The Go
+ * helper does not create temporary tunnels; the active Discord route therefore
+ * remains the only WireGuard session while this background work runs.
+ */
+export async function generateProtonRoutePool(
+  installDir: string,
+  options: {
+    username: string;
+    countries?: string;
+    freeOnly?: boolean;
+    autoPing?: boolean;
+    size: number;
+    excludeServers?: string[];
+    signal?: AbortSignal;
+  },
+): Promise<ProtonRoutePoolResult> {
+  ensureInstallDir(installDir);
+  const size = Math.max(1, Math.min(3, Math.floor(options.size)));
+  const stagingDir = fs.mkdtempSync(path.join(installDir, '.proton-route-pool-'));
+  const sessionFile = getProtonSessionFile(installDir);
+  const args = [
+    '-username', options.username,
+    '-session-file', sessionFile,
+    '-route-pool',
+    '-route-pool-size', String(size),
+    '-route-pool-output-dir', stagingDir,
+    '-no-save',
+    '-json',
+    '-ipv6',
+    '-exclude-countries', 'BR',
+    '-auto-ping',
+    '-free-only',
+  ];
+  if (options.countries && options.countries.trim()) args.push('-countries', options.countries.trim());
+  const excluded = (options.excludeServers ?? []).map((item) => item.trim()).filter(Boolean);
+  if (excluded.length > 0) args.push('-exclude-servers', excluded.join(','));
+
+  try {
+    const res = await runConfgen({ args, timeoutMs: 120_000, signal: options.signal });
+    const rawRoutes = Array.isArray(res.json?.routes) ? res.json.routes : [];
+    const routes: ProtonRouteMetadata[] = [];
+    for (const raw of rawRoutes) {
+      if (!raw || typeof raw !== 'object') continue;
+      const confFile = typeof raw.confFile === 'string' ? path.resolve(raw.confFile) : '';
+      const relative = confFile ? path.relative(path.resolve(stagingDir), confFile) : '';
+      const pingMs = Number(raw.pingMs);
+      const endpoint = typeof raw.endpoint === 'string' ? raw.endpoint.trim() : '';
+      if (!confFile || !relative || relative.startsWith('..') || path.isAbsolute(relative) ||
+        !fs.existsSync(confFile) || typeof raw.server !== 'string' || !raw.server.trim() ||
+        !endpoint || !Number.isFinite(pingMs) || pingMs <= 0 || pingMs >= 999) continue;
+      routes.push({
+        success: raw.success === true,
+        server: raw.server.trim(),
+        country: typeof raw.country === 'string' ? raw.country.trim() : '',
+        city: typeof raw.city === 'string' ? raw.city.trim() : '',
+        tier: typeof raw.tier === 'string' ? raw.tier.trim() : 'Free',
+        load: Number.isFinite(Number(raw.load)) ? Number(raw.load) : 0,
+        score: Number.isFinite(Number(raw.score)) ? Number(raw.score) : 0,
+        pingMs,
+        endpoint,
+        confFile,
+        expiresAt: Number.isFinite(Number(raw.expiresAt)) ? Number(raw.expiresAt) : undefined,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+    if (res.code !== 0 || res.json?.success !== true || routes.length < size) {
+      const error = res.json?.error || res.stderr || res.stdout || 'Não foi possível preparar reservas Proton Free.';
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+      return { success: false, error: String(error).trim().slice(0, 500) };
+    }
+    return {
+      success: true,
+      stagingDir,
+      routes,
+      expiresAt: Number.isFinite(Number(res.json?.expiresAt)) ? Number(res.json.expiresAt) : undefined,
+    };
+  } catch (error) {
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+    throw error;
+  }
 }
 
 export async function runIsolatedSpeedSelection(args: string[], signal?: AbortSignal, onProgress?: (progress: ProtonOptimizationProgress) => void) {

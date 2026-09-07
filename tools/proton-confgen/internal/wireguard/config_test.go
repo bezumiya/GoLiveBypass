@@ -60,6 +60,7 @@ func TestConfigGeneration(t *testing.T) {
 		"PublicKey = testPublicKey123=",
 		"AllowedIPs = 0.0.0.0/0",
 		"Endpoint = 192.168.1.1:51820",
+		"PersistentKeepalive = 10",
 	}
 
 	for _, expected := range expectedContent {

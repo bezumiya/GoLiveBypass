@@ -4,9 +4,7 @@ import assert from "node:assert/strict";
 import {
     STREAM_NATIVE_GRACE_MS,
     evaluateStreamClaim,
-    initialStreamClaimState,
-    isStrictManualTor,
-    shouldReplaceActiveExit
+    initialStreamClaimState
 } from "../goLiveBypass/stability.ts";
 
 let passed = 0;
@@ -82,40 +80,6 @@ test("cura tardia limpa o bloqueio", () => {
     assert.deepEqual(result.state, initialStreamClaimState());
 });
 
-const tor = proxy => /127\.0\.0\.1:(?:9050|9060)$/.test(proxy);
-
-test("Tor manual e estrito", () => {
-    assert.equal(isStrictManualTor({ proxy: "socks5://127.0.0.1:9060" }, tor), true);
-});
-
-test("Tor automatico nao inventa modo estrito", () => {
-    assert.equal(isStrictManualTor("auto", tor), false);
-});
-
-test("proxy manual ignora primeiro falso negativo", () => {
-    assert.equal(shouldReplaceActiveExit({
-        failed: true, missedBeats: 1, maxMissedBeats: 2
-    }), false);
-});
-
-test("proxy manual troca apos morte confirmada", () => {
-    assert.equal(shouldReplaceActiveExit({
-        failed: true, missedBeats: 2, maxMissedBeats: 2
-    }), true);
-});
-
-test("proxy gratuita tambem ignora primeiro falso negativo", () => {
-    assert.equal(shouldReplaceActiveExit({
-        failed: true, missedBeats: 1, maxMissedBeats: 2
-    }), false);
-});
-
-test("proxy gratuita troca apos morte confirmada", () => {
-    assert.equal(shouldReplaceActiveExit({
-        failed: true, missedBeats: 2, maxMissedBeats: 2
-    }), true);
-});
-
 test("fuzz de 50000 amostras nunca avisa com dado desconhecido ou stream nativa", () => {
     let seed = 0x169b13;
     const random = () => {
@@ -138,18 +102,6 @@ test("fuzz de 50000 amostras nunca avisa com dado desconhecido ou stream nativa"
         if (senderClaimed !== true || nativeStreamCount === null || nativeStreamCount > 0)
             assert.equal(result.warn, false);
         state = result.state;
-    }
-});
-
-test("fuzz de 50000 batimentos preserva a ativa ate o teto", () => {
-    for (let misses = 0; misses < 50_000; misses++) {
-        const max = 1 + (misses % 17);
-        const actual = shouldReplaceActiveExit({
-            failed: true,
-            missedBeats: misses % 23,
-            maxMissedBeats: max
-        });
-        assert.equal(actual, (misses % 23) >= max);
     }
 });
 

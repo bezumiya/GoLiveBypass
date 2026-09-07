@@ -61,6 +61,7 @@ function makeHarness(overrides: Record<string, any> = {}): Harness {
     windowsAllowedAppPaths: () => [], getDiscordInstalls: () => [], killDiscord: async () => { calls.killDiscord = (calls.killDiscord || 0) + 1; },
     recoverWireSockNetwork: async () => ({ ok: true, residual: [] }), startWireSockService: async () => { calls.startWireSock = (calls.startWireSock || 0) + 1; },
     startDiscordAndConfirm: async () => { calls.startDiscord = (calls.startDiscord || 0) + 1; return true; },
+    waitForWindowsRouteSettle: async () => {},
     assertWindowsRouteGeneration: () => {}, windowsRouteStarted: false, windowsRouteState: "inactive",
     startWindowsRouteWatchdog: () => {}, iniciarWgStatsWatchdog: () => {}, waitForWindowsWgReady: async () => ({}),
     linuxDeactivate: async () => {}, linuxActivate: async () => {}, linuxPreflight: async () => ({ ok: true }),
@@ -98,6 +99,22 @@ describe("handler real de otimização Proton", () => {
     expect(h.calls.generate).toBeUndefined();
   });
 
+  it("refaz a medição automática na abertura mesmo com cache compatível", async () => {
+    let generated = 0;
+    const h = makeHarness({ proton: {
+      canReuseMeasuredProfile: () => true,
+      MEASUREMENT_CRITERION_VERSION: "test-v2",
+      generateOptimalProtonConfig: async () => {
+        generated += 1;
+        return { success: true, server: "US#1", endpoint: "198.51.100.1:51820", downloadMbps: 100, uploadMbps: 20 };
+      },
+    } });
+    h.settings.protonLastServer = { success: true, server: "DE#1", endpoint: "198.51.100.2:51820", measurementUsername: "user@example.test" };
+    const result = await h.run({ refreshOnStartup: true });
+    expect(result).toMatchObject({ success: true, server: "US#1" });
+    expect(generated).toBe(1);
+  });
+
   it("mede na seleção inicial e persiste a métrica de velocidade", async () => {
     const h = makeHarness();
     const result = await h.run({ speedTest: true });
@@ -116,14 +133,37 @@ describe("handler real de otimização Proton", () => {
     expect(h.calls.killDiscord).toBeUndefined();
   });
 
+  it("adia a nova medição automática quando o túnel já está ativo", async () => {
+    let generated = 0;
+    const h = makeHarness({
+      getStatus: () => "ACTIVE",
+      isWireSockActive: () => true,
+      proton: {
+        canReuseMeasuredProfile: () => true,
+        MEASUREMENT_CRITERION_VERSION: "test-v2",
+        generateOptimalProtonConfig: async () => {
+          generated += 1;
+          return { success: true, server: "US#1" };
+        },
+      },
+    });
+    h.settings.protonLastServer = { server: "DE#1", endpoint: "198.51.100.2:51820" };
+    const result = await h.run({ refreshOnStartup: true });
+    expect(result).toEqual({ success: true, deferred: true });
+    expect(generated).toBe(0);
+    expect(h.calls.killDiscord).toBeUndefined();
+  });
+
   it("troca rota Windows ativa em ordem: pausa, mede, inicia WireSock e reabre Discord", async () => {
     const order: string[] = [];
     const h = makeHarness({ IS_WINDOWS: true, getStatus: () => "ACTIVE", killDiscord: async () => order.push("kill"),
       recoverWireSockNetwork: async () => { order.push("recover"); return { ok: true, residual: [] }; },
-      startWireSockService: async () => order.push("start-wg"), startDiscordAndConfirm: async () => { order.push("start-discord"); return true; } });
+      startWireSockService: async () => order.push("start-wg"),
+      waitForWindowsRouteSettle: async () => order.push("settle"),
+      startDiscordAndConfirm: async () => { order.push("start-discord"); return true; } });
     const result = await h.run({ speedTest: false });
     expect(result.success).toBe(true);
-    expect(order).toEqual(["kill", "recover", "start-wg", "start-discord"]);
+    expect(order).toEqual(["kill", "recover", "start-wg", "settle", "start-discord"]);
   });
 
   it("preserva preferências quando a geração falha", async () => {

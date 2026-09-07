@@ -133,6 +133,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: "${{ inputs.tag }}"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
 
       - name: Determinar versao da tag
         id: version
@@ -153,6 +157,11 @@ jobs:
 
       - name: Zip do userplugin Vencord (Onda 2 do auto-update)
         run: |
+          mkdir -p goLiveBypass/bin/win32-x64
+          cd tools/proton-confgen
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+            -o ../../goLiveBypass/bin/win32-x64/proton-confgen.exe ./cmd/protonvpn-wg
+          cd ../..
           cd goLiveBypass
           # Garante que o manifest tem a versao da tag (CI e a fonte da verdade).
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${{ steps.version.outputs.version }}\"/" manifest.json

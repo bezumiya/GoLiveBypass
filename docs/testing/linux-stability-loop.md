@@ -43,10 +43,12 @@ A imagem histórica do Arch exige acesso ao `archive.archlinux.org`. Se esse esp
 Para auditar um AppImage já compilado, passe o caminho local e, opcionalmente, preserve o relatório fora do repositório:
 
 ```sh
-APPIMAGE_PATH=golive-gui/dist-app/GoLiveBypass-2.0.5-beta.1.AppImage \
+APPIMAGE_PATH=golive-gui/dist-app/GoLiveBypass-2.0.5-beta.2.AppImage \
 MATRIX_REPORT_DIR=/tmp/golive-linux-reports \
 ./tests/test-linux-matrix.sh --quick
 ```
+
+Em bases mínimas, bibliotecas de desktop ausentes são registradas como `SKIP` para separar a imagem de laboratório de uma instalação completa. `APPIMAGE_STRICT_LIBS=1` transforma esse achado em falha e é adequado para uma imagem que já tenha o conjunto GTK/NSS/GLib instalado.
 
 Os relatórios são texto sanitizado, sem sessão, token ou chave. O runner nunca recebe uma sessão Proton.
 
@@ -65,7 +67,18 @@ A aceitação de rota continua exigindo túnel WireGuard criado, Discord no name
 
 ## Loop de melhoria
 
-Uma rodada é fechada somente com relatório por distribuição, incluindo falhas de pacote, biblioteca, namespace e ativação. Cada defeito reproduzido vira fixture ou teste antes da próxima rodada. O contador de estabilidade volta a zero quando há melhoria concreta (por exemplo, uma falha de instalação que deixa de ocorrer ou uma biblioteca antiga que passa a carregar). O loop termina após cinco rodadas completas consecutivas sem novo defeito nem melhoria, ou quando o responsável interromper a execução.
+Uma rodada é fechada somente com relatório por distribuição, incluindo falhas de pacote, biblioteca, namespace e ativação. Cada defeito reproduzido vira fixture ou teste antes da próxima rodada. O contador de estabilidade volta a zero quando há melhoria concreta (por exemplo, uma falha de instalação que deixa de ocorrer ou uma biblioteca antiga que passa a carregar). O controlador não encerra sozinho depois de rodadas estáveis; ele continua registrando evidências até o responsável interromper a execução.
+
+Para deixar as rodadas executando continuamente, use o controlador `tests/run-linux-stability-loop.sh`. Ele não tem limite automático: a matriz rápida roda em todos os ciclos, uma rodada completa acontece a cada três ciclos e a auditoria do AppImage a cada quatro. Os resultados e as assinaturas ficam em JSONL no diretório indicado:
+
+```sh
+STABILITY_LOOP_INTERVAL=30 \
+STABILITY_LOOP_REPORT_DIR=/tmp/golive-linux-stability-loop \
+MATRIX_BUILD_ARCH_SNAPSHOT=0 \
+./tests/run-linux-stability-loop.sh
+```
+
+O processo só termina com `Ctrl-C`, com um arquivo em `STABILITY_LOOP_STOP_FILE` (por padrão `/tmp/golive-linux-stability.stop`) ou quando o responsável pedir a parada. `--once` existe apenas para validar o executor sem iniciar um loop contínuo.
 
 O CI executa a matriz rápida em `.github/workflows/linux-stability.yml` e nunca publica artefatos. A instalação real de pacotes, o AppImage com bibliotecas da distro e a sessão Premium permanecem tarefas de laboratório/VM.
 

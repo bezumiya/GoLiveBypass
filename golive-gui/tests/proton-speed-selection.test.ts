@@ -33,11 +33,33 @@ vi.mock('child_process', () => ({
       return true;
     });
     queueMicrotask(() => {
-      const result = state.success
+      const routePool = args.includes('-route-pool');
+      const outputDirAt = args.indexOf('-route-pool-output-dir');
+      const outputDir = outputDirAt >= 0 ? args[outputDirAt + 1] : '';
+      const result = routePool
+        ? {
+          success: state.success,
+          expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          routes: [0, 1].map((index) => ({
+            success: true,
+            server: index === 0 ? 'US#1' : 'NL#2',
+            country: index === 0 ? 'US' : 'NL',
+            city: index === 0 ? 'New York' : 'Amsterdam',
+            tier: 'Free', load: 10 + index, score: 1 + index, pingMs: 80 + index,
+            endpoint: `192.0.2.${index + 1}:51820`,
+            confFile: outputDir ? path.join(outputDir, `route-0${index}.conf`) : '',
+          })),
+        }
+        : state.success
         ? { success: true, server: 'US#1', pingMs: 100, downloadMbps: state.downloadMbps, uploadMbps: state.uploadMbps, speedTested: 6, speedSucceeded: 5 }
         : { success: false, error: 'nenhum candidato completou a medição' };
       child.stdout.emit('data', Buffer.from(JSON.stringify(result)));
-      if (state.createOutput) {
+      if (state.createOutput && routePool && outputDir) {
+        fs.mkdirSync(outputDir, { recursive: true });
+        for (let index = 0; index < 2; index++) {
+          fs.writeFileSync(path.join(outputDir, `route-0${index}.conf`), `# - Name: ${index === 0 ? 'US#1' : 'NL#2'}\nEndpoint = 192.0.2.${index + 1}:51820\n`);
+        }
+      } else if (state.createOutput) {
         const outputAt = args.indexOf('-output');
         if (outputAt >= 0 && args[outputAt + 1]) fs.writeFileSync(args[outputAt + 1], '# - Name: US#1\nEndpoint = 192.0.2.1:51820\n');
       }
@@ -48,7 +70,7 @@ vi.mock('child_process', () => ({
   }),
 }));
 
-import { canReuseMeasuredProfile, generateOptimalProtonConfig, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, runConfgen } from '../electron/proton';
+import { canReuseMeasuredProfile, generateOptimalProtonConfig, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, runConfgen } from '../electron/proton';
 
 describe('medidor isolado da regra WireSock', () => {
   beforeEach(() => {
@@ -67,6 +89,24 @@ describe('medidor isolado da regra WireSock', () => {
       expect(result).toMatchObject({ success: true, downloadMbps: 30, uploadMbps: 10, speedTested: 6, speedSucceeded: 5 });
       expect(fs.readFileSync(path.join(dir, 'wireguard.conf'), 'utf8')).toContain('US#1');
       expect(fs.existsSync(path.dirname(state.executable))).toBe(false);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('prepara duas reservas em pasta temporária sem promover o perfil ativo', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-pool-result-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'wireguard.conf'), 'active profile');
+      const result = await generateProtonRoutePool(dir, {
+        username: 'test', size: 2, countries: 'US,NL', excludeServers: ['OLD#1'],
+      });
+      expect(result.success).toBe(true);
+      expect(result.routes).toHaveLength(2);
+      expect(state.args).toContain('-route-pool');
+      expect(state.args).toContain('-no-save');
+      expect(state.args).toContain('-exclude-servers');
+      expect(fs.readFileSync(path.join(dir, 'wireguard.conf'), 'utf8')).toBe('active profile');
+      expect(result.stagingDir).toBeTruthy();
+      expect(fs.existsSync(result.routes![0].confFile)).toBe(true);
+      fs.rmSync(result.stagingDir!, { recursive: true, force: true });
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
   it('preserva configuração anterior e limpa o medidor se a medição falhar', async () => {

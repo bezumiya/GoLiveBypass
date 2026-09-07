@@ -8,14 +8,18 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 	t.Setenv("ISSUE_LABELS", "") // forca o default
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.GitHubRepo != "bezumiya/GoLiveBypass" {
-		t.Errorf("GitHubRepo = %q, want bezumiya/GoLiveBypass", cfg.GitHubRepo)
+	if cfg.GitHubRepo != "pdl-clay/GoLiveBypass" {
+		t.Errorf("GitHubRepo = %q, want pdl-clay/GoLiveBypass", cfg.GitHubRepo)
+	}
+	if cfg.GitHubWebhookSecret != "webhook-secret" {
+		t.Errorf("GitHubWebhookSecret = %q, want webhook-secret", cfg.GitHubWebhookSecret)
 	}
 	if cfg.Port != "8080" {
 		t.Errorf("Port = %q, want 8080", cfg.Port)
@@ -37,6 +41,7 @@ func TestLoadDefaults(t *testing.T) {
 func TestLoadMissingAPIToken(t *testing.T) {
 	t.Setenv("API_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() esperava erro com API_TOKEN ausente")
@@ -46,15 +51,27 @@ func TestLoadMissingAPIToken(t *testing.T) {
 func TestLoadMissingGitHubToken(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() esperava erro com GITHUB_TOKEN ausente")
 	}
 }
 
+func TestLoadMissingWebhookSecret(t *testing.T) {
+	t.Setenv("API_TOKEN", "app-secret")
+	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() esperava erro com GITHUB_WEBHOOK_SECRET ausente")
+	}
+}
+
 func TestLoadInvalidRepo(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 	t.Setenv("GITHUB_REPO", "sem-barra")
 
 	if _, err := Load(); err == nil {
@@ -65,7 +82,8 @@ func TestLoadInvalidRepo(t *testing.T) {
 func TestLoadOverrides(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
-	t.Setenv("GITHUB_REPO", "bezumiya/GoLiveBypass")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
+	t.Setenv("GITHUB_REPO", "pdl-clay/GoLiveBypass")
 	t.Setenv("ISSUE_LABELS", "bug, triage , ")
 	t.Setenv("RATE_LIMIT", "120")
 	t.Setenv("BLOCK_SECONDS", "60")
@@ -76,8 +94,11 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.GitHubRepo != "bezumiya/GoLiveBypass" {
+	if cfg.GitHubRepo != "pdl-clay/GoLiveBypass" {
 		t.Errorf("GitHubRepo = %q", cfg.GitHubRepo)
+	}
+	if cfg.GitHubWebhookSecret != "webhook-secret" {
+		t.Errorf("GitHubWebhookSecret = %q", cfg.GitHubWebhookSecret)
 	}
 	if !reflect.DeepEqual(cfg.Labels, []string{"bug", "triage"}) {
 		t.Errorf("Labels = %v", cfg.Labels)
@@ -99,6 +120,7 @@ func TestLoadOverrides(t *testing.T) {
 func TestLoadEmptyLabelsFallsBackToBugGui(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 	t.Setenv("ISSUE_LABELS", "")
 
 	cfg, err := Load()
@@ -113,6 +135,7 @@ func TestLoadEmptyLabelsFallsBackToBugGui(t *testing.T) {
 func TestLoadBasePath(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 
 	tests := []struct {
 		name string
@@ -140,6 +163,7 @@ func TestLoadBasePath(t *testing.T) {
 func TestLoadInvalidBasePath(t *testing.T) {
 	t.Setenv("API_TOKEN", "app-secret")
 	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
 	t.Setenv("BASE_PATH", "nao/valido")
 
 	if _, err := Load(); err == nil {

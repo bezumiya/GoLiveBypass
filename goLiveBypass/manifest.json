@@ -1,6 +1,6 @@
 {
   "name": "GoLiveBypass",
-  "description": "Devolve o Go Live e a câmera para contas brasileiras",
+  "description": "Devolve o Go Live e a câmera para contas brasileiras e oferece uma VPN WireGuard isolada para este Discord",
   "authors": [
     {
       "name": "bezumiya",

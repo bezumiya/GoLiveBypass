@@ -5,7 +5,7 @@
 # Estes testes simulam o que o CI faz no job release-assets:
 #   1. Zipar o plugin (goLiveBypass/) como GoLiveBypass-<ver>-vencord.zip
 #   2. Gerar SHA-256 do zip
-#   3. Validar conteudo do zip (manifest.json, index.tsx, native.ts, stability.ts)
+#   3. Validar conteudo do zip (renderer, native facade, controlador VPN e helper TS)
 #   4. Simular a extracao em .userplugins/GoLiveBypass/ (caminho do Vencord)
 #   5. Validar o backup e rollback
 #   6. Validar integridade (hash dos arquivos extraidos)
@@ -86,7 +86,7 @@ fi
 
 # --------------------------------------------------------------------------- 2. Conteudo do zip
 step "2. Conteudo do zip"
-expected_files="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/stability.ts goLiveBypass/manifest.json"
+expected_files="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/stability.ts goLiveBypass/vpn-controller.ts goLiveBypass/vpn-proton.ts goLiveBypass/vpn-types.ts goLiveBypass/vpn-windows.ts goLiveBypass/manifest.json"
 content=$(list_zip_py "$ASSET" | sort)
 for f in $expected_files; do
     if printf '%s\n' "$content" | grep -qF "$f"; then
@@ -135,7 +135,7 @@ else
     bad "pasta $target NAO foi criada"
 fi
 # Validar arquivos extraidos
-for f in index.tsx native.ts stability.ts manifest.json; do
+for f in index.tsx native.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
     if [ -f "$target/$f" ]; then
         ok "extraido $f ($(stat -c%s "$target/$f" 2>/dev/null || stat -f%z "$target/$f") bytes)"
     else
@@ -170,10 +170,10 @@ if [ -f "$manifest" ]; then
     else
         bad "version do zip = $actual_version (esperado $VERSION)"
     fi
-    if grep -q "bezumiya/GoLiveBypass" "$manifest"; then
-        ok "updater.id = bezumiya/GoLiveBypass"
+    if grep -q "pdl-clay/GoLiveBypass" "$manifest"; then
+        ok "updater.id = pdl-clay/GoLiveBypass"
     else
-        bad "updater.id NAO e bezumiya/GoLiveBypass"
+        bad "updater.id NAO e pdl-clay/GoLiveBypass"
     fi
     if grep -q "vencord.zip" "$manifest"; then
         ok "updater.assetName termina com vencord.zip"
@@ -229,7 +229,7 @@ step "7. Hash dos arquivos extraidos confere com o repo"
 # Re-extrair para ter o estado novo
 rm -rf "$target"
 extract_zip_py "$ASSET" "$USERPLUGINS" >/dev/null
-for f in index.tsx native.ts stability.ts manifest.json; do
+for f in index.tsx native.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
     if [ -f "$target/$f" ] && [ -f "$REPO/goLiveBypass/$f" ]; then
         hash_target=$(sha256sum "$target/$f" | awk '{print $1}')
         hash_repo=$(sha256sum "$REPO/goLiveBypass/$f" | awk '{print $1}')

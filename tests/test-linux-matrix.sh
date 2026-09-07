@@ -43,6 +43,7 @@ Variaveis:
   MATRIX_REPORT_DIR=DIR     grava o relatorio sanitizado em DIR
   MATRIX_CASES=LIST         executa somente labels selecionados (ex.: debian-12,fedora-43)
   APPIMAGE_PATH=FILE        AppImage ja compilado para auditoria de bibliotecas
+  APPIMAGE_STRICT_LIBS=1    transforma bibliotecas nao encontradas em falha
   ARCH_SNAPSHOT_IMAGE=NAME  imagem pronta para o caso Arch historico
 USAGE
 }
@@ -272,7 +273,7 @@ NODE
 run_case() {
     local entry="$1" family version image shell age
     IFS='|' read -r family version image shell age <<<"$entry"
-    local label="$family-$version" home preflight compat compat_rc post summary
+    local label="$family-$version" home preflight compat compat_rc post summary missing_libs
     home="$(mktemp -d -t "golive-$family-$version.XXXXXX")"
     make_fake_home "$home"
     report "CASE start=$label image=$image mode=$MODE age=$age"
@@ -346,7 +347,16 @@ NODE
     if [[ "$compat" == *"APPIMAGE_EXTRACT=failed"* ]]; then
         fail "$label AppImage nao pode ser extraido"
     elif [[ -n "$APPIMAGE_PATH" ]]; then
-        pass "$label auditoria de bibliotecas/AppImage"
+        missing_libs="$(printf '%s' "$compat" | sed -n 's/.*APPIMAGE_LDD_MISSING=\([0-9][0-9]*\).*/\1/p')"
+        if [[ "${missing_libs:-0}" -gt 0 ]]; then
+            if [[ "${APPIMAGE_STRICT_LIBS:-0}" == "1" ]]; then
+                fail "$label AppImage extraido, mas ldd encontrou $missing_libs bibliotecas ausentes"
+            else
+                skip "$label AppImage extraido; ldd encontrou $missing_libs bibliotecas na base minima (use APPIMAGE_STRICT_LIBS=1)"
+            fi
+        else
+            pass "$label auditoria de bibliotecas/AppImage"
+        fi
     else
         skip "$label auditoria AppImage (APPIMAGE_PATH ausente)"
     fi

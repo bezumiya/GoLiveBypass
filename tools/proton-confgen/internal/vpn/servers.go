@@ -212,6 +212,31 @@ func (s *ServerSelector) SpeedCandidatesWithProgress(servers []api.LogicalServer
 	return finalists, pings, err
 }
 
+// SpeedCandidatesWithProgressExcluding performs the same ping-only regional
+// ranking but removes routes already in use/quarantine before returning the
+// requested pool entries. The full regional list is ranked first so an
+// excluded best route does not accidentally leave the pool undersized.
+func (s *ServerSelector) SpeedCandidatesWithProgressExcluding(servers []api.LogicalServer, limit int, excluded map[string]struct{}, progress PingProgressFunc) ([]api.LogicalServer, map[string]int, error) {
+	all, pings, err := s.SpeedCandidatesWithProgress(servers, len(servers), progress)
+	if err != nil {
+		return nil, pings, err
+	}
+	filtered := make([]api.LogicalServer, 0, min(limit, len(all)))
+	for _, candidate := range all {
+		if _, skip := excluded[candidate.Name]; skip {
+			continue
+		}
+		filtered = append(filtered, candidate)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, pings, errors.New("nenhum servidor elegível restante para a reserva de rota")
+	}
+	return filtered, pings, nil
+}
+
 func speedFinalists(candidates []api.LogicalServer, pings map[string]int, limit int) ([]api.LogicalServer, error) {
 	return speedFinalistsWithPreference(candidates, pings, limit, false)
 }

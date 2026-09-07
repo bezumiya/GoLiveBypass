@@ -21,6 +21,12 @@ describe("controles Proton", () => {
     expect(fnBody).toContain("Rota ${selectedServerName} aplicada!");
   });
 
+  it("refaz a otimização automática na abertura em vez de reutilizar o cache", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
+    expect(source).toContain("refreshOnStartup: onStartup");
+    expect(source).not.toContain("reuseMeasured: onStartup");
+  });
+
   it("automatiza o CAPTCHA sem pedir token manual", () => {
     const html = fs.readFileSync(path.resolve(process.cwd(), "index.html"), "utf8");
     expect(html).not.toContain('id="protonCaptchaPanel"');

@@ -379,6 +379,58 @@ export function getWireSockConnectionStatus(): WireSockConnectionStatus {
   return { state: "disconnected", verified: false, source: "none" };
 }
 
+function execFileText(file: string, args: string[], timeout = 5000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { encoding: "utf8", windowsHide: true, timeout }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(String(stdout || ""));
+    });
+  });
+}
+
+export async function isWireSockActiveAsync(): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  for (const name of WIRESOCK_SERVICE_NAMES) {
+    try {
+      const output = await execFileText("sc.exe", ["query", name]);
+      if (/STATE\s*:\s*\d+\s+RUNNING/i.test(output)) return true;
+    } catch {}
+  }
+  try {
+    const output = await execFileText("tasklist", ["/FI", "IMAGENAME eq wiresock-client.exe"]);
+    return output.toLowerCase().includes("wiresock-client.exe");
+  } catch {
+    return false;
+  }
+}
+
+/** Non-blocking counterpart used by the short-interval failover monitor. */
+export async function getWireSockConnectionStatusAsync(): Promise<WireSockConnectionStatus> {
+  if (process.platform !== "win32") return { state: "unknown", verified: false, source: "none" };
+  const cli = findWireSockCli();
+  if (cli) {
+    try {
+      const output = await execFileText(cli, ["status"]);
+      const state = parseWireSockCliStatus(output);
+      const externalAddress = parseWireSockCliExternalAddress(output);
+      return { state, verified: state === "connected" && Boolean(externalAddress), source: "cli", externalAddress, detail: output.trim().slice(0, 300) };
+    } catch (err) {
+      // A CLI pode existir e ainda assim não responder durante uma troca do
+      // serviço. Consulte o processo apenas para distinguir uma falha real de
+      // um diagnóstico indisponível; o caller continua tratando o segundo
+      // caso como unknown.
+      if (await isWireSockActiveAsync()) {
+        return { state: "unknown", verified: false, source: "cli", detail: detalheErro(err) };
+      }
+      return { state: "disconnected", verified: false, source: "none", detail: detalheErro(err) };
+    }
+  }
+  if (await isWireSockActiveAsync()) {
+    return { state: "unknown", verified: false, source: "service", detail: "WireSock ativo, mas esta instalacao nao oferece CLI de status" };
+  }
+  return { state: "disconnected", verified: false, source: "none" };
+}
+
 /** Counters do ProTUN para instalações sem wg.exe e sem a CLI opcional. */
 export function getWireSockAdapterTraffic(): WireSockAdapterTraffic | null {
   if (process.platform !== "win32") return null;
@@ -387,6 +439,21 @@ export function getWireSockAdapterTraffic(): WireSockAdapterTraffic | null {
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
       encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 5000,
     }).trim();
+    const parsed = JSON.parse(output) as { adapter?: unknown; receivedBytes?: unknown; sentBytes?: unknown };
+    const receivedBytes = Number(parsed.receivedBytes);
+    const sentBytes = Number(parsed.sentBytes);
+    if (!Number.isFinite(receivedBytes) || !Number.isFinite(sentBytes)) return null;
+    return { adapter: String(parsed.adapter || "ProTUN"), receivedBytes, sentBytes };
+  } catch {
+    return null;
+  }
+}
+
+export async function getWireSockAdapterTrafficAsync(): Promise<WireSockAdapterTraffic | null> {
+  if (process.platform !== "win32") return null;
+  try {
+    const script = "$a = Get-NetAdapterStatistics -Name 'ProTUN' -ErrorAction Stop; [PSCustomObject]@{adapter='ProTUN';receivedBytes=[int64]$a.ReceivedBytes;sentBytes=[int64]$a.SentBytes} | ConvertTo-Json -Compress";
+    const output = (await execFileText("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script])).trim();
     const parsed = JSON.parse(output) as { adapter?: unknown; receivedBytes?: unknown; sentBytes?: unknown };
     const receivedBytes = Number(parsed.receivedBytes);
     const sentBytes = Number(parsed.sentBytes);
@@ -492,11 +559,12 @@ export function formatAllowedApps(paths: string[]): string {
   return values.join(", ");
 }
 
-export async function startWireSockService(installDir: string, customConf?: string, allowedAppPaths: string[] = []): Promise<void> {
+async function applyWireSockProfile(installDir: string, rawConf: string, allowedAppPaths: string[] = []): Promise<void> {
+  if (!fs.existsSync(rawConf)) throw new Error("O perfil WireGuard selecionado não existe.");
   const wsExe = await ensureWireSockInstalled();
   logger.info("wiresock", "executavel encontrado", { caminho: wsExe });
-  const rawConf = ensureWireGuardConf(installDir, customConf);
   const targetConf = path.join(installDir, "wiresock-discord.conf");
+  fs.mkdirSync(installDir, { recursive: true });
 
   const allowedApps = formatAllowedApps(allowedAppPaths);
   const rawLines = fs.readFileSync(rawConf, "utf8").split(/\r?\n/);
@@ -529,6 +597,27 @@ export async function startWireSockService(installDir: string, customConf?: stri
   }
   limparDnsDoAdaptadorWireSock();
   logger.info("wiresock", "servico ativo com perfil selecionado", { config: targetConf });
+}
+
+export async function startWireSockService(installDir: string, customConf?: string, allowedAppPaths: string[] = []): Promise<void> {
+  const rawConf = ensureWireGuardConf(installDir, customConf);
+  await applyWireSockProfile(installDir, rawConf, allowedAppPaths);
+}
+
+/**
+ * Reapplies a candidate profile by restarting only the WireSock service. The
+ * canonical wireguard.conf is intentionally untouched until the caller has
+ * observed a recent handshake, so a failed candidate can be rolled back while
+ * the Discord process remains alive.
+ */
+export async function switchWireSockService(installDir: string, candidateConf: string, allowedAppPaths: string[] = []): Promise<void> {
+  const resolvedInstall = path.resolve(installDir);
+  const resolvedCandidate = path.resolve(candidateConf);
+  const relative = path.relative(resolvedInstall, resolvedCandidate);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("O perfil de failover WireSock está fora da pasta de dados do GoLiveBypass.");
+  }
+  await applyWireSockProfile(installDir, resolvedCandidate, allowedAppPaths);
 }
 
 export interface WireSockCleanupResult {

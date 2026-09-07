@@ -32,6 +32,15 @@ describe("elevacao sudo no Linux", () => {
     expect(systemdBlock).not.toContain('>>"$discord_log" 2>&1 &');
   });
 
+  it("mantem Flatpak na sessao grafica e reconhece o sandbox no Bazzite", () => {
+    expect(source).toContain("flatpak_running_id()");
+    expect(source).toContain("flatpak_pid_for_id()");
+    expect(source).toContain("launch=flatpak-direct app=%s");
+    expect(source).toContain("elevate setsid -f ip netns exec");
+    expect(source).toContain('running_flav "$flav" "$flatpak_id"');
+    expect(source).toContain('discord_pid_flav "$flav" "$id"');
+  });
+
   it("nunca pede senha nos probes automaticos do watchdog", () => {
     expect(source).toContain('--non-interactive) NONINTERACTIVE=1');
     expect(source).toContain('sudo -n "$@"');

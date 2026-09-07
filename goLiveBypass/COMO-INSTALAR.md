@@ -1,8 +1,13 @@
 # GoLiveBypass — plugin do Vencord/Equicord
 
-Este zip traz os arquivos fonte do plugin (`index.tsx`, `native.ts`,
-`stability.ts` e `manifest.json`). Ele não é um instalador: os arquivos entram dentro de um
+Este zip traz os arquivos fonte do plugin (`index.tsx`, `native.ts`, `stability.ts`,
+`vpn-*.ts` e `manifest.json`) e, nos releases oficiais, o helper x64
+`bin/win32-x64/proton-confgen.exe`. Ele não é um instalador: os arquivos entram dentro de um
 **checkout (código-fonte) do Equicord ou do Vencord**, que compila o plugin.
+
+Por enquanto a VPN do plugin funciona somente em Windows x64. Ela é autônoma: não depende da
+GUI Electron, não compartilha o estado de rede do standalone e não altera o `app.asar` vanilla.
+O standalone continua sendo um caminho separado e não é modificado por esta migração.
 
 ## Instalação resumida
 
@@ -17,7 +22,14 @@ Este zip traz os arquivos fonte do plugin (`index.tsx`, `native.ts`,
 4. No checkout: `pnpm install`, depois `pnpm build` e `pnpm inject`
    (escolha o seu Discord quando perguntar).
 5. Reinicie o Discord por completo e ative **GoLiveBypass** nas
-   configurações de plugins.
+   configurações de plugins. Ao ativar, a VPN WireGuard sobe automaticamente; ao desativar,
+   o plugin para somente o WireSock que ele próprio iniciou e restaura a rede.
+
+Para usar o modo Proton, informe o usuário e a senha na seção da VPN. O CAPTCHA, quando
+solicitado, abre em uma janela isolada e a sessão fica em `%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn`.
+Para um perfil próprio, escolha **Arquivo WireGuard personalizado** e informe o caminho do
+`.conf`; o plugin copia o perfil para sua pasta privada, remove DNS do perfil e injeta
+`AllowedApps` somente para o executável do Discord e o `Update.exe` da instalação atual.
 
 ## Tutorial completo
 

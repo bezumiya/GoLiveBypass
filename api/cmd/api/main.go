@@ -57,7 +57,7 @@ func main() {
 		},
 	}
 
-	logger.Info("API de bug reports no ar", "addr", sc.Address, "repo", cfg.GitHubRepo)
+	logger.Info("API de bug reports e pulso de releases no ar", "addr", sc.Address, "repo", cfg.GitHubRepo)
 	if err := sc.Start(ctx, e); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("servidor encerrado com erro", "err", err)
 		os.Exit(1)

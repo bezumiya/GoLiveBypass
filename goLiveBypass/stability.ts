@@ -78,28 +78,3 @@ export function evaluateStreamClaim(
         warn: true
     };
 }
-
-// Proxy local explicitamente configurado numa porta Tor significa escolha
-// consciente de Tor. Nesse caso o plugin deve preservar a mesma promessa do
-// routeMode=tor da GUI/standalone: sem Tor, gateway fechado; nunca gratuita ou
-// DIRECT. O modo automatico (campo vazio) continua livre para usar reservas.
-export function isStrictManualTor(
-    manual: { proxy: string; } | "auto" | "invalid",
-    isTor: (proxy: string) => boolean
-): manual is { proxy: string; } {
-    return typeof manual === "object" && isTor(manual.proxy);
-}
-
-// Nenhuma saida ativa e trocada por um unico probe ruidoso. Isso vale especialmente
-// para a gratuita: durante a reentrada numa Live, uma troca desnecessaria reconecta
-// o gateway e pode deixar o motor de video preso em so-audio (issues #170/#171).
-// A ativa so e substituida quando o mesmo teto que remove entradas mortas do pote
-// confirma a morte.
-export function shouldReplaceActiveExit(input: {
-    failed: boolean;
-    missedBeats: number;
-    maxMissedBeats: number;
-}) {
-    if (!input.failed) return false;
-    return input.missedBeats >= input.maxMissedBeats;
-}

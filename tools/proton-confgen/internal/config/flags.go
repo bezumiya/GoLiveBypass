@@ -21,6 +21,7 @@ func Parse() (*Config, error) {
 	var excludedCountriesFlag string
 	var dnsServersFlag string
 	var allowedIPsFlag string
+	var excludedServersFlag string
 
 	// Set default DNS and allowed IPs based on IPv6 support
 	defaultDNS := constants.DefaultDNSIPv4
@@ -89,11 +90,20 @@ func Parse() (*Config, error) {
 	flag.BoolVar(&cfg.CheckSession, "check-session", false, "Check if cached session is valid and exit")
 	flag.BoolVar(&cfg.CheckPlan, "check-plan", false, "Check the cached account plan and exit (does not prompt for a password)")
 	flag.BoolVar(&cfg.LoginOnly, "login-only", false, "Authenticate, save session, and exit")
+	flag.BoolVar(&cfg.RoutePool, "route-pool", false, "Generate a local pool of ping-validated routes")
+	flag.IntVar(&cfg.RoutePoolSize, "route-pool-size", 2, "Number of profiles to generate in route-pool mode")
+	flag.StringVar(&cfg.RoutePoolOutputDir, "route-pool-output-dir", "", "Directory for route-pool profiles")
+	flag.StringVar(&excludedServersFlag, "exclude-servers", "", "Exclude server names from automatic selection (comma-separated)")
 
 	flag.Parse()
 
 	// Session certificates max out at 7 days, so fall back to that instead of
 	// the 365d persistent default when -duration was not given explicitly.
+	// Route-pool profiles are disposable reserves and must never create a new
+	// persistent device in the Proton dashboard, even for direct CLI callers.
+	if cfg.RoutePool {
+		cfg.NoSave = true
+	}
 	if cfg.NoSave && !isFlagSet("duration") {
 		cfg.Duration = constants.DefaultSessionCertDuration
 	}
@@ -101,9 +111,16 @@ func Parse() (*Config, error) {
 	if err := validateFeatureFlags(cfg); err != nil {
 		return nil, err
 	}
+	if cfg.RoutePool && (cfg.RoutePoolSize < 1 || cfg.RoutePoolSize > 3) {
+		return nil, fmt.Errorf("route-pool-size must be between 1 and 3")
+	}
+	if cfg.RoutePool && strings.TrimSpace(cfg.RoutePoolOutputDir) == "" {
+		return nil, fmt.Errorf("route-pool-output-dir is required in route-pool mode")
+	}
 
 	// Parse and validate country codes (needed by most modes)
 	cfg.ExcludedCountries = parseCountries(excludedCountriesFlag)
+	cfg.ExcludedServers = parseCommaSeparatedList(excludedServersFlag)
 	if countriesFlag != "" {
 		cfg.Countries = parseCountries(countriesFlag)
 		for _, country := range cfg.Countries {

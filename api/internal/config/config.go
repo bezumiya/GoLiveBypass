@@ -9,12 +9,13 @@ import (
 )
 
 type Config struct {
-	APIToken    string
-	GitHubToken string
-	GitHubRepo  string
-	Labels      []string
-	Port        string
-	BasePath    string
+	APIToken            string
+	GitHubToken         string
+	GitHubWebhookSecret string
+	GitHubRepo          string
+	Labels              []string
+	Port                string
+	BasePath            string
 	// Rate limit agressivo por IP: quantos requests cabem na janela de 1min.
 	// Estourar a janela bloqueia o IP por BlockSeconds.
 	RateLimitPerMin float64
@@ -25,7 +26,7 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		GitHubRepo:      getenv("GITHUB_REPO", "bezumiya/GoLiveBypass"),
+		GitHubRepo:      getenv("GITHUB_REPO", "pdl-clay/GoLiveBypass"),
 		Port:            getenv("PORT", "8080"),
 		RateLimitPerMin: getenvFloat("RATE_LIMIT", 10),
 		BlockSeconds:    getenvInt("BLOCK_SECONDS", 300),
@@ -40,6 +41,10 @@ func Load() (*Config, error) {
 	cfg.GitHubToken = os.Getenv("GITHUB_TOKEN")
 	if cfg.GitHubToken == "" {
 		return nil, errors.New("GITHUB_TOKEN e obrigatoria")
+	}
+	cfg.GitHubWebhookSecret = os.Getenv("GITHUB_WEBHOOK_SECRET")
+	if cfg.GitHubWebhookSecret == "" {
+		return nil, errors.New("GITHUB_WEBHOOK_SECRET e obrigatoria")
 	}
 	if !strings.Contains(cfg.GitHubRepo, "/") {
 		return nil, fmt.Errorf("GITHUB_REPO deve estar no formato owner/repo (recebido %q)", cfg.GitHubRepo)

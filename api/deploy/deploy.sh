@@ -15,7 +15,7 @@ docker compose version >/dev/null 2>&1 || fail "plugin 'docker compose' nao disp
 [ -f .env ] || fail ".env ausente em $(pwd) - copie de .env.example"
 chmod 600 .env
 
-for var in API_TOKEN GITHUB_TOKEN; do
+for var in API_TOKEN GITHUB_TOKEN GITHUB_WEBHOOK_SECRET; do
     if ! grep -Eq "^${var}=..+" .env; then
         fail "${var} vazio ou ausente no .env"
     fi
