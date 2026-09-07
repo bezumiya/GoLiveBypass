@@ -9,6 +9,17 @@ Por enquanto a VPN do plugin funciona somente em Windows x64. Ela é autônoma: 
 GUI Electron, não compartilha o estado de rede do standalone e não altera o `app.asar` vanilla.
 O standalone continua sendo um caminho separado e não é modificado por esta migração.
 
+## Linha v2 beta
+
+A versão atual do plugin é **2.0.0-beta.1**. Nesta linha, a VPN WireGuard/WireSock é
+iniciada e controlada pelo próprio plugin, com estado privado em
+`%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn`. O watchdog e as probes de rede são diagnósticos:
+eles registram evidências sem derrubar o Discord por uma leitura transitória.
+
+O beta ainda não é um release estável. O updater ignora prereleases quando consulta o
+canal estável; para testar esta linha, instale o código-fonte do plugin e recompile o
+checkout do Equicord/Vencord.
+
 ## Instalação resumida
 
 1. Tenha o **Git**, **Node.js 22+** e **pnpm** instalados.

@@ -95,8 +95,23 @@ function serviceExists(name: string): boolean {
     }
 }
 
+function serviceRunningFromCim(name: string): boolean | null {
+    try {
+        const script = `$s=Get-CimInstance Win32_Service -Filter "Name='${name.replace(/'/g, "''")}'"; if($s){$s.State}`;
+        const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+            encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
+        });
+        const value = output.trim();
+        return value ? /^Running$/i.test(value) : null;
+    } catch {
+        return null;
+    }
+}
+
 function serviceRunning(name: string): boolean {
     if (!isWindows()) return false;
+    const cimState = serviceRunningFromCim(name);
+    if (cimState !== null) return cimState;
     try {
         const output = execFileSync("sc.exe", ["query", name], {
             encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
@@ -119,9 +134,27 @@ function serviceCommand(name: string): string | null {
     }
 }
 
+function serviceProcessId(name: string): number | null {
+    if (!isWindows() || !serviceRunning(name)) return null;
+    try {
+        const script = `$s=Get-CimInstance Win32_Service -Filter "Name='${name.replace(/'/g, "''")}'"; if($s){$s.ProcessId}`;
+        const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+            encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
+        }).trim();
+        const pid = Number(output);
+        return Number.isInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+        return null;
+    }
+}
+
 function assertPluginServiceSlot(configPath: string): void {
     const name = VPN_SERVICE_NAMES[0];
     if (!serviceExists(name)) return;
+    // Um registro parado não controla tráfego e pode ser retargeteado pelo
+    // script de inicialização abaixo; o bloqueio continua valendo para um
+    // serviço realmente ativo fora do perfil do plugin.
+    if (!serviceRunning(name)) return;
     const command = serviceCommand(name);
     if (!command || !containsConfig(command, configPath))
         throw new Error("O serviço WireSock já está registrado com outro perfil (possivelmente pela GUI ou por outro plugin). Desative-o antes de usar a VPN do plugin.");
@@ -159,9 +192,12 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
     if (!configPath) return { active, owned: false, services, processIds, reason: "WireSock já está ativo fora do perfil do plugin." };
 
     const ownService = services.filter(name => containsConfig(serviceCommand(name), configPath));
-    const ownProcess = processes.filter(process => containsConfig(process.commandLine, configPath));
+    const ownServiceProcessIds = new Set(ownService.map(serviceProcessId).filter((pid): pid is number => pid !== null));
+    const ownProcess = processes.filter(process =>
+        containsConfig(process.commandLine, configPath) || ownServiceProcessIds.has(process.pid));
     const allServicesOwned = services.every(name => containsConfig(serviceCommand(name), configPath));
-    const allProcessesOwned = processes.every(process => containsConfig(process.commandLine, configPath));
+    const allProcessesOwned = processes.every(process =>
+        containsConfig(process.commandLine, configPath) || ownServiceProcessIds.has(process.pid));
     if ((ownService.length > 0 || ownProcess.length > 0) && allServicesOwned && allProcessesOwned)
         return { active, owned: true, services, processIds, reason: null };
     return {

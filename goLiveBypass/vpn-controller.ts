@@ -85,6 +85,7 @@ export class PluginVpnController {
     private externalReason: string | null = null;
     private operationQueue: Promise<unknown> = Promise.resolve();
     private watchdog: ReturnType<typeof setInterval> | null = null;
+    private watchdogChecking = false;
     private restarting = false;
     private initialized = false;
     private optimization: { id: string; controller: AbortController } | null = null;
@@ -166,8 +167,8 @@ export class PluginVpnController {
             };
         }
         const inspection = windows.inspectWireSock(this.serviceConfigPath);
-        if (this.state === "active" && (!inspection.active || !inspection.owned)) {
-            this.state = inspection.active ? "blocked_external" : "recovery_required";
+        if (this.state === "active" && inspection.active && !inspection.owned) {
+            this.state = "blocked_external";
             this.externalReason = inspection.reason;
             this.stopWatchdog();
         }
@@ -542,16 +543,36 @@ export class PluginVpnController {
         });
     }
 
-    private startWatchdog(): void {
-        if (this.watchdog || !isWindows()) return;
-        this.watchdog = setInterval(() => {
-            if (this.state !== "active") return;
+    private async checkWatchdog(): Promise<void> {
+        if (this.watchdogChecking || this.state !== "active") return;
+        this.watchdogChecking = true;
+        try {
             const inspection = windows.inspectWireSock(this.serviceConfigPath);
             if (!inspection.active) {
-                this.state = "recovery_required";
-                this.setDiagnostic("wireguard", false, "serviço WireSock próprio desapareceu");
-                this.options.log("error", "watchdog detectou que o WireSock próprio parou", { mode: "diagnostic-only" });
-                this.stopWatchdog();
+                // WMI/sc.exe can briefly return an empty snapshot while the
+                // service is still alive. Confirm across several samples for
+                // evidence, but keep this probe diagnostic-only.
+                let confirmation = inspection;
+                for (let attempt = 0; attempt < 5 && !confirmation.active; attempt++) {
+                    await new Promise<void>(resolve => setTimeout(resolve, 1_000));
+                    if (this.state !== "active") return;
+                    confirmation = windows.inspectWireSock(this.serviceConfigPath);
+                }
+                if (!confirmation.active) {
+                    this.setDiagnostic("wireguard", false, "serviço WireSock próprio desapareceu");
+                    this.options.log("warn", "watchdog não confirmou o WireSock próprio", {
+                        mode: "diagnostic-only",
+                        services: confirmation.services,
+                        processIds: confirmation.processIds,
+                    });
+                    return;
+                }
+                if (!confirmation.owned) {
+                    this.blockExternal(confirmation.reason || "ownership do WireSock mudou");
+                    return;
+                }
+                this.options.log("warn", "watchdog ignorou leitura transitória do WireSock", { mode: "diagnostic-only" });
+                this.startDiagnostics("watchdog");
                 return;
             }
             if (!inspection.owned) {
@@ -559,6 +580,15 @@ export class PluginVpnController {
                 return;
             }
             this.startDiagnostics("watchdog");
+        } finally {
+            this.watchdogChecking = false;
+        }
+    }
+
+    private startWatchdog(): void {
+        if (this.watchdog || !isWindows()) return;
+        this.watchdog = setInterval(() => {
+            void this.checkWatchdog();
         }, WATCHDOG_MS);
         this.watchdog.unref?.();
     }

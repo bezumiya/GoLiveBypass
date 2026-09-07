@@ -23,6 +23,10 @@ describe("observação da transmissão", () => {
         expect(evaluateStreamObservation(sample({ nativeStreamCount: 1 })).status).toBe("native-connected");
     });
 
+    it("prioriza conexão nativa de uma transmissão remota", () => {
+        expect(evaluateStreamObservation(sample({ senderClaimed: false, nativeStreamCount: 1 })).status).toBe("native-connected");
+    });
+
     it("não transforma store desconhecida em falha", () => {
         expect(evaluateStreamObservation(sample({ senderClaimed: null, nativeStreamCount: null })).status).toBe("unknown");
     });
