@@ -47,6 +47,7 @@ let updateReady = false;
 // estavel filtra e o canal beta consome (regras no updater-channel.ts).
 function githubReleases(): Promise<ReleaseCandidata[]> {
   return new Promise((resolve) => {
+    console.log(`[updater] consultando releases do fork ${REPO}`);
     const req = request(
       {
         host: "api.github.com",
@@ -95,8 +96,10 @@ function githubReleases(): Promise<ReleaseCandidata[]> {
                 prerelease: item.prerelease === true,
               });
             }
+            console.log(`[updater] releases com executavel encontradas: ${releases.length}`);
             resolve(releases);
           } catch {
+            console.warn("[updater] resposta de releases invalida");
             resolve([]);
           }
         });
@@ -129,6 +132,7 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
     if (parsedUrl.protocol !== "https:") {
       return reject(new Error("recusando destino que nao e https: " + url));
     }
+    console.log(`[updater] iniciando download pelo host ${parsedUrl.hostname}`);
 
     const req = request(url, { headers: { "User-Agent": "GoLiveBypass" } }, (res) => {
       const { statusCode, headers } = res;
@@ -143,6 +147,7 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
         } catch {
           return reject(new Error("redirecionamento de download invalido"));
         }
+        console.log(`[updater] seguindo redirecionamento para ${new URL(redirecionada).hostname}`);
         return downloadFile(redirecionada, dest, hops - 1).then(resolve, reject);
       }
 
@@ -151,11 +156,16 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
         return reject(new Error("download falhou: HTTP " + statusCode));
       }
 
+      let bytes = 0;
+      res.on("data", (chunk: Buffer) => { bytes += chunk.length; });
       const out = createWriteStream(dest);
       res.pipe(out);
       // Aguarda o fechamento do descritor, nao apenas o evento finish. Isso evita
       // ler o arquivo enquanto o ultimo flush ainda esta terminando no Windows.
-      out.on("close", resolve);
+      out.on("close", () => {
+        console.log(`[updater] download concluido: ${bytes} bytes`);
+        resolve();
+      });
       out.on("error", reject);
     });
     req.on("error", reject);
@@ -235,9 +245,11 @@ async function updateWindowsPortable(url: string, digest: string | null): Promis
   // Conferido antes de encostar no exe em uso: depois do rename nao ha volta, o app se
   // substituiu. Um arquivo que nao bate e apagado e a versao atual continua valendo.
   if (!digestMatches(downloaded, digest)) {
+    console.error("[updater] digest do executavel baixado nao confere");
     await rm(downloaded, { force: true }).catch(() => {});
     return false;
   }
+  console.log("[updater] digest conferido; substituindo o executavel portable");
 
   if (!(await tryReplace(current, downloaded))) {
     console.error("[updater] nao consegui substituir o exe em uso.");
@@ -258,6 +270,8 @@ async function updateWindowsPortable(url: string, digest: string | null): Promis
     spawn(current, [], { detached: true, stdio: "ignore" })
       .on("error", (error) => console.error("[updater] exe novo nao abriu:", error))
       .unref();
+  } else {
+    console.log("[updater] helper de relancamento agendado");
   }
   return true;
 }
@@ -376,12 +390,18 @@ export async function checkWindowsUpdate(
   lastCheckAt = Date.now();
 
   try {
+    const canal = canalAtual();
+    console.log(`[updater] verificando versao ${app.getVersion()} no canal ${canal}`);
     const releases = await githubReleases();
-    const escolhida = escolherRelease(releases, app.getVersion(), canalAtual());
-    if (escolhida === null) return;
+    const escolhida = escolherRelease(releases, app.getVersion(), canal);
+    if (escolhida === null) {
+      console.log("[updater] nenhuma versao mais nova disponivel");
+      return;
+    }
 
     const latest = escolhida.tag.replace(/^v/, "");
     const ehBeta = escolhida.prerelease;
+    console.log(`[updater] candidata ${latest} encontrada (beta=${ehBeta} digest=${escolhida.digest !== null})`);
     const win = getMainWindow();
     // showMessageBox (assincrono): ver comentario equivalente no caminho Linux acima --
     // a versao Sync bloqueia o watchdog do Tor (setInterval) enquanto o dialogo espera.
