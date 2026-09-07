@@ -28,7 +28,7 @@
     "productName": "GoLiveBypass",
     "publish": {
       "provider": "github",
-      "owner": "pdl-clay",
+      "owner": "bezumiya",
       "repo": "GoLiveBypass",
       "releaseType": "release"
     },

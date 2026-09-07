@@ -23,11 +23,9 @@ import { request } from "https";
 import { cleanupOldExe, spawnWindowsUpdateHelper } from "./updater-replace";
 import { escolherRelease, type Canal, type ReleaseCandidata } from "./updater-channel";
 
-// O fork pdl-clay e o canal de distribuicao desta linha de testes/releases.
-// O updater e o publisher precisam apontar para o mesmo repositorio: consultar o
-// upstream aqui faria o app detectar uma versao que nunca conseguiria baixar do
-// fork (ou ignorar completamente a release beta criada para os testadores).
-const REPO = "pdl-clay/GoLiveBypass";
+// Build preparado para o canal beta de produção: o updater consulta o mesmo
+// repositório onde a próxima beta será publicada.
+const REPO = "bezumiya/GoLiveBypass";
 // O artifactName leva a versao (GoLiveBypass-1.1.5.exe): o AppImageLauncher e
 // outros integradores nao sobrescrevem o arquivo quando o nome muda por versao.
 const EXE_PREFIX = "GoLiveBypass-";
@@ -406,7 +404,7 @@ export async function checkWindowsUpdate(
         title: "Falha na atualização",
         message: `Não foi possível instalar o GoLiveBypass ${latest}.`,
         detail:
-          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/pdl-clay/GoLiveBypass/releases.",
+          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
         buttons: ["OK"],
       };
       if (win) await dialog.showMessageBox(win, aviso);

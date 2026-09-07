@@ -194,7 +194,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "${{ inputs.tag }}" \
-            --repo pdl-clay/GoLiveBypass \
+            --repo bezumiya/GoLiveBypass \
             --prerelease \
             --draft=false \
             --title "GoLiveBypass ${{ inputs.tag }}" \
