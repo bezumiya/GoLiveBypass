@@ -8,7 +8,7 @@ testar — inclui o que é obrigatório para o auto-update funcionar em cada SO.
 
 | SO | Mecanismo | Requisito |
 |----|-----------|-----------|
-| Windows | Updater **portable** próprio (`electron/updater.ts`): consulta a release, baixa o `.exe` novo, substitui via `PORTABLE_EXECUTABLE_FILE` e reabre | Nenhum (não precisa assinar) |
+| Windows | Updater **portable** próprio (`electron/updater.ts`): consulta a release, baixa e confere o `.exe`, agenda a troca via `PORTABLE_EXECUTABLE_FILE` depois da saída do processo e reabre | Nenhum (não precisa assinar) |
 | Linux | `electron-updater` nativo (AppImageUpdater) com **download diferencial** (blockMap) | Nenhum |
 | macOS | **desligado por enquanto** — ver abaixo | **Obrigatório: app assinado** (sem assinatura o download falha) |
 
@@ -33,8 +33,9 @@ O `publish` está configurado em `golive-gui/package.json`:
    - `GoLiveBypass.AppImage` + `latest-linux.yml` (Linux)
    - `GoLiveBypass.dmg` + `GoLiveBypass.zip` + `latest-mac.yml` (macOS)
 
-> O `latest*.yml` é o metadata com checksum SHA-512 e o blockMap. **Sem ele na
-> release, o app detecta a versão nova mas não consegue baixar** (erro 404).
+> O caminho Windows desta aplicação consulta a API do GitHub e confere o digest
+> SHA-256 do anexo; ele não depende de `latest.yml`. Linux e macOS continuam
+> dependendo do metadata gerado pelo `electron-updater`.
 
 ## macOS: por que está desligado
 
@@ -130,14 +131,15 @@ gh release create v1.1.5-test --repo SEU_FORK/GoLiveBypass \
   dist-app/GoLiveBypass.exe dist-app/latest.yml
 
 # 3. Roda o exe antigo (1.0.0); ele detecta a 1.1.5, pergunta "Atualizar agora?",
-#    baixa, substitui o exe em uso (com retry) e reabre a versão nova
+#    baixa/confere, encerra o processo, troca o exe pelo helper externo e reabre
+#    a versão nova
 ```
 
 **Pontos de atenção no Windows**:
 - O updater usa `PORTABLE_EXECUTABLE_FILE` (variável do electron-builder
   portable) para achar o exe em uso — sem ela o update é pulado
-- A substituição tem retry (até 10 tentativas, 1s entre elas) porque o Windows
-  segura o exe em uso por um instante após o fechamento
+- O helper externo espera até 90 tentativas, com aproximadamente 1s entre elas,
+  e só move o exe atual depois que o processo antigo liberou a imagem
 - Teste também o fluxo "Depois": o app continua rodando e a checagem periódica
   (a cada 4h) oferece de novo
 
@@ -205,5 +207,6 @@ use o AppImage inteiro (grupo A/B).
 | `Update for version X is not available` | A release tem a **mesma versão** do app rodando — suba a versão no package.json |
 | macOS: download falha/instalação falha | App sem assinatura — configure `CSC_LINK`/`CSC_KEY_PASSWORD`/`APPLE_*` |
 | `downgrade is disallowed` | A release é mais antiga que a versão local — publique uma versão maior |
-| App fecha mas não abre após atualizar | App antigo segurando o lock de instância única — o `before-quit` não deve adiar o quit durante o update (o `markQuittingForUpdate` cuida disso; confira se o build tem esse fix) |
+| Windows: `EBUSY` ao renomear o exe | Build antigo tentou trocar o próprio arquivo ainda em execução; o helper pós-saída do build atual deve fazer a troca |
+| App fecha mas não abre após atualizar | Confira o log `[updater]`, a existência do helper no `%TEMP%` e se o `before-quit` não adia o quit durante o update (`markQuittingForUpdate`) |
 | AppImageLauncher renomeia o arquivo com hash | Esperado: o nome versionado (`GoLiveBypass-1.1.5_<hash>`) evita sobrescrever o antigo; o app novo abre integrado |

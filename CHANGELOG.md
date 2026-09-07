@@ -6,6 +6,10 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Atualização automática do Windows
+
+- O updater portable baixa o executável, confere o SHA-256 e agenda a troca em um helper externo. A substituição agora ocorre somente depois que o processo antigo encerra, evitando `EBUSY` ao renomear o próprio `.exe`; falhas mantêm a versão atual aberta e ficam registradas no log.
+
 ### Detecção do plano Proton
 
 - A GUI consulta o endpoint autenticado de configurações da Proton (`/vpn/v2`) usando somente a sessão salva e classifica `VPN.MaxTier` como Free, Premium ou desconhecido. A consulta não tenta conectar a um servidor pago, não cria túnel e não interrompe uma rota ativa.
@@ -34,7 +38,9 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - Adicionada a matriz descartável `tests/test-linux-matrix.sh` para Ubuntu 24.04/22.04, Debian 13/12, Fedora 43/42 e Arch atual, com caso histórico fixado em 2025-09-01. O runner valida o preflight JSON, detecta binários presentes mas inutilizáveis, audita bibliotecas antigas/AppImage e executa a prova de namespace sem alterar a rede do host.
 - O preflight agora sugere o comando correto por família: `apt-get update`/instalação mínima, `dnf makecache --refresh`, `zypper --non-interactive refresh` ou `pacman -S --needed`. A GUI continua instalando apenas dependências ausentes; não há upgrade global nem `pacman -Sy` parcial. DNF e Zypper atualizam somente os metadados antes da instalação.
 - Adicionado `tests/test-linux-vm.sh` para VMs libvirt preparadas, com preflight/reparo por SSH, conferência da rota default do host e hook opt-in para uma sessão Premium sem registrar credenciais. Distrobox fica como reprodução auxiliar, não como prova de isolamento.
-- O workflow `.github/workflows/linux-stability.yml` executa a matriz rápida e a auditoria do AppImage sem publicar artefatos. O procedimento, a política de cinco rodadas sem melhoria e as limitações estão em [loop de estabilidade Linux](docs/testing/linux-stability-loop.md).
+- O workflow `.github/workflows/linux-stability.yml` executa a matriz rápida e a auditoria do AppImage sem publicar artefatos. O procedimento, a execução contínua até sinal explícito e as limitações estão em [loop de estabilidade Linux](docs/testing/linux-stability-loop.md).
+- A auditoria de bibliotecas do AppImage separa imagens mínimas de instalações desktop: bibliotecas ausentes ficam explícitas como `SKIP`, e `APPIMAGE_STRICT_LIBS=1` permite torná-las falhas em uma imagem com runtime gráfico instalado.
+- O controlador `tests/run-linux-stability-loop.sh` mantém as rodadas Linux contínuas, alternando preflight, reparo e auditoria AppImage, comparando assinaturas de falha e encerrando somente por sinal explícito do operador.
 - Evidência local desta rodada: os sete containers sem snapshot e a prova de namespace passaram no modo rápido; Debian 12 e Fedora 42 passaram instalação completa com segunda chamada idempotente. A imagem Arch atual foi marcada como infraestrutura bloqueada porque `archlinux:base` não traz bancos Pacman e a política impede upgrade parcial. O AppImage `2.0.5-beta.2` foi extraído em quatro bases e registrou bibliotecas ausentes nas imagens mínimas; isso não equivale a falha em uma instalação desktop completa. O snapshot Arch continua sem cobertura quando o espelho histórico não está disponível.
 
 - CAPTCHA Proton (#239): duas perdas de resposta e uma corrida de fechamento antecipado foram reproduzidas no Electron real. O preload sandbox CommonJS, a captura persistente e o tratamento imediato de preload ausente/erro e `close` corrigem esses caminhos. Linux e Windows passaram as suítes sintéticas, incluindo Full-Repeat e captura/lifecycle 13/13; o relato original com desafio oficial não foi provado. A #230 (`__dirname`, caso histórico distinto do `_dirname` relatado pelo usuário na 2.0.4) permanece separada.

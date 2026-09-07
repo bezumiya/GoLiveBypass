@@ -89,7 +89,8 @@ describe("wiring do canal no updater e no workflow", () => {
     const updater = fs.readFileSync(path.resolve(process.cwd(), "electron/updater.ts"), "utf8");
     expect(updater).toContain('const REPO = "pdl-clay/GoLiveBypass"');
     expect(updater).toContain('autoUpdater.allowPrerelease = canalAtual() === "beta"');
-    expect(updater).toContain("escolherRelease(releases, app.getVersion(), canalAtual())");
+    expect(updater).toContain("escolherRelease(releases, app.getVersion(), canal)");
+    expect(updater).not.toContain("attemptReplace(current, downloaded)");
     // a comparacao por string que faria downgrade foi embora
     expect(updater).not.toContain("const isNewer = latest !== current;");
   });
