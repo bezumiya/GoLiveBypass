@@ -1129,7 +1129,7 @@ linux_dependency_install_command() {
     case "$manager" in
         pacman) printf 'sudo pacman -S --needed %s' "$packages" ;;
         dnf) printf 'sudo dnf makecache --refresh && sudo dnf install -y --setopt=install_weak_deps=False %s' "$packages" ;;
-        zypper) printf 'sudo zypper refresh && sudo zypper --non-interactive install --no-recommends %s' "$packages" ;;
+        zypper) printf 'sudo zypper --non-interactive refresh && sudo zypper --non-interactive install --no-recommends %s' "$packages" ;;
         apt-get) printf 'sudo apt-get update && sudo apt-get install -y --no-install-recommends %s' "$packages" ;;
     esac
 }
@@ -1179,7 +1179,7 @@ linux_ensure_dependencies() {
         zypper)
             have zypper || fail "Dependencias ausentes ($missing), mas zypper nao foi encontrado."
             step "Atualizando os repositorios do zypper"
-            elevate zypper refresh || fail "Falha ao atualizar os repositorios do zypper; verifique a rede e tente novamente."
+            elevate zypper --non-interactive refresh || fail "Falha ao atualizar os repositorios do zypper; verifique a rede e tente novamente."
             ;;
         apt-get)
             have apt-get || fail "Dependencias ausentes ($missing), mas apt-get nao foi encontrado."

@@ -73,6 +73,7 @@ O CI executa a matriz rápida em `.github/workflows/linux-stability.yml` e nunca
 
 - A matriz rápida local executou Ubuntu 24.04/22.04, Debian 13/12, Fedora 43/42 e Arch atual: preflight e triagem de binários quebrados passaram em todos os casos; a prova isolada de namespace também passou.
 - Uma rodada completa em Debian 12 instalou `wireguard-tools`, `iproute2` e `curl`, repetiu o reparo sem nova instalação e terminou com preflight sem dependências ausentes.
-- O snapshot Arch e a auditoria de AppImage não foram declarados como executados quando o espelho histórico ou o artefato não estavam disponíveis.
+- Uma rodada completa em Fedora 42 atualizou o cache DNF, instalou `wireguard-tools` e `iproute` e passou na segunda chamada idempotente. O Arch atual foi marcado como infraestrutura bloqueada porque a imagem `archlinux:base` não traz bancos Pacman; o runner preserva a política de não fazer upgrade parcial em vez de mascarar esse caso.
+- O build local `GoLiveBypass-2.0.5-beta.2.AppImage` foi extraído em Ubuntu 24.04, Debian 12, Fedora 42 e Arch atual. O `ldd` registrou 26, 26, 23 e 21 bibliotecas ausentes, respectivamente, nas bases mínimas; isso é uma medição de dependências da imagem de teste, não uma declaração de que o AppImage falha em uma instalação desktop completa. O snapshot Arch não foi declarado coberto quando o espelho histórico não estava disponível.
 
 Essas verificações cobrem o contrato de preparação e o isolamento sintético. Elas não substituem um ciclo de Discord real, áudio/RTC, reboot ou uma sessão Premium em cada distribuição.

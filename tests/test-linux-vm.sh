@@ -23,7 +23,6 @@ VM_PORT="${VM_PORT:-22}"
 VM_INSTALL="${VM_INSTALL:-0}"
 VM_SSH_KEY="${VM_SSH_KEY:-}"
 PROTON_VM_HOOK="${PROTON_VM_HOOK:-}"
-KEEP_VM="${KEEP_VM:-1}"
 PASS=0
 FAIL=0
 SKIP=0
@@ -123,7 +122,7 @@ remote_script() {
 }
 
 run_domain() {
-    local domain="$1" host target remote_root preflight post appimage_remote
+    local domain="$1" host target remote_root preflight post
     remote_root="/tmp/golive-vm-${USER:-runner}-$$"
     if ! host="$(resolve_host "$domain")"; then
         skip "$domain sem endereco via virsh agent (defina VM_HOST)"
@@ -157,12 +156,26 @@ run_domain() {
     fi
 
     if [[ "$MODE" == "full" ]]; then
-        if post="$(ssh_run "$target" "GOLIVE_GUI=1 HOME='$remote_root/home' '$remote_root/repo/standalone/golivebypass-standalone.sh' --real-home '$remote_root/home' --ensure-dependencies" 2>&1)"; then
-            ok "$domain reparo de dependencias"
-            if printf '%s' "$post" | grep -q 'Dependencias Linux instaladas e verificadas'; then
-                ok "$domain comandos wg/ip/curl verificados"
+        if post="$(ssh_run "$target" bash -s <<EOF
+set -u
+log1='$remote_root/repair-first.log'
+log2='$remote_root/repair-second.log'
+first=0
+GOLIVE_GUI=1 HOME='$remote_root/home' '$remote_root/repo/standalone/golivebypass-standalone.sh' --real-home '$remote_root/home' --ensure-dependencies >"\$log1" 2>&1 || first=\$?
+cat "\$log1" >&2
+[ "\$first" -eq 0 ] || exit "\$first"
+second=0
+GOLIVE_GUI=1 HOME='$remote_root/home' '$remote_root/repo/standalone/golivebypass-standalone.sh' --real-home '$remote_root/home' --ensure-dependencies >"\$log2" 2>&1 || second=\$?
+cat "\$log2" >&2
+[ "\$second" -eq 0 ] || exit "\$second"
+GOLIVE_GUI=1 HOME='$remote_root/home' '$remote_root/repo/standalone/golivebypass-standalone.sh' --real-home '$remote_root/home' --preflight --json
+EOF
+        )"; then
+            if printf '%s' "$post" | grep -q '"missing":\[\]' && printf '%s' "$post" | grep -q '"required":\["wg","ip","curl"\]' \
+                && printf '%s' "$post" | grep -q 'Dependencias Linux ja estao instaladas'; then
+                ok "$domain reparo, rechecagem e segunda chamada idempotente"
             else
-                bad "$domain reparo nao confirmou os comandos"
+                bad "$domain reparo terminou sem preflight limpo/idempotente"
             fi
         else
             bad "$domain reparo falhou: $(printf '%s' "$post" | tail -8 | tr '\n' ' ')"

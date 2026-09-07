@@ -155,6 +155,8 @@ describe("preflight Linux", () => {
       .toBe("sudo dnf makecache --refresh && sudo dnf install -y --setopt=install_weak_deps=False iproute curl");
     expect(installCommand("cachyos", "arch", "wireguard-tools iproute2"))
       .toBe("sudo pacman -S --needed wireguard-tools iproute2");
+    expect(installCommand("openSUSE", "suse", "curl"))
+      .toBe("sudo zypper --non-interactive refresh && sudo zypper --non-interactive install --no-recommends curl");
     expect(installCommand("debian", "debian", "curl"))
       .toContain("apt-get install -y --no-install-recommends curl");
     expect(installCommand("alpine", "", "curl"))
@@ -163,6 +165,14 @@ describe("preflight Linux", () => {
       .toBe("");
     expect(installCommand("ubuntu", "debian", "wireguard-tools curl"))
       .not.toContain("upgrade");
+  });
+
+  it("atualiza somente os metadados exigidos por dnf e zypper", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    expect(source).toContain("elevate dnf makecache --refresh");
+    expect(source).toContain("elevate zypper --non-interactive refresh");
+    expect(source).not.toMatch(/elevate\s+dnf\s+upgrade/);
+    expect(source).not.toMatch(/elevate\s+zypper\s+update/);
   });
 
   it("mantém o modo de reparo protegido contra a CLI standalone", () => {

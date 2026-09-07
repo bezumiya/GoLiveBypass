@@ -228,7 +228,7 @@ if [ -n "$appimage" ]; then
     chmod +x /tmp/golive-matrix.AppImage
     if /tmp/golive-matrix.AppImage --appimage-extract >/tmp/golive-appimage-extract.log 2>&1; then
         printf "APPIMAGE_EXTRACT=ok\n"
-        electron="$(find squashfs-root /tmp/golive-appimage-root -type f \( -name electron -o -name GoLiveBypass \) -print -quit 2>/dev/null || true)"
+        electron="$(find squashfs-root /tmp/golive-appimage-root -type f \( -name electron -o -name golive-gui -o -name GoLiveBypass \) -print -quit 2>/dev/null || true)"
         if [ -n "$electron" ] && command -v ldd >/dev/null 2>&1; then
             missing="$(ldd "$electron" 2>&1 | grep -c "not found" || true)"
             printf "APPIMAGE_LDD_MISSING=%s\n" "$missing"
@@ -297,12 +297,17 @@ run_case() {
         # preflight no mesmo container. Uma chamada separada criaria outro
         # guest e daria um falso negativo apos uma instalacao bem-sucedida.
         if post="$(container_run "$image" "$home" "$shell" -c '
-set -eu
+set -u
 log1=/tmp/golive-repair-first.log
 log2=/tmp/golive-repair-second.log
-/repo/standalone/golivebypass-standalone.sh --real-home /home/golive-test --ensure-dependencies >"$log1" 2>&1
-/repo/standalone/golivebypass-standalone.sh --real-home /home/golive-test --ensure-dependencies >"$log2" 2>&1
-cat "$log1" "$log2" >&2
+first=0
+/repo/standalone/golivebypass-standalone.sh --real-home /home/golive-test --ensure-dependencies >"$log1" 2>&1 || first=$?
+cat "$log1" >&2
+[ "$first" -eq 0 ] || exit "$first"
+second=0
+/repo/standalone/golivebypass-standalone.sh --real-home /home/golive-test --ensure-dependencies >"$log2" 2>&1 || second=$?
+cat "$log2" >&2
+[ "$second" -eq 0 ] || exit "$second"
 /repo/standalone/golivebypass-standalone.sh --real-home /home/golive-test --preflight --json
 ' 2>"$TMP_ROOT/$label-repair.err")" \
             && GOLIVE_PREFLIGHT_JSON="$post" node - <<'NODE'
@@ -320,7 +325,12 @@ NODE
             pass "$label preflight pos-reparo sem dependencias ausentes"
             report "$label post-preflight $post"
         else
-            fail "$label reparo/preflight falhou: $(tail -12 "$TMP_ROOT/$label-repair.err" 2>/dev/null | tr '\n' ' ')"
+            if [[ "$family" == "arch" ]] && grep -Eqi "database file.*does not exist|use '-Sy'|base Arch nao sera alterada|assinatura|signature|keyring" "$TMP_ROOT/$label-repair.err" 2>/dev/null; then
+                skip "$label reparo bloqueado pela base Arch sem banco sincronizado (sem upgrade parcial)"
+                report "$label arch-repair-infra $(tail -12 "$TMP_ROOT/$label-repair.err" | tr '\n' ' ')"
+            else
+                fail "$label reparo/preflight falhou: $(tail -12 "$TMP_ROOT/$label-repair.err" 2>/dev/null | tr '\n' ' ')"
+            fi
         fi
     else
         skip "$label reparo omitido (--quick)"
