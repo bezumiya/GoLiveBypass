@@ -52,7 +52,7 @@ type PendingWindowsUpdate = {
 
 export type UpdaterController = {
   setEnabled(enabled: boolean): void;
-  setChannel(canal: Canal): void;
+  setChannel(canal: Canal): Promise<void>;
   hasPendingUpdate(): boolean;
   applyPendingUpdate(): Promise<boolean>;
 };
@@ -64,7 +64,9 @@ export type UpdateReadyInfo = {
 
 let lastCheckAt = 0;
 let checking = false;
+let queuedWindowsCheck: (() => void) | null = null;
 let linuxChecking = false;
+let queuedLinuxCheck: (() => void) | null = null;
 let updateReady = false;
 let pendingWindowsUpdate: PendingWindowsUpdate | null = null;
 let quittingForUpdate = false;
@@ -570,8 +572,15 @@ async function checkLinuxUpdate(
   isAutoUpdateEnabled: () => boolean,
   canalAtual: () => Canal,
   reason: string,
+  options: { force?: boolean } = {},
 ): Promise<void> {
-  if (linuxChecking || updateReady || !isAutoUpdateEnabled()) return;
+  if (linuxChecking) {
+    if (options.force) {
+      queuedLinuxCheck = () => void checkLinuxUpdate(isAutoUpdateEnabled, canalAtual, `${reason}-pendente`, { force: true });
+    }
+    return;
+  }
+  if (updateReady || !isAutoUpdateEnabled()) return;
   linuxChecking = true;
   try {
     autoUpdater.allowPrerelease = canalAtual() === "beta";
@@ -581,6 +590,9 @@ async function checkLinuxUpdate(
     console.warn("[updater] consulta Linux falhou:", error);
   } finally {
     linuxChecking = false;
+    const queued = queuedLinuxCheck;
+    queuedLinuxCheck = null;
+    queued?.();
   }
 }
 
@@ -630,19 +642,20 @@ export function setupUpdater(
         stopUpdatePulse();
       }
     },
-    setChannel(canal) {
+    async setChannel(canal) {
       if (process.platform === "win32" && pendingWindowsUpdate?.prerelease && canal === "stable") {
         void discardPendingWindowsUpdate();
       }
       if (!isAutoUpdateEnabled()) return;
       updatePulse?.start();
+      const reason = canal === "beta" ? "beta-ativada" : "canal-estavel-ativado";
       if (process.platform === "win32") {
-        void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled, canalAtual, {
+        await checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled, canalAtual, {
           force: true,
-          reason: "canal-alterado",
+          reason,
         });
       } else {
-        void checkLinuxUpdate(isAutoUpdateEnabled, canalAtual, "canal-alterado");
+        await checkLinuxUpdate(isAutoUpdateEnabled, canalAtual, reason, { force: true });
       }
     },
     hasPendingUpdate: () => updateReady,
@@ -730,7 +743,16 @@ export async function checkWindowsUpdate(
   canalAtual: () => Canal = () => "stable",
   options: WindowsCheckOptions = {},
 ): Promise<void> {
-  if (checking || updateReady) return;
+  if (checking) {
+    if (options.force) {
+      queuedWindowsCheck = () => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled, canalAtual, {
+        force: true,
+        reason: `${options.reason ?? "canal-alterado"}-pendente`,
+      });
+    }
+    return;
+  }
+  if (updateReady) return;
   if (!isAutoUpdateEnabled()) return;
   if (!options.force && Date.now() - lastCheckAt < CHECK_MIN_INTERVAL_MS) return;
   checking = true;
@@ -776,5 +798,8 @@ export async function checkWindowsUpdate(
     await askToInstallWindowsUpdate(getMainWindow, pending);
   } finally {
     checking = false;
+    const queued = queuedWindowsCheck;
+    queuedWindowsCheck = null;
+    queued?.();
   }
 }

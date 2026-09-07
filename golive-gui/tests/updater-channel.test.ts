@@ -100,6 +100,9 @@ describe("wiring do canal no updater e no workflow", () => {
     expect(updater).toContain("createUpdatePulseClient");
     expect(updater).toContain("UPDATE_STREAM_URL");
     expect(updater).toContain("pending-windows-update.json");
+    expect(updater).toContain('const reason = canal === "beta" ? "beta-ativada"');
+    expect(updater).toContain("await checkWindowsUpdate");
+    expect(updater).toContain("await checkLinuxUpdate");
     expect(updater).not.toContain("attemptReplace(current, downloaded)");
     // a comparacao por string que faria downgrade foi embora
     expect(updater).not.toContain("const isNewer = latest !== current;");

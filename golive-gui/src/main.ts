@@ -1368,8 +1368,18 @@ autoFailoverToggle?.addEventListener('change', async () => {
 
 // Canal de atualizacao: opt-in dos testadores para receber prereleases (beta).
 updateChannelToggle?.addEventListener('change', async () => {
-  if (updateChannelToggle) {
-    await window.api.setUpdateChannel(updateChannelToggle.checked ? 'beta' : 'stable');
+  if (!updateChannelToggle) return;
+  const betaAtivado = updateChannelToggle.checked;
+  updateChannelToggle.disabled = true;
+  try {
+    // O processo principal consulta e baixa a beta imediatamente. O await mantém o
+    // toggle ocupado até o diálogo de reinício ser apresentado/encerrado.
+    await window.api.setUpdateChannel(betaAtivado ? 'beta' : 'stable');
+  } catch (error) {
+    console.error('[updater] não consegui alterar o canal:', error);
+    updateChannelToggle.checked = !betaAtivado;
+  } finally {
+    updateChannelToggle.disabled = false;
   }
 });
 

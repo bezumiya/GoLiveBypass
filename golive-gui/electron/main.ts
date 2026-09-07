@@ -3688,9 +3688,9 @@ ipcMain.handle("set-auto-update", (_event, enabled: unknown) => {
 // IPC do canal de atualizacao (stable | beta). Nao vai para o asar injetado: e
 // preferencia do updater da GUI, o bypass injetado nao lê isso.
 ipcMain.handle("get-update-channel", () => readUpdateChannel());
-ipcMain.handle("set-update-channel", (_event, canal: unknown) => {
+ipcMain.handle("set-update-channel", async (_event, canal: unknown) => {
   saveUpdateChannel(typeof canal === "string" ? canal : "stable");
-  updaterController?.setChannel(readUpdateChannel());
+  await updaterController?.setChannel(readUpdateChannel());
 });
 
 // ------------------------------------------------------------------ teste de proxy (Personalizado / VPS)

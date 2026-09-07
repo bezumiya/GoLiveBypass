@@ -6,6 +6,13 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-9] - 2026-09-07
+
+### Ativação imediata do canal beta
+
+- Ao ativar o canal beta nas configurações, a GUI consulta imediatamente a última beta compatível, baixa o instalador e abre o pedido para reiniciar e aplicar a atualização.
+- A checagem aguarda uma consulta inicial em andamento para não perder a troca de canal; desativar o canal continua respeitando a preferência de atualizações automáticas.
+
 ## [2.0.5-beta-8] - 2026-09-07
 
 ### Preparação automática da GUI
