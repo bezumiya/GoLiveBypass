@@ -15,9 +15,12 @@ import { findStoreLazy } from "@webpack";
 import { Button, Constants, MaskedLink, React, RestAPI, SearchableSelect, TextInput, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
 
 import {
+    evaluateStreamObservation,
     evaluateStreamClaim,
     initialStreamClaimState,
-    type StreamClaimState
+    type StreamClaimState,
+    type StreamObservation,
+    type StreamObservationStatus,
 } from "./stability";
 
 const Native = VencordNative?.pluginHelpers?.GoLiveBypass as PluginNative<typeof import("./native")> | undefined;
@@ -73,6 +76,13 @@ let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let streamClaimState: StreamClaimState = initialStreamClaimState();
 let streamClaimStatus = "idle";
 let streamClaimProbeFailed = false;
+let lastStreamObservationKey: string | null = null;
+let lastStreamObservation: {
+    status: StreamObservationStatus;
+    visibleStreamCount: number | null;
+    nativeStreamCount: number | null;
+} | null = null;
+let lastSelectedStreamRegion: string | null = null;
 
 interface RegionSelectProps {
     value: string;
@@ -514,20 +524,84 @@ function collectionCount(value: unknown): number | null {
     return null;
 }
 
+function observationText(value: unknown): string | null {
+    if (typeof value !== "string") return null;
+    const clean = value.trim().replace(/[|\r\n]+/g, "_").slice(0, 200);
+    return clean || null;
+}
+
+function observationHostname(value: unknown): string | null {
+    const raw = observationText(value);
+    if (!raw) return null;
+    try {
+        return new URL(raw.includes("://") ? raw : `https://${raw}`).hostname || null;
+    } catch {
+        return raw;
+    }
+}
+
+function readObservationText(store: object, method: string): string | null {
+    const result = readStore(store, method);
+    return result.known ? observationText(result.value) : null;
+}
+
+function readObservationHostname(store: object, method: string): string | null {
+    const result = readStore(store, method);
+    return result.known ? observationHostname(result.value) : null;
+}
+
+function configuredStreamRegion(): string | null {
+    const configured = settings.store.streamRegion;
+    return typeof configured === "string" && configured.trim() !== AUTOMATIC
+        ? observationText(configured)
+        : null;
+}
+
 // Guarda especifica para o falso "transmitindo"/erro 2001 visto no fogo da
 // beta 13. Nao tenta inferir fps nem fechar sockets: as stores do renderer so
 // provam que a UI afirma uma Live e se a conexao nativa de stream chegou a
 // existir. Dado ausente falha fechado; a unica acao e um aviso manual.
 function pollStreamClaimOnce() {
     const claimed = readStore(ApplicationStreamingStore, "getCurrentUserActiveStream");
+    const visibleStreams = readStore(ApplicationStreamingStore, "getAllActiveStreams");
     const nativeKeys = readStore(StreamRTCConnectionStore, "getAllActiveStreamKeys");
 
     const senderClaimed = !claimed.known || claimed.value === undefined
         ? null
         : claimed.value !== null;
+    if (senderClaimed === false) lastSelectedStreamRegion = null;
+    const now = Date.now();
+    const observation: StreamObservation = {
+        now,
+        senderClaimed,
+        visibleStreamCount: visibleStreams.known ? collectionCount(visibleStreams.value) : null,
+        nativeStreamCount: nativeKeys.known ? collectionCount(nativeKeys.value) : null,
+        voiceState: readObservationText(RTCConnectionStore, "getState"),
+        voiceHostname: readObservationHostname(RTCConnectionStore, "getHostname"),
+        selectedRegion: lastSelectedStreamRegion ?? configuredStreamRegion(),
+    };
+    const observationDecision = evaluateStreamObservation(observation);
+    lastStreamObservation = {
+        status: observationDecision.status,
+        visibleStreamCount: observation.visibleStreamCount,
+        nativeStreamCount: observation.nativeStreamCount,
+    };
+    if (observationDecision.key !== lastStreamObservationKey) {
+        lastStreamObservationKey = observationDecision.key;
+        record(
+            `stream.observation | status=${observationDecision.status}` +
+            ` claimed=${observation.senderClaimed ?? "unknown"}` +
+            ` visible=${observation.visibleStreamCount ?? "unknown"}` +
+            ` native=${observation.nativeStreamCount ?? "unknown"}` +
+            ` voice_state=${observation.voiceState ?? "unknown"}` +
+            ` voice_host=${observation.voiceHostname ?? "unknown"}` +
+            ` selected_region=${observation.selectedRegion ?? "automatic"}`
+        );
+    }
+
     const nativeStreamCount = nativeKeys.known ? collectionCount(nativeKeys.value) : null;
     const decision = evaluateStreamClaim({
-        now: Date.now(), senderClaimed, nativeStreamCount
+        now, senderClaimed, nativeStreamCount
     }, streamClaimState);
 
     streamClaimState = decision.state;
@@ -563,6 +637,9 @@ function startStreamClaimWatch() {
     streamClaimState = initialStreamClaimState();
     streamClaimStatus = "idle";
     streamClaimProbeFailed = false;
+    lastStreamObservationKey = null;
+    lastStreamObservation = null;
+    lastSelectedStreamRegion = null;
     pollStreamClaim();
     streamClaimTimer = setInterval(pollStreamClaim, 5_000);
 }
@@ -573,6 +650,9 @@ function stopStreamClaimWatch() {
     streamClaimState = initialStreamClaimState();
     streamClaimStatus = "idle";
     streamClaimProbeFailed = false;
+    lastStreamObservationKey = null;
+    lastStreamObservation = null;
+    lastSelectedStreamRegion = null;
 }
 
 async function buildReport() {
@@ -589,9 +669,10 @@ async function buildReport() {
     lines.push(`motor de midia pronto    ${ask(MediaEngineStore, "isSupported")}`);
 
     lines.push("", "== transmissao ==");
-    lines.push(`minha transmissao ativa  ${JSON.stringify(ask(ApplicationStreamingStore, "getCurrentUserActiveStream"))}`);
-    lines.push(`transmissoes visiveis    ${JSON.stringify(ask(ApplicationStreamingStore, "getAllActiveStreams"))}`);
-    lines.push(`conexoes de midia        ${JSON.stringify(ask(StreamRTCConnectionStore, "getAllActiveStreamKeys"))}`);
+    const observation = lastStreamObservation;
+    lines.push(`observacao stream        ${observation
+        ? `${observation.status} | visiveis ${observation.visibleStreamCount ?? "desconhecido"} | nativas ${observation.nativeStreamCount ?? "desconhecido"}`
+        : "sem amostra"}`);
     lines.push(`estado da call           ${ask(RTCConnectionStore, "getState")} em ${ask(RTCConnectionStore, "getHostname")}`);
     lines.push(`guarda UI/conexao nativa ${streamClaimStatus}`);
 
@@ -649,7 +730,9 @@ export default definePlugin({
 
     pickStreamRegion(fallback: string | null) {
         const region = settings.store.streamRegion;
-        return typeof region === "string" && region !== AUTOMATIC ? region : fallback;
+        const selected = typeof region === "string" && region !== AUTOMATIC ? region : fallback;
+        lastSelectedStreamRegion = observationText(selected);
+        return selected;
     },
 
     commands: [

@@ -18,6 +18,43 @@ export interface StreamClaimState {
     warned: boolean;
 }
 
+export interface StreamObservation {
+    now: number;
+    senderClaimed: boolean | null;
+    visibleStreamCount: number | null;
+    nativeStreamCount: number | null;
+    voiceState: string | null;
+    voiceHostname: string | null;
+    selectedRegion: string | null;
+}
+
+export type StreamObservationStatus = "unknown" | "claimed-without-native" | "native-connected" | "idle";
+
+export interface StreamObservationDecision {
+    status: StreamObservationStatus;
+    key: string;
+}
+
+/**
+ * Classifica apenas sinais já coletados pelo renderer. A chave não inclui o
+ * timestamp, pois o watcher deve registrar mudanças de estado, não cada tick.
+ */
+export function evaluateStreamObservation(sample: StreamObservation): StreamObservationDecision {
+    const key = [
+        sample.senderClaimed,
+        sample.visibleStreamCount,
+        sample.nativeStreamCount,
+        sample.voiceState,
+        sample.voiceHostname,
+        sample.selectedRegion,
+    ].map(value => String(value ?? "null")).join("|");
+
+    if (sample.senderClaimed === false) return { status: "idle", key };
+    if (sample.senderClaimed === null || sample.nativeStreamCount === null) return { status: "unknown", key };
+    if (sample.nativeStreamCount > 0) return { status: "native-connected", key };
+    return { status: "claimed-without-native", key };
+}
+
 export interface StreamClaimSample {
     now: number;
     senderClaimed: boolean | null;
