@@ -49,14 +49,14 @@ jobs:
         working-directory: golive-gui
       # --publish always: gera o GoLiveBypass.exe + latest.yml e faz upload na release
       # (o GH_TOKEN do workflow vira o GH_TOKEN que o electron-builder usa).
-      # No canal beta o override -c.publish.releaseType=prerelease publica a release
-      # como PRERELEASE — nunca vira "latest" (regra §9).
+      # No canal beta a release nasce como draft; beta-marcar aplica a classificação
+      # PRERELEASE depois que Windows e Linux terminarem — nunca vira "latest".
       - run: npm run publish:win
         if: ${{ inputs.canal != 'beta' }}
         working-directory: golive-gui
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: npm run publish:win -- -c.publish.releaseType=prerelease
+      - run: npm run publish:win
         if: ${{ inputs.canal == 'beta' }}
         working-directory: golive-gui
         env:
@@ -85,7 +85,7 @@ jobs:
         working-directory: golive-gui
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: npm run publish:linux -- -c.publish.releaseType=prerelease
+      - run: npm run publish:linux
         if: ${{ inputs.canal == 'beta' }}
         working-directory: golive-gui
         env:
