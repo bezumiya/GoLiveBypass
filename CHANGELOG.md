@@ -6,7 +6,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-## [2.0.6-beta.1] - 2026-09-07
+## [2.0.6-beta.2] - 2026-09-07
+
+### Correção do pipeline beta
+
+- A publicação dos assets Windows/Linux ocorre primeiro em draft; a release só é marcada como prerelease depois que os dois jobs terminam.
 
 ### Failover automático de rotas Proton Free
 
