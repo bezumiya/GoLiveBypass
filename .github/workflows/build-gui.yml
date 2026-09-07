@@ -109,14 +109,15 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
+          cd tools/proton-confgen
           VERSION="${RELEASE_TAG#v}"
-          mkdir -p runtime
+          mkdir -p ../../runtime
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
-            -o "runtime/GoLiveBypass-${VERSION}-proton-confgen-linux-x64" ./tools/proton-confgen/cmd/protonvpn-wg
+            -o "../../runtime/GoLiveBypass-${VERSION}-proton-confgen-linux-x64" ./cmd/protonvpn-wg
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
-            -o "runtime/GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe" ./tools/proton-confgen/cmd/protonvpn-wg
-          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64 > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64.sha256
-          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe.sha256
+            -o "../../runtime/GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe" ./cmd/protonvpn-wg
+          sha256sum ../../runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64 > ../../runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64.sha256
+          sha256sum ../../runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe > ../../runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe.sha256
       - name: Upload dos helpers Proton
         uses: softprops/action-gh-release@v2
         with:
