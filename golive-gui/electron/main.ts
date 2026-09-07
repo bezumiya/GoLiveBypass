@@ -23,6 +23,7 @@ import {
   isUpdateReady,
   setupUpdater,
   type UpdaterController,
+  type UpdateReadyInfo,
 } from "./updater";
 import * as logger from "./logger";
 import * as discordscan from "./discordscan";
@@ -262,6 +263,7 @@ let updaterController: UpdaterController | null = null;
 // derrubaria o app e a pessoa nem notaria que a janela foi parar junto do relogio.
 let quitting = false;
 let cleaningUp = false;
+let pendingUpdateToast: UpdateReadyInfo | null = null;
 
 // Os icones moram em assets/ e seguem no pacote pelo "files" do electron-builder. O icone do
 // exe vem de build/icon.ico; no Mac o .icns e gerado a partir do mesmo desenho.
@@ -499,6 +501,10 @@ function showWindow() {
     // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
     mainWindow.webContents.send("refresh-startup");
     mainWindow.webContents.send("refresh-auto-update");
+    if (pendingUpdateToast) {
+      mainWindow.webContents.send("update-available", pendingUpdateToast);
+      pendingUpdateToast = null;
+    }
     refreshWindowStatus();
   } else {
     createWindow();
@@ -819,7 +825,15 @@ if (!gotLock) {
       () => mainWindow,
       () => readAutoUpdate(),
       () => readUpdateChannel(),
-      () => { void refreshTray(); },
+      (info: UpdateReadyInfo | null) => {
+        void refreshTray();
+        if (!info) return;
+        if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
+          pendingUpdateToast = info;
+          return;
+        }
+        mainWindow.webContents.send("update-available", info);
+      },
     );
   });
 }

@@ -23,7 +23,7 @@ import { tmpdir } from "os";
 import { basename, join, resolve, sep } from "path";
 import { autoUpdater } from "electron-updater";
 import { request } from "https";
-import { cleanupOldExe, spawnWindowsUpdateHelper } from "./updater-replace";
+import { cleanupOldExe, spawnWindowsUpdateHelper, versionedPortableExePath } from "./updater-replace";
 import { compararVersoes, escolherRelease, type Canal, type ReleaseCandidata } from "./updater-channel";
 import {
   createUpdatePulseClient,
@@ -32,11 +32,10 @@ import {
   type UpdatePulseEvent,
 } from "./update-pulse";
 
-// O fork pdl-clay e o canal de distribuicao desta linha de testes/releases.
-// O updater e o publisher precisam apontar para o mesmo repositorio: consultar o
-// upstream aqui faria o app detectar uma versao que nunca conseguiria baixar do
-// fork (ou ignorar completamente a release beta criada para os testadores).
-const REPO = "pdl-clay/GoLiveBypass";
+// A beta publicada para os testadores vive no repositorio de producao. O updater
+// e o publisher precisam apontar para o mesmo repositorio, senao o pulso pode
+// acordar a consulta certa mas o download procura a release em outro lugar.
+const REPO = "bezumiya/GoLiveBypass";
 const EXE_PREFIX = "GoLiveBypass-";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // fallback de seguranca: uma vez por hora
 const CHECK_MIN_INTERVAL_MS = 60_000;
@@ -58,13 +57,19 @@ export type UpdaterController = {
   applyPendingUpdate(): Promise<boolean>;
 };
 
+export type UpdateReadyInfo = {
+  version: string;
+  prerelease: boolean;
+};
+
 let lastCheckAt = 0;
 let checking = false;
 let linuxChecking = false;
 let updateReady = false;
 let pendingWindowsUpdate: PendingWindowsUpdate | null = null;
 let quittingForUpdate = false;
-let stateChangeListener: () => void = () => {};
+let updateReadyInfo: UpdateReadyInfo | null = null;
+let stateChangeListener: (info: UpdateReadyInfo | null) => void = () => {};
 let applyPendingUpdateImpl: () => Promise<boolean> = async () => false;
 let updatePulse: UpdatePulseClient | null = null;
 let lastPulseDeliveryId: string | null = null;
@@ -72,15 +77,16 @@ const pendingPulseRetries = new Set<ReturnType<typeof setTimeout>>();
 
 function notifyStateChange(): void {
   try {
-    stateChangeListener();
+    stateChangeListener(updateReadyInfo);
   } catch (error) {
     console.warn("[updater] falha ao atualizar o estado visual:", error);
   }
 }
 
-function setUpdateReady(ready: boolean): void {
+function setUpdateReady(ready: boolean, info?: UpdateReadyInfo): void {
   if (updateReady === ready) return;
   updateReady = ready;
+  updateReadyInfo = ready ? (info ?? updateReadyInfo) : null;
   notifyStateChange();
 }
 
@@ -359,7 +365,7 @@ function loadPendingWindowsUpdate(canal: Canal): void {
   }
 
   pendingWindowsUpdate = pending;
-  setUpdateReady(true);
+  setUpdateReady(true, { version: pending.version, prerelease: pending.prerelease });
   console.log(`[updater] update pendente recuperado: ${pending.version}`);
 }
 
@@ -452,7 +458,8 @@ async function installPendingWindowsUpdate(): Promise<boolean> {
   // O Windows nao permite renomear o exe que ainda esta em execucao. O helper faz a
   // troca somente depois que este processo sair; se ele nao puder ser agendado,
   // mantem o app aberto e permite uma nova tentativa.
-  if (!spawnWindowsUpdateHelper(pending.current, pending.downloaded)) {
+  const newExePath = versionedPortableExePath(pending.current, pending.version);
+  if (!spawnWindowsUpdateHelper(pending.current, pending.downloaded, newExePath)) {
     console.error("[updater] nao consegui agendar a troca do exe portable.");
     return false;
   }
@@ -481,7 +488,7 @@ async function showUpdateFailure(getMainWindow: () => BrowserWindow | null, vers
     title: "Falha na atualização",
     message: `Não foi possível preparar o GoLiveBypass ${version}.`,
     detail:
-      "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/pdl-clay/GoLiveBypass/releases.",
+      "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
     buttons: ["OK"],
   };
   const win = getMainWindow();
@@ -583,7 +590,7 @@ export function setupUpdater(
   getMainWindow: () => BrowserWindow | null,
   isAutoUpdateEnabled: () => boolean = () => true,
   canalAtual: () => Canal = () => "stable",
-  onStateChange: () => void = () => {},
+  onStateChange: (info: UpdateReadyInfo | null) => void = () => {},
 ): UpdaterController | null {
   stateChangeListener = onStateChange;
 
@@ -652,7 +659,7 @@ export function setupUpdater(
 
     autoUpdater.on("update-downloaded", async (info) => {
       if (!isAutoUpdateEnabled() || updateReady) return;
-      setUpdateReady(true);
+      setUpdateReady(true, { version: info.version, prerelease: info.version.includes("-") });
       const win = getMainWindow();
       // showMessageBox assincrono: o sincrono bloquearia a thread JS do processo principal
       // ate a pessoa clicar — inclusive watchdogs e timers de rede.
@@ -765,7 +772,7 @@ export async function checkWindowsUpdate(
     }
 
     pendingWindowsUpdate = pending;
-    setUpdateReady(true);
+    setUpdateReady(true, { version: pending.version, prerelease: pending.prerelease });
     await askToInstallWindowsUpdate(getMainWindow, pending);
   } finally {
     checking = false;

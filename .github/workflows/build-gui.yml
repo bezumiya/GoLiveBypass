@@ -56,7 +56,7 @@ jobs:
         working-directory: golive-gui
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: npm run publish:win
+      - run: npm run publish:win -- --config.publish.channel=beta --config.publish.releaseType=prerelease
         if: ${{ inputs.canal == 'beta' }}
         working-directory: golive-gui
         env:
@@ -85,7 +85,7 @@ jobs:
         working-directory: golive-gui
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: npm run publish:linux
+      - run: npm run publish:linux -- --config.publish.channel=beta --config.publish.releaseType=prerelease
         if: ${{ inputs.canal == 'beta' }}
         working-directory: golive-gui
         env:
@@ -203,7 +203,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "${{ inputs.tag }}" \
-            --repo pdl-clay/GoLiveBypass \
+            --repo bezumiya/GoLiveBypass \
             --prerelease \
             --draft=false \
             --title "GoLiveBypass ${{ inputs.tag }}" \

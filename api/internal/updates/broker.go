@@ -114,6 +114,11 @@ func (b *Broker) Publish(deliveryID string, event ReleaseEvent) bool {
 	if _, ok := b.seen[deliveryID]; ok {
 		return false
 	}
+	// O polling usa um delivery proprio. Se o webhook chegar tambem, o mesmo
+	// release nao deve acordar cada cliente duas vezes.
+	if b.latest != nil && b.latest.Tag == event.Tag && b.latest.PublishedAt == event.PublishedAt {
+		return false
+	}
 	b.seen[deliveryID] = now
 	if len(b.seen) > maxRememberedDelivery {
 		b.pruneOldest()

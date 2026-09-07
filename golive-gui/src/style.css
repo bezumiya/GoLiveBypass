@@ -168,7 +168,6 @@ html[data-theme='dark'] .page-ambient::before {
 
 .container {
   position: relative;
-  z-index: 1;
   width: 100%;
   max-width: 380px;
   padding: 68px 30px 26px;
@@ -178,6 +177,84 @@ html[data-theme='dark'] .page-ambient::before {
   gap: 22px;
   margin: auto 0;
   flex-shrink: 0;
+}
+
+.update-toast {
+  position: fixed;
+  z-index: 120;
+  top: 42px;
+  left: 50%;
+  display: flex;
+  width: min(360px, calc(100vw - 24px));
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 10px 11px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--ink);
+  transform: translateX(-50%);
+  animation: update-toast-in 220ms var(--ease) both;
+}
+
+.update-toast[hidden] { display: none; }
+
+.update-toast__copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.update-toast__copy strong {
+  color: var(--ink-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.update-toast__copy span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.update-toast__close {
+  display: inline-flex;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 1;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+
+.update-toast__close:hover {
+  border-color: var(--line);
+  background: var(--surface-muted);
+  color: var(--ink-strong);
+}
+
+.update-toast__close:focus-visible {
+  outline: 2px solid var(--ok-ink);
+  outline-offset: 2px;
+}
+
+@keyframes update-toast-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-toast { animation: none; }
 }
 
 @media (max-height: 700px) {
@@ -283,8 +360,9 @@ html[data-theme='dark'] .page-ambient::before {
 /* .corner.corner: especificidade 0,2,0 — vence o position:relative do .icon-btn */
 .corner.corner {
   position: fixed;
-  z-index: 60;
-  /* 14px de respiro das bordas; nao sobrepoe a area de arrasto (32px) */
+  z-index: 110;
+  -webkit-app-region: no-drag;
+  /* O botao superior cruza a faixa de arrasto; toda sua area deve receber cliques. */
 }
 
 .corner--tr {

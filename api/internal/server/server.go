@@ -11,6 +11,10 @@ import (
 )
 
 func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Echo {
+	return NewWithBroker(cfg, issues, logger, updates.NewBroker())
+}
+
+func NewWithBroker(cfg *config.Config, issues IssueCreator, logger *slog.Logger, broker *updates.Broker) *echo.Echo {
 	e := echo.NewWithConfig(echo.Config{NoGroupAutoRegister404Routes: true})
 	e.Logger = logger
 	e.HTTPErrorHandler = echo.DefaultHTTPErrorHandler(false)
@@ -20,7 +24,7 @@ func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Ech
 	e.Use(middleware.RequestLogger())
 
 	store := newBlockStore(cfg)
-	h := &handler{cfg: cfg, issues: issues, store: store, updates: updates.NewBroker()}
+	h := &handler{cfg: cfg, issues: issues, store: store, updates: broker}
 	e.GET(cfg.BasePath+"/healthz", h.health)
 
 	updateV1 := e.Group(cfg.BasePath + "/v1/updates")

@@ -57,6 +57,7 @@ declare global {
       onRefreshStartup: (callback: () => void) => void;
       onRefreshAutoUpdate: (callback: () => void) => void;
       onRefreshStatus: (callback: () => void) => void;
+      onUpdateAvailable?: (callback: (info: { version: string; prerelease: boolean }) => void) => unknown;
       resizeWindow: (height: number) => void;
       importWgConf: () => Promise<{ success: boolean; fileName?: string; path?: string; error?: string } | null>;
       importWgConfFile: (filePath: string) => Promise<{ success: boolean; fileName?: string; path?: string; error?: string } | null>;
@@ -214,6 +215,9 @@ const settingsBtn = document.getElementById('settingsBtn') as HTMLButtonElement 
 const settingsDialog = document.getElementById('settingsDialog') as HTMLElement | null;
 const settingsBackdrop = document.getElementById('settingsBackdrop') as HTMLElement | null;
 const settingsClose = document.getElementById('settingsClose') as HTMLButtonElement | null;
+const updateToast = document.getElementById('updateToast') as HTMLElement | null;
+const updateToastMessage = document.getElementById('updateToastMessage') as HTMLElement | null;
+const updateToastClose = document.getElementById('updateToastClose') as HTMLButtonElement | null;
 const vpnImportBtn = document.getElementById('vpnImportBtn') as HTMLButtonElement | null;
 const vpnConfigStatus = document.getElementById('vpnConfigStatus') as HTMLElement | null;
 const vpnDropZone = document.getElementById('vpnDropZone') as HTMLElement | null;
@@ -252,6 +256,27 @@ function closeSettingsDialog() {
 settingsBtn?.addEventListener('click', openSettingsDialog);
 settingsBackdrop?.addEventListener('click', closeSettingsDialog);
 settingsClose?.addEventListener('click', closeSettingsDialog);
+
+let updateToastTimer: ReturnType<typeof setTimeout> | undefined;
+
+function hideUpdateToast() {
+  if (!updateToast) return;
+  updateToast.hidden = true;
+  if (updateToastTimer) {
+    clearTimeout(updateToastTimer);
+    updateToastTimer = undefined;
+  }
+}
+
+function showUpdateToast(info: { version: string; prerelease: boolean }) {
+  if (!updateToast || !updateToastMessage || typeof info?.version !== 'string') return;
+  updateToastMessage.textContent = `GoLiveBypass ${info.version}${info.prerelease ? ' (beta)' : ''} está disponível para atualização.`;
+  updateToast.hidden = false;
+  if (updateToastTimer) clearTimeout(updateToastTimer);
+  updateToastTimer = setTimeout(hideUpdateToast, 5000);
+}
+
+updateToastClose?.addEventListener('click', hideUpdateToast);
 
 document.querySelectorAll<HTMLButtonElement>('.theme-opt').forEach((opt) => {
   opt.addEventListener('click', () => {
@@ -1349,6 +1374,7 @@ updateChannelToggle?.addEventListener('change', async () => {
 });
 
 window.api.onRefreshAutoUpdate?.(refreshAutoUpdate);
+window.api.onUpdateAvailable?.(showUpdateToast);
 window.api.onProtonFailoverNotice?.((notice) => {
   if (notice?.message) setProtonFeedback(notice.message, 'err');
 });

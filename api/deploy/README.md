@@ -9,6 +9,7 @@ Internet ──443──> OpenLiteSpeed (TLS pelo CyberPanel)
               127.0.0.1:8091 (container hardened)
                       ├──> api.github.com (cria as issues)
 GitHub ──webhook───────┘
+API ─────polling de releases (30s)────> GitHub
 GUI ─────SSE /bugs/v1/updates/stream────> API
 ```
 
@@ -36,7 +37,7 @@ completo (`/bugs/...`) — por isso o container recebe o prefixo e a API usa
 3. **Docker** + plugin compose instalados no host.
 4. Segredos:
    - `API_TOKEN`: `openssl rand -hex 32` (compartilhado com os apps clientes).
-   - `GITHUB_TOKEN`: PAT fine-grained no repo `bezumiya/GoLiveBypass`, permissão **Issues: Read and write**, sem acesso a código.
+   - `GITHUB_TOKEN`: PAT fine-grained no repo `bezumiya/GoLiveBypass`, permissões **Issues: Read and write** e **Contents: Read**.
    - `GITHUB_WEBHOOK_SECRET`: `openssl rand -hex 32`; o mesmo valor será cadastrado no webhook de Release.
 
 ## Passos
@@ -84,7 +85,8 @@ No repositório `bezumiya/GoLiveBypass`, em *Settings → Webhooks → Add webho
 - Evento: somente **Release**; **Active** marcado
 
 O endpoint valida a assinatura, o repositório, `action=published` e `draft=false`.
-Não é necessário embutir `API_TOKEN` na conexão SSE dos clientes.
+O polling de releases a cada 30 segundos funciona como fallback caso o webhook
+não esteja disponível. Não é necessário embutir `API_TOKEN` na conexão SSE dos clientes.
 
 ## Verificação end-to-end
 

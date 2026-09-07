@@ -10,9 +10,22 @@
 import { spawnSync } from "child_process";
 import { existsSync, rmSync, renameSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join, win32 } from "path";
 
 export const OLD_SUFFIX = ".old";
+
+const VERSIONED_EXE_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+export function versionedPortableExePath(current: string, version: string): string {
+  if (!VERSIONED_EXE_RE.test(version)) {
+    throw new Error(`versao invalida para nome de executavel: ${version}`);
+  }
+  const isWindowsPath = /^[A-Za-z]:[\\/]/.test(current);
+  const directory = isWindowsPath ? win32.dirname(current) : dirname(current);
+  return isWindowsPath
+    ? win32.join(directory, `GoLiveBypass-${version}.exe`)
+    : join(directory, `GoLiveBypass-${version}.exe`);
+}
 
 // Uma unica troca; o chamador de teste pode decidir a retentativa. No fluxo real esta
 // mesma ordem e executada pelo .bat depois que o processo antigo ja saiu.
@@ -51,7 +64,7 @@ export function cleanupOldExe(target: string): void {
 
 // O .bat e disparado por um helper externo para trocar e reabrir o app depois que o
 // processo velho morrer. O CONTEUDO do arquivo e 100% ASCII e os caminhos chegam como
-// %1..%3:
+// %1..%4:
 // o cmd le o .bat no codepage OEM, entao path embutido no conteudo (username "Joao",
 // pasta "Configuracoes") embaralharia na leitura — como argumento, porem, o caminho
 // viaja em Unicode pelo CreateProcessW e sobrevive intacto.
@@ -59,23 +72,25 @@ export function cleanupOldExe(target: string): void {
 // A sonda de espera e a tentativa de mover o exe atual: enquanto o processo velho
 // estiver rodando, o Windows recusa o move; quando ele sai, a troca pode prosseguir.
 // Se as tentativas esgotarem, restaura e relanca o exe antigo. Depois limpa o .vbs (em
-// %3) e a si mesmo.
+// %4) e a si mesmo.
 export function buildWindowsUpdateScript(): string {
   return [
     "@echo off",
-    // %1 = exe atual, %2 = exe baixado, %3 = launcher VBS a remover.
+    // %1 = exe atual, %2 = exe baixado, %3 = novo caminho versionado, %4 = launcher VBS a remover.
     `set "TRIES=90"`,
     "",
     ":retry",
     `if not exist "%~1" goto fail`,
     `if not exist "%~2" goto fail`,
+    // O destino versionado pode ter sobrado de uma tentativa interrompida.
+    `if /I not "%~1"=="%~3" if exist "%~3" del /F /Q "%~3" >NUL 2>&1`,
     // Uma sobra de uma tentativa anterior nao pode impedir a proxima troca.
     `if exist "%~1.old" del "%~1.old" >NUL 2>&1`,
     `if exist "%~1.old" goto wait`,
     // Esta operacao falha enquanto o processo antigo ainda mantem o exe aberto.
     `move /Y "%~1" "%~1.old" >NUL 2>&1`,
     "if errorlevel 1 goto wait",
-    `move /Y "%~2" "%~1" >NUL 2>&1`,
+    `move /Y "%~2" "%~3" >NUL 2>&1`,
     "if not errorlevel 1 goto installed",
     // Se o antivirus segurou o download, restaura o atalho antes de tentar de novo.
     `move /Y "%~1.old" "%~1" >NUL 2>&1`,
@@ -89,18 +104,19 @@ export function buildWindowsUpdateScript(): string {
     // O novo processo faz a limpeza final do .old no boot; aqui tentamos adiantar.
     `del "%~1.old" >NUL 2>&1`,
     `ping 127.0.0.1 -n 2 >NUL`,
-    `start "" "%~1"`,
+    `start "" "%~3"`,
     "goto cleanup",
     "",
     ":fail",
     // Nunca deixa o usuario sem o exe antigo se a troca parcial falhar.
     `if not exist "%~1" if exist "%~1.old" move /Y "%~1.old" "%~1" >NUL 2>&1`,
+    `if /I not "%~1"=="%~3" if exist "%~3" del /F /Q "%~3" >NUL 2>&1`,
     `if exist "%~1" del "%~1.old" >NUL 2>&1`,
     `if exist "%~2" del "%~2" >NUL 2>&1`,
     `if exist "%~1" start "" "%~1"`,
     "",
     ":cleanup",
-    `if not "%~3"=="" if exist "%~3" del "%~3" >NUL 2>&1`,
+    `if not "%~4"=="" if exist "%~4" del "%~4" >NUL 2>&1`,
     `del "%~f0" >NUL 2>&1`,
     "",
   ].join("\r\n");
@@ -115,10 +131,11 @@ export function buildWindowsUpdateLauncher(
   batPath: string,
   exePath: string,
   downloadedPath: string,
+  newExePath: string,
   vbsPath: string,
 ): string {
   const quoted = (p: string) => `Chr(34) & "${p}" & Chr(34)`;
-  const command = [quoted(batPath), quoted(exePath), quoted(downloadedPath), quoted(vbsPath)].join(
+  const command = [quoted(batPath), quoted(exePath), quoted(downloadedPath), quoted(newExePath), quoted(vbsPath)].join(
     ' & " " & ',
   );
   const body = [
@@ -131,7 +148,7 @@ export function buildWindowsUpdateLauncher(
 
 // Sobe o helper desacoplado e retorna se conseguiu agenda-lo. So falha com o tmp fora
 // do ar (rarissimo); o chamador decide o fallback.
-export function spawnWindowsUpdateHelper(exePath: string, downloadedPath: string): boolean {
+export function spawnWindowsUpdateHelper(exePath: string, downloadedPath: string, newExePath: string): boolean {
   let batPath = "";
   let vbsPath = "";
   try {
@@ -139,7 +156,7 @@ export function spawnWindowsUpdateHelper(exePath: string, downloadedPath: string
     batPath = join(tmpdir(), `GoLiveBypass-update-${timestamp}.bat`);
     vbsPath = join(tmpdir(), `GoLiveBypass-update-${timestamp}.vbs`);
     writeFileSync(batPath, buildWindowsUpdateScript(), "utf8");
-    writeFileSync(vbsPath, buildWindowsUpdateLauncher(batPath, exePath, downloadedPath, vbsPath), "utf16le");
+    writeFileSync(vbsPath, buildWindowsUpdateLauncher(batPath, exePath, downloadedPath, newExePath, vbsPath), "utf16le");
     // spawn() so emitiria o erro de comando ausente depois de retornar true. Nesse
     // intervalo o chamador ja teria encerrado o app e nao haveria fallback. O
     // wscript apenas agenda o .bat e termina, portanto a chamada sincronizada e

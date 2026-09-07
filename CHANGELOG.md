@@ -6,6 +6,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta.7] - 2026-09-07
+
+### Atualização da GUI
+
+- Corrige a troca do executável portable no Windows para relançar com o nome da nova versão, em vez de manter o nome anterior.
+- Adiciona um toast interno na GUI quando uma atualização é baixada e fica pronta para reiniciar.
+- Reativa o cliente SSE na beta publicada e mantém a consulta de releases como fallback.
+
 ## [2.0.6-beta.2] - 2026-09-07
 
 ### Correção do pipeline beta

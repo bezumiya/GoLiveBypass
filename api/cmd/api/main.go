@@ -15,6 +15,7 @@ import (
 	"github.com/bezumiya/GoLiveBypass/api/internal/config"
 	"github.com/bezumiya/GoLiveBypass/api/internal/gh"
 	"github.com/bezumiya/GoLiveBypass/api/internal/server"
+	"github.com/bezumiya/GoLiveBypass/api/internal/updates"
 )
 
 func main() {
@@ -39,10 +40,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	e := server.New(cfg, client, logger)
+	broker := updates.NewBroker()
+	e := server.NewWithBroker(cfg, client, logger, broker)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	updates.NewReleasePoller(cfg.GitHubToken, cfg.GitHubRepo, broker, logger).Start(ctx)
 
 	sc := echo.StartConfig{
 		Address:         ":" + cfg.Port,
