@@ -4,6 +4,12 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [2.0.5-beta.6] - 2026-09-07
+
+### Correção da área clicável
+
+- O botão de configurações no canto superior passa a receber cliques em toda a área visível, inclusive na região que cruza a faixa de arrasto da janela.
+
 ## [Unreleased]
 
 ### Atualização automática do Windows
