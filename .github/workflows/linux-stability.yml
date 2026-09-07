@@ -1,0 +1,74 @@
+name: linux-stability
+
+# A matriz e deliberadamente separada do workflow de release: ela nunca publica
+# artefatos e roda em namespaces descartaveis. O teste Premium/VM permanece manual
+# porque depende de uma VM preparada e de uma sessao que nao deve entrar no CI.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'standalone/**'
+      - 'tests/test-linux-matrix.sh'
+      - 'tests/test-linux-vm.sh'
+      - 'golive-gui/electron/linux-preflight.ts'
+      - '.github/workflows/linux-stability.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  containers:
+    name: preflight ${{ matrix.runtime }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [podman]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman
+      - name: Rodar matriz atual/anterior
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+          MATRIX_INSTALL: '0'
+          MATRIX_BUILD_ARCH_SNAPSHOT: '0'
+        run: ./tests/test-linux-matrix.sh --quick
+
+  appimage:
+    name: AppImage compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: golive-gui/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - name: Instalar Podman e dependencias de build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman fuse3
+      - name: Compilar AppImage sem publicar
+        working-directory: golive-gui
+        run: |
+          npm ci
+          npm run build:linux
+      - name: Auditar AppImage em bases atuais e anteriores
+        env:
+          RUNTIME: podman
+          MATRIX_INSTALL: '0'
+          MATRIX_BUILD_ARCH_SNAPSHOT: '0'
+          MATRIX_CASES: ubuntu-24.04,debian-12,fedora-42,arch-current
+        run: |
+          appimage="$(find golive-gui/dist-app -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          APPIMAGE_PATH="$appimage" ./tests/test-linux-matrix.sh --quick

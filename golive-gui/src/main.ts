@@ -1,4 +1,5 @@
 import { protonMeasurementText } from './proton-measurement';
+import { renderProtonCountryFlag } from './proton-flags';
 import './style.css'
 
 declare global {
@@ -14,6 +15,7 @@ declare global {
         distro: string;
         archLike: boolean;
         dependencies: { missing: string[]; required: string[] };
+        repairable?: boolean;
         elevation: { available: boolean; method: string };
         netns: { available: boolean };
         discord: { found: boolean; count: number; firstPath: string };
@@ -85,7 +87,7 @@ declare global {
       loginProton: (payload: { username: string; password?: string; twoFactorCode?: string }) => Promise<{ success: boolean; code?: string; message?: string; error?: string; retryable?: boolean }>;
       onProtonCaptchaStatus: (callback: (status: string) => void) => void;
       logoutProton: () => Promise<boolean>;
-      optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean }) => Promise<{
+      optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; requestId?: string }) => Promise<{
         success: boolean;
         server?: string;
         country?: string;
@@ -102,7 +104,11 @@ declare global {
         confFile?: string;
         readiness?: { verified?: boolean; state?: string; source?: string; detail?: string };
         error?: string;
+        cancelled?: boolean;
+        deferred?: boolean;
       }>;
+      onProtonOptimizationProgress: (callback: (event: ProtonOptimizationProgress) => void) => (() => void) | void;
+      cancelProtonOptimization: (requestId: string) => Promise<boolean>;
       getProtonSettings: () => Promise<{
         vpnMode: 'proton' | 'custom';
         username: string;
@@ -111,9 +117,31 @@ declare global {
         autoPing: boolean;
         lastServer?: any;
       }>;
+      getProtonPlan: (options?: { force?: boolean }) => Promise<{
+        success: boolean;
+        status: 'free' | 'premium' | 'unknown';
+        maxTier?: number;
+        planName?: string;
+        planTitle?: string;
+        checkedAt?: string;
+        error?: string;
+      }>;
       setProtonSettings: (settings: any) => Promise<boolean>;
     }
   }
+}
+
+interface ProtonOptimizationProgress {
+  requestId: string;
+  phase: 'ping' | 'preparing' | 'testing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
+  total: number;
+  tested: number;
+  succeeded: number;
+  server?: string;
+  downloadMbps?: number;
+  uploadMbps?: number;
+  pingMs?: number;
+  status?: 'testing' | 'success' | 'failed';
 }
 
 const platform = window.api.platform;
@@ -296,13 +324,14 @@ async function updateStatus() {
       if (linuxPreflightCommand) linuxPreflightCommand.hidden = true;
     } else if (isLinux && linuxPreflight && !linuxPreflight.ok) {
       const missing = linuxPreflight.dependencies.missing;
-      statusText.innerText = missing.length > 0
-        ? `Dependências do Linux ausentes: ${missing.join(', ')}`
+      const canPrepare = linuxPreflight.repairable === true;
+      statusText.innerText = canPrepare
+        ? `Dependências do Linux ausentes: ${missing.join(', ')}. Serão preparadas ao ativar.`
         : (linuxPreflight.errors[0] || 'Ambiente Linux não está pronto');
-      statusTag.textContent = 'Corrija antes de ativar';
-      statusTag.classList.add('tag--danger');
-      toggleBtn.disabled = true;
-      btnText.innerText = 'Não Disponível';
+      statusTag.textContent = canPrepare ? 'Preparação necessária' : 'Corrija antes de ativar';
+      statusTag.classList.add(canPrepare ? 'tag--warn' : 'tag--danger');
+      toggleBtn.disabled = !canPrepare || !hasSelectedConf;
+      btnText.innerText = canPrepare ? (hasSelectedConf ? 'Preparar e ativar' : 'Selecione uma Configuração') : 'Não Disponível';
       statusCard.hidden = false;
       if (linuxPreflightCommand) {
         linuxPreflightCommand.textContent = linuxPreflight.installCommand
@@ -474,20 +503,197 @@ let protonLoginInFlight = false;
 
 const protonUserDisplay = document.getElementById('protonUserDisplay') as HTMLElement | null;
 const protonDot = document.getElementById('protonDot') as HTMLElement | null;
+const protonPlanStatus = document.getElementById('protonPlanStatus') as HTMLElement | null;
+const protonPlanRefreshBtn = document.getElementById('protonPlanRefreshBtn') as HTMLButtonElement | null;
 const protonLogoutBtn = document.getElementById('protonLogoutBtn') as HTMLButtonElement | null;
 const protonCountrySelect = document.getElementById('protonCountrySelect') as HTMLSelectElement | null;
 const protonOptimizeBtn = document.getElementById('protonOptimizeBtn') as HTMLButtonElement | null;
 const protonOptimizeBtnText = document.getElementById('protonOptimizeBtnText') as HTMLElement | null;
 
 const protonServerBadge = document.getElementById('protonServerBadge') as HTMLElement | null;
+const protonServerFlag = document.getElementById('protonServerFlag') as HTMLElement | null;
 const protonServerName = document.getElementById('protonServerName') as HTMLElement | null;
 const protonServerPing = document.getElementById('protonServerPing') as HTMLElement | null;
 const protonServerLoad = document.getElementById('protonServerLoad') as HTMLElement | null;
 const protonFeedback = document.getElementById('protonFeedback') as HTMLElement | null;
+const protonMeasurementDialog = document.getElementById('protonMeasurementDialog') as HTMLDialogElement | null;
+const protonMeasurement = document.getElementById('protonMeasurement') as HTMLElement | null;
+const protonMeasurementTitle = document.getElementById('protonMeasurementTitle') as HTMLElement | null;
+const protonMeasurementProgress = document.getElementById('protonMeasurementProgress') as HTMLElement | null;
+const protonMeasurementCount = document.getElementById('protonMeasurementCount') as HTMLElement | null;
+const protonMeasurementList = document.getElementById('protonMeasurementList') as HTMLElement | null;
+const protonMeasurementActions = document.getElementById('protonMeasurementActions') as HTMLElement | null;
+const protonCancelMeasurementBtn = document.getElementById('protonCancelMeasurementBtn') as HTMLButtonElement | null;
+const protonRetryMeasurementBtn = document.getElementById('protonRetryMeasurementBtn') as HTMLButtonElement | null;
+const protonContinueMeasurementBtn = document.getElementById('protonContinueMeasurementBtn') as HTMLButtonElement | null;
+const protonCloseMeasurementBtn = document.getElementById('protonCloseMeasurementBtn') as HTMLButtonElement | null;
 
 let currentVpnMode: 'proton' | 'custom' = 'proton';
 let isProtonAuthenticated = false;
+let protonStateGeneration = 0;
 let protonOptimizationInFlight = false;
+let protonOptimizationRequestId = '';
+let protonMeasurementTotal = 0;
+let protonMeasurementTested = 0;
+const protonMeasurementRows = new Map<string, HTMLElement>();
+let protonMeasurementDialogLastFocus: HTMLElement | null = null;
+
+function formatMbps(value?: number): string {
+  return Number.isFinite(value) && value! > 0 ? `${value!.toFixed(1)} Mbps` : '—';
+}
+
+function formatProtonServerName(value?: string): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+
+  // A API pode devolver nomes regionais como US-NY#189. Para a leitura rápida
+  // na tela, mantemos somente o código do país e o número do servidor.
+  const match = raw.match(/^([A-Za-z]{2})(?:-[^#\s]+)?#(\d+)$/);
+  return match ? `${match[1].toUpperCase()}#${match[2]}` : raw;
+}
+
+function protonServerCountry(value?: string): string {
+  const normalized = formatProtonServerName(value);
+  return normalized.match(/^([A-Z]{2})#/)?.[1] ?? '';
+}
+
+function updateProtonCountryFlag(element: HTMLElement | null, server?: string) {
+  if (!element) return;
+  element.innerHTML = server ? renderProtonCountryFlag(protonServerCountry(server)) : '';
+}
+
+function renderMeasurementList() {
+  if (!protonMeasurementList) return;
+  for (const row of protonMeasurementRows.values()) protonMeasurementList.appendChild(row);
+}
+
+function updateMeasurementProgress(event: ProtonOptimizationProgress) {
+  if (!protonMeasurement || event.requestId !== protonOptimizationRequestId) return;
+  if (event.phase === 'failed' || event.phase === 'cancelled') {
+    protonMeasurementList?.querySelectorAll('.proton-measurement__skeleton').forEach((node) => node.remove());
+    protonMeasurementList?.querySelectorAll('.proton-measurement__metrics--pending').forEach((node) => {
+      node.classList.remove('proton-measurement__metrics--pending');
+      if (event.phase === 'cancelled') node.textContent = 'Medição interrompida';
+    });
+    if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.hidden = true;
+    if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.hidden = false;
+  }
+  const total = Math.max(0, event.total || 0);
+  const tested = Math.min(total, Math.max(0, event.tested || 0));
+  if (total > 0) {
+    protonMeasurementTotal = total;
+    protonMeasurementTested = tested;
+  }
+  const progress = protonMeasurement.querySelector('.proton-progress') as HTMLElement | null;
+  if (progress) {
+    if (total > 0) {
+      progress.setAttribute('aria-valuemax', String(total));
+      progress.setAttribute('aria-valuenow', String(tested));
+    } else {
+      progress.removeAttribute('aria-valuemax');
+      progress.removeAttribute('aria-valuenow');
+    }
+  }
+  if (protonMeasurementProgress) protonMeasurementProgress.style.width = total ? `${(tested / total) * 100}%` : '0%';
+  if (protonMeasurementCount) protonMeasurementCount.textContent = total
+    ? `${tested} de ${total} ${event.phase === 'ping' ? 'rotas pingadas' : event.phase === 'preparing' ? 'túneis verificados' : 'servidores testados'} · faltam ${Math.max(0, total - tested)}`
+    : event.phase === 'ping' ? 'Preparando a triagem de ping…' : 'Preparando servidores…';
+  if (protonMeasurementTitle && event.phase === 'ping' && total > 0) {
+    protonMeasurementTitle.textContent = 'Medindo o ping das rotas elegíveis';
+  } else if (protonMeasurementTitle && event.phase === 'ping') {
+    protonMeasurementTitle.textContent = 'Preparando a triagem de ping';
+  } else if (protonMeasurementTitle && event.phase === 'preparing' && total > 0) {
+    protonMeasurementTitle.textContent = 'Validando as rotas com menor ping';
+  } else if (protonMeasurementTitle && event.phase === 'testing') {
+    protonMeasurementTitle.textContent = 'Medindo a velocidade das rotas aprovadas';
+  }
+  if (event.server) {
+    protonMeasurementList?.querySelectorAll('.proton-measurement__skeleton').forEach((node) => node.remove());
+    let row = protonMeasurementRows.get(event.server);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'proton-measurement__server';
+      row.innerHTML = '<span class="proton-measurement__server-main"><span class="proton-country-flag proton-measurement__server-flag" aria-hidden="true"></span><span class="proton-measurement__server-name"></span></span><span class="proton-measurement__status">Testando…</span><span class="proton-measurement__metrics proton-measurement__metrics--pending"><i aria-hidden="true"></i></span>';
+      protonMeasurementRows.set(event.server, row);
+      renderMeasurementList();
+    }
+    const name = row.querySelector('.proton-measurement__server-name');
+    const flag = row.querySelector('.proton-measurement__server-flag') as HTMLElement | null;
+    const status = row.querySelector('.proton-measurement__status');
+    const metrics = row.querySelector('.proton-measurement__metrics');
+    if (name) name.textContent = formatProtonServerName(event.server);
+    updateProtonCountryFlag(flag, event.server);
+    const isPing = event.phase === 'ping';
+    const isPreflight = event.phase === 'preparing';
+    const statusApplies = event.phase === 'testing' || isPreflight || isPing;
+    if (event.status !== undefined && statusApplies) {
+      if (isPing) {
+        if (status) status.textContent = event.status === 'success' ? 'Ping medido' : 'Sem resposta';
+        if (metrics) metrics.textContent = event.status === 'success' && event.pingMs
+          ? `${event.pingMs} ms · candidata à triagem`
+          : 'Sem resposta ao ping';
+      } else if (isPreflight) {
+        if (status) status.textContent = event.status === 'success' ? 'Túnel respondeu' : 'Descartada no teste rápido';
+        if (metrics) metrics.textContent = event.status === 'success' ? 'Pronta para medir velocidade' : 'Falha no túnel ou HTTPS';
+      } else {
+        if (status) status.textContent = event.status === 'success' ? 'Medido' : event.status === 'failed' ? 'Não foi possível medir' : 'Testando…';
+        if (metrics) metrics.innerHTML = event.status === 'success'
+          ? `↓ ${formatMbps(event.downloadMbps)} · ↑ ${formatMbps(event.uploadMbps)} · ${event.pingMs ?? '—'} ms`
+          : event.status === 'failed' ? 'Tente novamente para medir esta rota' : '<i aria-hidden="true"></i>';
+      }
+      metrics?.classList.toggle('proton-measurement__metrics--pending', event.status === 'testing');
+      row.classList.toggle('is-success', event.status === 'success' && !isPreflight && !isPing);
+      row.classList.toggle('is-failed', event.status === 'failed');
+    }
+  }
+}
+
+function setMeasurementVisible(visible: boolean) {
+  if (protonMeasurement) protonMeasurement.hidden = !visible;
+  if (visible) fitWindowToContent();
+}
+
+function openProtonMeasurementDialog() {
+  if (!protonMeasurementDialog) {
+    setMeasurementVisible(true);
+    return;
+  }
+
+  if (!protonMeasurementDialog.open) {
+    protonMeasurementDialogLastFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : protonOptimizeBtn;
+    if (typeof protonMeasurementDialog.showModal === 'function') {
+      protonMeasurementDialog.showModal();
+    } else {
+      protonMeasurementDialog.setAttribute('open', '');
+    }
+  }
+
+  setMeasurementVisible(true);
+  protonCancelMeasurementBtn?.focus();
+  requestAnimationFrame(() => protonCancelMeasurementBtn?.focus());
+}
+
+function closeProtonMeasurementDialog(restoreFocus = true) {
+  setMeasurementVisible(false);
+  if (protonMeasurementDialog) {
+    if (protonMeasurementDialog.open && typeof protonMeasurementDialog.close === 'function') {
+      protonMeasurementDialog.close();
+    } else {
+      protonMeasurementDialog.removeAttribute('open');
+    }
+  }
+  const focusTarget = protonMeasurementDialogLastFocus ?? protonOptimizeBtn;
+  protonMeasurementDialogLastFocus = null;
+  if (restoreFocus) {
+    focusTarget?.focus();
+    requestAnimationFrame(() => focusTarget?.focus());
+  }
+  fitWindowToContent();
+}
+
+const removeProtonProgressListener = window.api.onProtonOptimizationProgress?.(updateMeasurementProgress);
 
 protonPasswordToggle?.addEventListener('click', () => {
   if (!protonPassword) return;
@@ -570,7 +776,47 @@ function protonLoginMessage(res: { code?: string; message?: string; error?: stri
   }
 }
 
+type ProtonPlanView = {
+  success: boolean;
+  status: 'free' | 'premium' | 'unknown';
+  planTitle?: string;
+};
+
+function setProtonPlanLoading() {
+  if (protonPlanStatus) {
+    protonPlanStatus.className = 'proton-plan-status proton-plan-status--loading';
+    protonPlanStatus.textContent = 'Plano: verificando…';
+  }
+  if (protonPlanRefreshBtn) {
+    protonPlanRefreshBtn.disabled = true;
+    protonPlanRefreshBtn.textContent = 'Verificando…';
+  }
+}
+
+function renderProtonPlan(plan: ProtonPlanView) {
+  if (!protonPlanStatus || !protonPlanRefreshBtn) return;
+  const status = plan.success && (plan.status === 'free' || plan.status === 'premium')
+    ? plan.status
+    : 'unknown';
+  protonPlanStatus.className = `proton-plan-status proton-plan-status--${status}`;
+  if (status === 'free') {
+    protonPlanStatus.textContent = 'Plano: Proton VPN Free';
+  } else if (status === 'premium') {
+    const title = typeof plan.planTitle === 'string' && plan.planTitle.trim() ? plan.planTitle.trim() : 'Premium';
+    protonPlanStatus.textContent = `Plano: ${title}`;
+  } else {
+    protonPlanStatus.textContent = 'Plano: não confirmado';
+  }
+  protonPlanRefreshBtn.disabled = false;
+  protonPlanRefreshBtn.textContent = status === 'unknown' ? 'Tentar novamente' : 'Atualizar plano';
+  protonPlanRefreshBtn.setAttribute(
+    'aria-label',
+    status === 'unknown' ? 'Tentar confirmar o plano Proton' : 'Atualizar o plano Proton',
+  );
+}
+
 async function switchVpnMode(mode: 'proton' | 'custom') {
+  if (protonOptimizationInFlight) return;
   currentVpnMode = mode;
   try {
     await window.api.setVpnMode(mode);
@@ -587,6 +833,7 @@ async function switchVpnMode(mode: 'proton' | 'custom') {
     panelCustom.hidden = isProton;
   }
 
+  if (mode === 'proton') await refreshProtonState();
   await atualizarStatusWgConf();
   await updateStatus();
   fitWindowToContent();
@@ -595,9 +842,11 @@ async function switchVpnMode(mode: 'proton' | 'custom') {
 tabProton?.addEventListener('click', () => switchVpnMode('proton'));
 tabCustom?.addEventListener('click', () => switchVpnMode('custom'));
 
-async function refreshProtonState() {
+async function refreshProtonState(forcePlan = false) {
+  const generation = ++protonStateGeneration;
   try {
     const s = await window.api.getProtonSettings();
+    if (generation !== protonStateGeneration) return;
     if (protonCountrySelect) {
       protonCountrySelect.value = s.country || '';
     }
@@ -605,15 +854,26 @@ async function refreshProtonState() {
     if (s.username) {
       if (protonUsername) protonUsername.value = s.username;
       const chk = await window.api.checkProtonSession(s.username);
+      if (generation !== protonStateGeneration) return;
       if (chk.valid) {
         isProtonAuthenticated = true;
         if (protonAuthForm) protonAuthForm.hidden = true;
         if (protonConnectedView) protonConnectedView.hidden = false;
         if (protonUserDisplay) protonUserDisplay.textContent = `Conta: ${s.username}`;
         if (protonDot) protonDot.style.background = '#22c55e';
+        setProtonPlanLoading();
+        try {
+          const plan = await window.api.getProtonPlan({ force: forcePlan });
+          if (generation !== protonStateGeneration) return;
+          renderProtonPlan(plan);
+        } catch {
+          if (generation !== protonStateGeneration) return;
+          renderProtonPlan({ success: false, status: 'unknown' });
+        }
 
         if (s.lastServer?.server && protonServerBadge && protonServerName && protonServerPing && protonServerLoad) {
-          protonServerName.textContent = s.lastServer.server;
+          updateProtonCountryFlag(protonServerFlag, s.lastServer.server);
+          protonServerName.textContent = formatProtonServerName(s.lastServer.server);
           const ping = s.lastServer.pingMs;
           if (ping > 0) {
             protonServerPing.textContent = `${ping} ms`;
@@ -622,8 +882,15 @@ async function refreshProtonState() {
             protonServerPing.textContent = 'Ping: rápido';
           }
           protonServerLoad.textContent = `${s.lastServer.load ?? 0}% carga`;
+          const speedBadge = protonServerBadge.querySelector('.proton-speed-pill') as HTMLElement | null;
+          if (speedBadge) {
+            speedBadge.textContent = Number.isFinite(s.lastServer.downloadMbps) && s.lastServer.downloadMbps > 0
+              ? `↓ ${s.lastServer.downloadMbps.toFixed(1)} Mbps` : 'Velocidade não medida';
+            speedBadge.hidden = false;
+          }
           protonServerBadge.hidden = false;
         } else if (protonServerBadge) {
+          updateProtonCountryFlag(protonServerFlag);
           protonServerBadge.hidden = true;
         }
         return;
@@ -631,15 +898,24 @@ async function refreshProtonState() {
     }
 
     isProtonAuthenticated = false;
+    renderProtonPlan({ success: false, status: 'unknown' });
     if (protonAuthForm) protonAuthForm.hidden = false;
     if (protonConnectedView) protonConnectedView.hidden = true;
   } catch (err) {
+    if (generation !== protonStateGeneration) return;
     console.error('Falha ao verificar sessão Proton:', err);
     isProtonAuthenticated = false;
+    renderProtonPlan({ success: false, status: 'unknown' });
     if (protonAuthForm) protonAuthForm.hidden = false;
     if (protonConnectedView) protonConnectedView.hidden = true;
   }
 }
+
+protonPlanRefreshBtn?.addEventListener('click', async () => {
+  if (protonOptimizationInFlight || !isProtonAuthenticated) return;
+  setProtonPlanLoading();
+  await refreshProtonState(true);
+});
 
 async function submitProtonLogin() {
     if (protonLoginInFlight) return;
@@ -677,6 +953,7 @@ async function submitProtonLogin() {
         await refreshProtonState();
         await atualizarStatusWgConf();
         await updateStatus();
+        void optimizeProtonRoute(true);
       } else {
         if (res.code === 'TWO_FACTOR_REQUIRED' || res.code === 'TWO_FACTOR_INVALID' || protonNeeds2FA(res.error)) {
           setProtonFeedback(
@@ -718,6 +995,8 @@ proton2FAConfirmBtn?.addEventListener('click', () => {
 
 if (protonLogoutBtn) {
   protonLogoutBtn.addEventListener('click', async () => {
+    if (protonOptimizationInFlight) return;
+    protonStateGeneration += 1;
     await window.api.logoutProton();
     setProtonFeedback('');
     await refreshProtonState();
@@ -728,16 +1007,39 @@ if (protonLogoutBtn) {
 
 if (protonCountrySelect) {
   protonCountrySelect.addEventListener('change', async () => {
+    if (protonOptimizationInFlight) return;
     const country = protonCountrySelect.value;
     await window.api.setProtonSettings({ country });
     protonOptimizeBtn?.click();
   });
 }
 
-async function optimizeProtonRoute(onStartup = false) {
+async function optimizeProtonRoute(onStartup = false, speedTest = true) {
   if (protonOptimizationInFlight || !isProtonAuthenticated) return;
 
   protonOptimizationInFlight = true;
+  protonMeasurementTotal = 0;
+  protonMeasurementTested = 0;
+  protonOptimizationRequestId = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `proton-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  protonMeasurementRows.clear();
+  if (protonMeasurementTitle) protonMeasurementTitle.textContent = 'Encontrando uma rota para sua transmissão';
+  if (protonMeasurementCount) protonMeasurementCount.textContent = 'Preparando servidores…';
+  if (protonMeasurementList) {
+    protonMeasurementList.innerHTML = '<div class="proton-measurement__skeleton"></div><div class="proton-measurement__skeleton"></div><div class="proton-measurement__skeleton"></div>';
+  }
+  if (protonMeasurementActions) protonMeasurementActions.hidden = true;
+  if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.hidden = false;
+  if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.disabled = false;
+  if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.textContent = 'Cancelar teste';
+  if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.hidden = true;
+  // A otimização automática usa o mesmo diálogo da ação manual para que o
+  // usuário veja a triagem de ping, o preflight e o teste de velocidade desde
+  // o primeiro momento da abertura do programa.
+  openProtonMeasurementDialog();
+  if (tabProton) tabProton.disabled = true;
+  if (tabCustom) tabCustom.disabled = true;
+  if (protonCountrySelect) protonCountrySelect.disabled = true;
+  if (protonLogoutBtn) protonLogoutBtn.disabled = true;
   toggleBtn.disabled = true;
   if (protonOptimizeBtn) protonOptimizeBtn.disabled = true;
   if (protonOptimizeBtnText) protonOptimizeBtnText.textContent = onStartup ? 'Otimizando...' : 'Medindo velocidade...';
@@ -748,31 +1050,54 @@ async function optimizeProtonRoute(onStartup = false) {
 
   try {
     const country = protonCountrySelect?.value || '';
-    const res = await window.api.optimizeProtonRoute({ country, autoPing: true, speedTest: !onStartup });
+    const res = await window.api.optimizeProtonRoute({ country, autoPing: true, speedTest, reuseMeasured: onStartup, requestId: protonOptimizationRequestId });
 
-    if (res.success) {
+    if (res.deferred) {
+      closeProtonMeasurementDialog(!onStartup);
+      setProtonFeedback('A medição será feita quando o bypass estiver desativado.', 'busy');
+    } else if (res.success) {
       const pingStr = protonMeasurementText(res);
       await refreshProtonState();
       await atualizarStatusWgConf();
       await updateStatus();
+      closeProtonMeasurementDialog(!onStartup);
       // Otimizar so grava/prepara a configuracao WireGuard. Sem o bypass ativo, dizer
       // "conectado" sugere que o Discord ja esta passando pelo novo servidor.
       const rotaEmUso = currentState === 'ACTIVE';
+      const testedSummary = protonMeasurementTotal > 0 && protonMeasurementTested < protonMeasurementTotal
+        ? ` ${protonMeasurementTested} de ${protonMeasurementTotal} candidatos testados.` : '';
+      const selectedServerName = formatProtonServerName(res.server);
       setProtonFeedback(
         rotaEmUso
-          ? `Rota ${res.server} aplicada!${pingStr}`
-          : `Rota ${res.server} selecionada!${pingStr} Ative o Bypass para usá-la.`,
+          ? `Rota ${selectedServerName} aplicada!${pingStr}${testedSummary}`
+          : `Rota ${selectedServerName} selecionada!${pingStr}${testedSummary} Ative o Bypass para usá-la.`,
         'ok',
       );
     } else {
+      if (protonMeasurementTitle) protonMeasurementTitle.textContent = res.cancelled ? 'Medição cancelada' : 'Não foi possível concluir a medição';
+      if (protonMeasurementCount) protonMeasurementCount.textContent = res.cancelled ? 'O teste foi interrompido.' : 'As rotas não puderam ser medidas.';
+      if (protonMeasurementActions) protonMeasurementActions.hidden = false;
+      if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.hidden = true;
+      if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.hidden = false;
       setProtonFeedback(res.error || 'Falha ao buscar servidor.', 'err');
       await updateStatus();
     }
   } catch (err) {
+    protonMeasurementList?.querySelectorAll('.proton-measurement__skeleton').forEach((node) => node.remove());
+    if (protonMeasurementTitle) protonMeasurementTitle.textContent = 'Não foi possível concluir a medição';
+    if (protonMeasurementActions) protonMeasurementActions.hidden = false;
+    if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.hidden = true;
+    if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.hidden = false;
+    if (protonMeasurementCount && !protonMeasurementCount.textContent?.includes('de')) protonMeasurementCount.textContent = 'Nenhum servidor foi testado.';
     setProtonFeedback((err as Error)?.message || String(err), 'err');
     await updateStatus();
   } finally {
     protonOptimizationInFlight = false;
+    protonOptimizationRequestId = '';
+    if (tabProton) tabProton.disabled = false;
+    if (tabCustom) tabCustom.disabled = false;
+    if (protonCountrySelect) protonCountrySelect.disabled = false;
+    if (protonLogoutBtn) protonLogoutBtn.disabled = false;
     if (protonOptimizeBtn) protonOptimizeBtn.disabled = false;
     if (protonOptimizeBtnText) protonOptimizeBtnText.textContent = 'Otimizar rota';
     await updateStatus();
@@ -780,6 +1105,25 @@ async function optimizeProtonRoute(onStartup = false) {
 }
 
 protonOptimizeBtn?.addEventListener('click', () => void optimizeProtonRoute());
+protonCancelMeasurementBtn?.addEventListener('click', async () => {
+  if (!protonOptimizationRequestId) return;
+  protonCancelMeasurementBtn.disabled = true;
+  protonCancelMeasurementBtn.textContent = 'Cancelando…';
+  try { await window.api.cancelProtonOptimization(protonOptimizationRequestId); } catch {}
+});
+protonRetryMeasurementBtn?.addEventListener('click', () => void optimizeProtonRoute(false, true));
+protonContinueMeasurementBtn?.addEventListener('click', async () => {
+  await optimizeProtonRoute(false, false);
+});
+protonCloseMeasurementBtn?.addEventListener('click', () => closeProtonMeasurementDialog());
+protonMeasurementDialog?.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  if (!protonOptimizationInFlight) closeProtonMeasurementDialog();
+});
+
+window.addEventListener('beforeunload', () => {
+  if (typeof removeProtonProgressListener === 'function') removeProtonProgressListener();
+});
 
 async function atualizarStatusWgConf() {
   if (currentVpnMode === 'proton') {

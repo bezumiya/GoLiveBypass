@@ -96,21 +96,58 @@ func systemPingContext(ctx context.Context, ip string) (int, error) {
 	return 0, nil
 }
 
+// PingProgressEvent describes one logical route after its physical endpoint has
+// been measured. A shared physical IP is probed once, but every logical route
+// that points to it receives its own event so the progress count remains honest.
+type PingProgressEvent struct {
+	Total     int
+	Tested    int
+	Succeeded int
+	Server    string
+	PingMs    int
+	ElapsedMs int
+	Status    string
+}
+
+// PingProgressFunc receives ping progress synchronously after each route is
+// accounted for. It is intentionally independent from speedtest.ProgressFunc
+// so the VPN package does not depend on the measurement package.
+type PingProgressFunc func(PingProgressEvent)
+
 // ProbeCandidatesPing covers the regional candidates with bounded concurrency
 // and a shared deadline. Shared entry IPs are measured once, avoiding duplicate
 // probes to the same physical machine. Missing/failed probes are not winners.
 func ProbeCandidatesPing(servers []api.LogicalServer, maxCandidates int) map[string]int {
+	return ProbeCandidatesPingWithProgress(servers, maxCandidates, nil)
+}
+
+// ProbeCandidatesPingWithProgress is the observable form of
+// ProbeCandidatesPing. The callback is used by the GUI and the terminal trace
+// so both callers see the same ping stage and the same counters.
+func ProbeCandidatesPingWithProgress(servers []api.LogicalServer, maxCandidates int, progress PingProgressFunc) map[string]int {
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
 	defer cancel()
-	return probeCandidates(ctx, servers[:max(0, min(maxCandidates, len(servers)))], probePingContext)
+	return probeCandidatesWithProgress(ctx, servers[:max(0, min(maxCandidates, len(servers)))], probePingContext, progress)
 }
 
 func probeCandidates(ctx context.Context, servers []api.LogicalServer, probe func(context.Context, string) int) map[string]int {
+	return probeCandidatesWithProgress(ctx, servers, probe, nil)
+}
+
+type pingOutcome struct {
+	ip        string
+	ms        int
+	elapsedMs int
+}
+
+func probeCandidatesWithProgress(ctx context.Context, servers []api.LogicalServer, probe func(context.Context, string) int, progress PingProgressFunc) map[string]int {
 	byIP := make(map[string][]string)
 	var ips []string
+	var missing []string
 	for _, srv := range servers {
 		phys := GetBestPhysicalServer(&srv)
 		if phys == nil || phys.EntryIP == "" {
+			missing = append(missing, srv.Name)
 			continue
 		}
 		if _, exists := byIP[phys.EntryIP]; !exists {
@@ -119,8 +156,42 @@ func probeCandidates(ctx context.Context, servers []api.LogicalServer, probe fun
 		byIP[phys.EntryIP] = append(byIP[phys.EntryIP], srv.Name)
 	}
 	results := make(map[string]int)
+	tested, succeeded := 0, 0
+	if progress != nil {
+		progress(PingProgressEvent{Total: len(servers)})
+	}
+	emit := func(server string, ms, elapsedMs int) {
+		tested++
+		status := "failed"
+		if ms > 0 && ms < 999 {
+			succeeded++
+			status = "success"
+		}
+		if progress != nil {
+			progress(PingProgressEvent{
+				Total:     len(servers),
+				Tested:    tested,
+				Succeeded: succeeded,
+				Server:    server,
+				PingMs:    ms,
+				ElapsedMs: elapsedMs,
+				Status:    status,
+			})
+		}
+	}
+
+	// Entries without an endpoint are accounted for as failed routes. Speed
+	// selection normally removes them before this stage, but counting them here
+	// keeps diagnostics truthful for callers that pass raw API data.
+	for _, name := range missing {
+		emit(name, 999, 0)
+	}
+	if len(ips) == 0 {
+		return results
+	}
+
 	jobs := make(chan string)
-	var mu sync.Mutex
+	outcomes := make(chan pingOutcome, len(ips))
 	var wg sync.WaitGroup
 	for range min(32, len(ips)) {
 		wg.Add(1)
@@ -131,25 +202,32 @@ func probeCandidates(ctx context.Context, servers []api.LogicalServer, probe fun
 					continue
 				}
 				probeCtx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+				started := time.Now()
 				ms := probe(probeCtx, ip)
 				cancel()
-				mu.Lock()
-				for _, name := range byIP[ip] {
-					results[name] = ms
-				}
-				mu.Unlock()
+				outcomes <- pingOutcome{ip: ip, ms: ms, elapsedMs: max(0, int(time.Since(started).Milliseconds()))}
 			}
 		}()
 	}
-send:
-	for _, ip := range ips {
-		select {
-		case jobs <- ip:
-		case <-ctx.Done():
-			break send
+
+	go func() {
+		defer close(outcomes)
+		defer wg.Wait()
+		defer close(jobs)
+	send:
+		for _, ip := range ips {
+			select {
+			case jobs <- ip:
+			case <-ctx.Done():
+				break send
+			}
+		}
+	}()
+	for outcome := range outcomes {
+		for _, name := range byIP[outcome.ip] {
+			results[name] = outcome.ms
+			emit(name, outcome.ms, outcome.elapsedMs)
 		}
 	}
-	close(jobs)
-	wg.Wait()
 	return results
 }

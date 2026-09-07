@@ -1,6 +1,7 @@
 package vpn
 
 import (
+	"encoding/base64"
 	"fmt"
 	"testing"
 
@@ -138,6 +139,23 @@ func TestGetBestPhysicalServer(t *testing.T) {
 	}
 }
 
+func TestGetBestWireGuardPhysicalServerSkipsBrokenPeers(t *testing.T) {
+	validKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	logical := api.LogicalServer{Servers: []api.PhysicalServer{
+		{Status: constants.StatusOnline, EntryIP: "not-an-ip", X25519PublicKey: validKey},
+		{Status: constants.StatusOnline, EntryIP: "192.0.2.1", X25519PublicKey: "bad-key"},
+		{Status: constants.StatusOnline, EntryIP: "192.0.2.2", X25519PublicKey: validKey},
+	}}
+	got := GetBestWireGuardPhysicalServer(&logical)
+	if got == nil || got.EntryIP != "192.0.2.2" {
+		t.Fatalf("expected the first usable peer, got %+v", got)
+	}
+	logical.Servers[2].ServicesDownReason = "maintenance"
+	if GetBestWireGuardPhysicalServer(&logical) != nil {
+		t.Fatal("peer marked with a service-down reason must not enter the speed test")
+	}
+}
+
 func TestSelectBestWithPing(t *testing.T) {
 	srv1 := api.LogicalServer{
 		Name:        "US-EAST#1",
@@ -228,18 +246,62 @@ func TestCapacityPriorityAndLatencyTiebreak(t *testing.T) {
 	}
 }
 
-func TestSpeedFinalistsPrioritizeDiversityAndAllowBlockedICMP(t *testing.T) {
+func TestSpeedFinalistsPrioritizeLowestPingAndAllowBlockedICMP(t *testing.T) {
 	candidates := []api.LogicalServer{
 		{Name: "US1", ExitCountry: "US", City: "NY", Load: 10},
 		{Name: "US2", ExitCountry: "US", City: "NY", Load: 11},
 		{Name: "JP", ExitCountry: "JP", City: "Tokyo", Load: 20},
 	}
-	got, err := speedFinalists(candidates, map[string]int{"US1": 50, "US2": 50, "JP": 999}, 2)
-	if err != nil || len(got) != 2 || got[0].Name != "US1" || got[1].Name != "JP" {
+	got, err := speedFinalists(candidates, map[string]int{"US1": 50, "US2": 50, "JP": 999}, 3)
+	if err != nil || len(got) != 3 || got[0].Name != "US1" || got[1].Name != "US2" || got[2].Name != "JP" {
 		t.Fatalf("got %v %v", got, err)
 	}
 	if candidates[1].Name != "US2" {
 		t.Fatal("mutated input")
+	}
+}
+
+func TestSpeedFinalistsUseFallbacksWhenEveryPingIsBlocked(t *testing.T) {
+	candidates := []api.LogicalServer{
+		{Name: "low-load", Load: 10},
+		{Name: "high-load", Load: 80},
+	}
+	got, err := speedFinalists(candidates, map[string]int{"low-load": 999, "high-load": 999}, 2)
+	if err != nil || len(got) != 2 || got[0].Name != "low-load" || got[1].Name != "high-load" {
+		t.Fatalf("all blocked probes should retain ordered fallbacks: got %v err=%v", got, err)
+	}
+}
+
+func TestSpeedFinalistsUsePingBeforeLoad(t *testing.T) {
+	candidates := []api.LogicalServer{
+		{Name: "low-ping", Load: 95},
+		{Name: "low-load", Load: 1},
+		{Name: "second-low-ping", Load: 80},
+	}
+	got, err := speedFinalists(candidates, map[string]int{"low-ping": 18, "low-load": 140, "second-low-ping": 32}, 2)
+	if err != nil || len(got) != 2 || got[0].Name != "low-ping" || got[1].Name != "second-low-ping" {
+		t.Fatalf("ping must choose the six-test shortlist before load: got %v err=%v", got, err)
+	}
+}
+
+func TestPremiumSpeedFinalistsPreferNearbyBrazilWithinPingWindow(t *testing.T) {
+	candidates := []api.LogicalServer{
+		{Name: "US-NY#1", ExitCountry: "US", Load: 1},
+		{Name: "PE#1", ExitCountry: "PE", Load: 90},
+		{Name: "JP#1", ExitCountry: "JP", Load: 1},
+	}
+	pings := map[string]int{"US-NY#1": 92, "PE#1": 95, "JP#1": 180}
+	got, err := speedFinalistsWithPreference(candidates, pings, 2, true)
+	if err != nil || len(got) != 2 || got[0].Name != "PE#1" || got[1].Name != "US-NY#1" {
+		t.Fatalf("nearby route should win a close RTT comparison: got %v err=%v", got, err)
+	}
+
+	// A clearly lower RTT remains the primary signal, even when the route is
+	// outside South America.
+	pings["US-NY#1"] = 70
+	got, err = speedFinalistsWithPreference(candidates, pings, 2, true)
+	if err != nil || len(got) != 2 || got[0].Name != "US-NY#1" {
+		t.Fatalf("nearby preference must not override a clearly lower RTT: got %v err=%v", got, err)
 	}
 }
 

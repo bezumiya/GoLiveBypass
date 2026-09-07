@@ -6,6 +6,8 @@ import os from 'os';
 import { app } from 'electron';
 import { spawn } from 'child_process';
 import * as logger from './logger';
+import { randomUUID } from 'crypto';
+import { StringDecoder } from 'string_decoder';
 import type { RouteProbeResult } from './route-proof';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +35,20 @@ export interface ProtonLoginResult {
   retryable?: boolean;
   captchaUrl?: string;
 }
+
+export type ProtonPlanStatus = 'free' | 'premium' | 'unknown';
+
+export interface ProtonPlanResult {
+  success: boolean;
+  status: ProtonPlanStatus;
+  maxTier?: number;
+  planName?: string;
+  planTitle?: string;
+  checkedAt?: string;
+  error?: string;
+}
+
+const GENERIC_PLAN_ERROR = 'Não foi possível confirmar o plano Proton.';
 
 export interface ProtonSettings {
   vpnMode: 'proton' | 'custom';
@@ -96,6 +112,48 @@ export interface RunConfgenOptions {
   args: string[];
   timeoutMs?: number;
   exePath?: string;
+  signal?: AbortSignal;
+  onProgress?: (progress: ProtonOptimizationProgress) => void;
+}
+
+// Increment when the route triage changes so a profile measured by an older
+// pipeline is not reused as if it had gone through the complete twelve-route
+// tunnel preflight.
+export const MEASUREMENT_CRITERION_VERSION = 5;
+
+export interface ProtonOptimizationProgress {
+  phase: 'ping' | 'preparing' | 'testing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
+  total: number;
+  tested: number;
+  succeeded: number;
+  server?: string;
+  downloadMbps?: number;
+  uploadMbps?: number;
+  pingMs?: number;
+  status?: 'testing' | 'success' | 'failed';
+}
+
+function abortError(): Error {
+  const error = new Error('Operação Proton cancelada.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function validProgress(value: any): ProtonOptimizationProgress | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const phases = ['ping', 'preparing', 'testing', 'finalizing', 'completed', 'failed', 'cancelled'];
+  if (!phases.includes(value.phase)) return undefined;
+  const total = Number.isFinite(value.total) ? Math.max(0, Math.floor(value.total)) : 0;
+  const tested = Number.isFinite(value.tested) ? Math.max(0, Math.min(total, Math.floor(value.tested))) : 0;
+  const succeeded = Number.isFinite(value.succeeded) ? Math.max(0, Math.min(tested, Math.floor(value.succeeded))) : 0;
+  const result: ProtonOptimizationProgress = { phase: value.phase, total, tested, succeeded };
+  for (const key of ['server', 'downloadMbps', 'uploadMbps', 'pingMs'] as const) {
+    if (key === 'server') {
+      if (typeof value[key] === 'string' && value[key].length <= 200) result[key] = value[key];
+    } else if (Number.isFinite(value[key]) && value[key] > 0) result[key] = value[key];
+  }
+  if (value.status === 'testing' || value.status === 'success' || value.status === 'failed') result.status = value.status;
+  return result;
 }
 
 export function parseConfgenJson(stdout: string): any | undefined {
@@ -113,6 +171,7 @@ export function parseConfgenJson(stdout: string): any | undefined {
 
 export function runConfgen(options: RunConfgenOptions): Promise<{ code: number | null; stdout: string; stderr: string; json?: any }> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) { reject(abortError()); return; }
     let exe: string;
     try {
       exe = options.exePath ? path.resolve(options.exePath) : findProtonConfgenExe();
@@ -129,32 +188,69 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let aborted = Boolean(options.signal?.aborted);
+    let terminationError: Error | undefined;
+    let stderrBuffer = '';
+    const stderrDecoder = new StringDecoder('utf8');
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const emitProgress = (chunk: string) => {
+      stderrBuffer += chunk;
+      if (stderrBuffer.length > 128 * 1024) stderrBuffer = stderrBuffer.slice(-128 * 1024);
+      const lines = stderrBuffer.split(/\r?\n/);
+      stderrBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const match = line.match(/^\s*GOLIVE_PROGRESS\s+(\{.*\})\s*$/);
+        if (!match) continue;
+        try { const progress = validProgress(JSON.parse(match[1])); if (progress && !terminationError) options.onProgress?.(progress); } catch {}
+      }
+    };
+    const finishReject = (error: Error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } };
+    const killAndWait = (error: Error) => {
+      if (settled || terminationError) return;
+      terminationError = error;
+      try { child.kill(); } catch { /* Close remains the cleanup boundary. */ }
+      killTimer = setTimeout(() => {
+        if (!settled) { try { child.kill('SIGKILL'); } catch {} }
+      }, 1000);
+      killTimer.unref?.();
+    };
 
     const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {}
-      reject(new Error(`Tempo limite excedido (${timeout / 1000}s) ao executar proton-confgen.`));
+      killAndWait(new Error(`Tempo limite excedido (${timeout / 1000}s) ao executar proton-confgen.`));
     }, timeout);
+
+    const abort = () => { aborted = true; killAndWait(abortError()); };
+    options.signal?.addEventListener('abort', abort, { once: true });
 
     child.stdout.on('data', (d: Buffer) => {
       stdout += d.toString();
     });
 
     child.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
+      const text = stderrDecoder.write(d); stderr += text; emitProgress(text);
     });
 
     child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
+      // Node emits close after spawn errors too. Never remove an executable
+      // or staged profile while its process may still be using it.
+      terminationError ??= err;
     });
 
     child.on('close', (code) => {
+      if (settled) return;
+      const tail = stderrDecoder.end();
+      stderr += tail;
+      if (stderrBuffer || tail) emitProgress(tail + '\n');
       clearTimeout(timer);
+      clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', abort);
+      if (terminationError || aborted) { finishReject(terminationError || abortError()); return; }
       const parsedJson = parseConfgenJson(stdout);
+      settled = true;
       resolve({ code, stdout, stderr, json: parsedJson });
     });
+    if (aborted) abort();
   });
 }
 
@@ -289,6 +385,76 @@ export async function checkProtonSession(
   };
 }
 
+/**
+ * Accept only the small, non-secret contract emitted by -check-plan. In
+ * particular, a missing/invalid MaxTier is never interpreted as Free.
+ */
+export function normalizeProtonPlanResult(value: any): ProtonPlanResult {
+  if (!value || typeof value !== 'object' || value.success !== true) {
+    return { success: false, status: 'unknown', error: GENERIC_PLAN_ERROR };
+  }
+
+  const maxTier = value.maxTier;
+  if (!Number.isInteger(maxTier) || maxTier < 0) {
+    return { success: false, status: 'unknown', error: GENERIC_PLAN_ERROR };
+  }
+
+  const result: ProtonPlanResult = {
+    success: true,
+    status: maxTier === 0 ? 'free' : 'premium',
+    maxTier,
+  };
+  for (const key of ['planName', 'planTitle'] as const) {
+    if (typeof value[key] === 'string' && value[key].trim() && value[key].length <= 120) {
+      result[key] = value[key].trim();
+    }
+  }
+  if (typeof value.checkedAt === 'string' && value.checkedAt.length <= 40) {
+    result.checkedAt = value.checkedAt;
+  }
+  return result;
+}
+
+/**
+ * Queries the account plan through the saved Proton session only. This does
+ * not request a certificate, select a server, or create a WireGuard tunnel.
+ */
+export async function getProtonPlan(installDir: string, username: string): Promise<ProtonPlanResult> {
+  if (!username || !username.trim()) {
+    return { success: false, status: 'unknown', error: 'Sessão Proton não encontrada.' };
+  }
+
+  ensureInstallDir(installDir);
+  const sessionFile = getProtonSessionFile(installDir);
+  let res;
+  try {
+    res = await runConfgen({
+      args: [
+        '-username',
+        username.trim(),
+        '-session-file',
+        sessionFile,
+        '-check-plan',
+        '-json',
+      ],
+      timeoutMs: 10000,
+    });
+  } catch {
+    return { success: false, status: 'unknown', error: GENERIC_PLAN_ERROR };
+  }
+
+  if (res.code !== 0 || !res.json) {
+    logger.warn('proton', 'falha ao consultar plano ProtonVPN', {
+      codigo_saida: res.code,
+      resposta_json: Boolean(res.json),
+    });
+    return { success: false, status: 'unknown', error: GENERIC_PLAN_ERROR };
+  }
+
+  const normalized = normalizeProtonPlanResult(res.json);
+  return { ...normalized, checkedAt: new Date().toISOString() };
+}
+
 export async function loginProton(
   installDir: string,
   username: string,
@@ -370,6 +536,8 @@ export async function generateOptimalProtonConfig(
     freeOnly?: boolean;
     autoPing?: boolean;
     speedTest?: boolean;
+    signal?: AbortSignal;
+    onProgress?: (progress: ProtonOptimizationProgress) => void;
   }
 ): Promise<{
   success: boolean;
@@ -391,6 +559,7 @@ export async function generateOptimalProtonConfig(
   const sessionFile = getProtonSessionFile(installDir);
   const outputFile = path.join(installDir, 'wireguard.conf');
   ensureInstallDir(installDir);
+  const stagingFile = path.join(installDir, `.wireguard.conf.${randomUUID()}.tmp`);
 
   const args = [
     '-username',
@@ -398,7 +567,7 @@ export async function generateOptimalProtonConfig(
     '-session-file',
     sessionFile,
     '-output',
-    outputFile,
+    stagingFile,
     '-json',
     '-ipv6',
     '-exclude-countries',
@@ -425,11 +594,28 @@ export async function generateOptimalProtonConfig(
 
   // Older WireSock filters may include the normal helper. A uniquely named
   // copy outside Discord directories also avoids nesting with those profiles.
-  const res = options.speedTest
-    ? await runIsolatedSpeedSelection(args)
-    : await runConfgen({ args, timeoutMs: 60000 });
+  let res;
+  try {
+    res = options.speedTest
+      ? await runIsolatedSpeedSelection(args, options.signal, options.onProgress)
+      : await runConfgen({ args, timeoutMs: 60000, signal: options.signal, onProgress: options.onProgress });
+  } catch (error) {
+    try { fs.rmSync(stagingFile, { force: true }); } catch {}
+    throw error;
+  }
 
-  if (res.json && res.json.success) {
+  const measuredResultValid = !options.speedTest ||
+    (finitePositive(res.json?.downloadMbps) && finitePositive(res.json?.uploadMbps));
+  if (res.code === 0 && res.json && res.json.success && measuredResultValid && fs.existsSync(stagingFile)) {
+    if (options.signal?.aborted) {
+      try { fs.rmSync(stagingFile, { force: true }); } catch {}
+      throw abortError();
+    }
+    try { fs.renameSync(stagingFile, outputFile); }
+    catch (error) {
+      try { fs.rmSync(stagingFile, { force: true }); } catch {}
+      throw error;
+    }
     logger.info('proton', 'servidor ótimo selecionado com sucesso', {
       server: res.json.server,
       ping: res.json.pingMs,
@@ -457,22 +643,46 @@ export async function generateOptimalProtonConfig(
     };
   }
 
-  const errMsg = res.json?.error || res.stderr || res.stdout || 'Falha ao selecionar e gerar configuração ProtonVPN.';
+  try { fs.rmSync(stagingFile, { force: true }); } catch {}
+  const errMsg = res.json?.error || (options.speedTest && res.json?.success
+    ? 'A medição não retornou velocidades válidas de download e upload.'
+    : undefined) || res.stderr || res.stdout || 'Falha ao selecionar e gerar configuração ProtonVPN.';
   logger.error('proton', 'erro ao gerar configuração ótima', { codigo_saida: res.code, resposta_json: Boolean(res.json) });
   return { success: false, error: errMsg };
 }
 
-async function runIsolatedSpeedSelection(args: string[]) {
+export async function runIsolatedSpeedSelection(args: string[], signal?: AbortSignal, onProgress?: (progress: ProtonOptimizationProgress) => void) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-speed-'));
   const exePath = path.join(tempDir, process.platform === 'win32' ? 'golive-speed-probe.exe' : 'golive-speed-probe');
   try {
     fs.copyFileSync(findProtonConfgenExe(), exePath);
     if (process.platform !== 'win32') fs.chmodSync(exePath, 0o700);
-    return await runConfgen({ args, exePath, timeoutMs: 150000 });
+    return await runConfgen({ args: [...args, '-progress-json'], exePath, timeoutMs: 210000, signal, onProgress });
   } finally {
     // Windows may need a moment to release the executable after timeout/exit.
     await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 12, retryDelay: 200 });
   }
+}
+
+function finitePositive(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+export function canReuseMeasuredProfile(
+  installDir: string,
+  previous: any,
+  filter: { username: string; country?: string; freeOnly?: boolean; autoPing?: boolean },
+): boolean {
+  if (!previous || previous.measurementVersion !== MEASUREMENT_CRITERION_VERSION) return false;
+  if (!protonIdentityMatches(String(previous.measurementUsername || ''), filter.username)) return false;
+  if (String(previous.measurementCountry || '') !== String(filter.country || '')) return false;
+  if (previous.measurementFreeOnly !== (filter.freeOnly !== false) || previous.measurementAutoPing !== (filter.autoPing !== false)) return false;
+  const server = previous.lastServer || previous;
+  const name = typeof previous.server === 'string' ? previous.server : server.name;
+  const endpoint = typeof previous.endpoint === 'string' ? previous.endpoint : server.endpoint;
+  if (typeof name !== 'string' || typeof endpoint !== 'string' || !name || !endpoint) return false;
+  if (!finitePositive(previous.downloadMbps ?? server.downloadMbps) || !finitePositive(previous.uploadMbps ?? server.uploadMbps) || !finitePositive(previous.pingMs ?? server.pingMs)) return false;
+  return matchesMeasuredProfile(installDir, name, endpoint);
 }
 
 export function matchesMeasuredProfile(installDir: string, server: string, endpoint: string): boolean {

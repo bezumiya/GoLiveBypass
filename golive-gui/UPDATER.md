@@ -17,7 +17,7 @@ O `publish` está configurado em `golive-gui/package.json`:
 ```json
 "publish": {
   "provider": "github",
-  "owner": "bezumiya",
+  "owner": "pdl-clay",
   "repo": "GoLiveBypass",
   "releaseType": "release"
 }

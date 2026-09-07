@@ -12,6 +12,7 @@
 #   ./golivebypass-standalone.sh --uninstall
 #   ./golivebypass-standalone.sh --status
 #   ./golivebypass-standalone.sh --preflight --json
+#   ./golivebypass-standalone.sh --ensure-dependencies  (GUI, instala so o necessario)
 #   ./golivebypass-standalone.sh --probe
 #   ./golivebypass-standalone.sh --refresh-route
 #   ./golivebypass-standalone.sh --check-update
@@ -61,6 +62,14 @@ WG_CONF_CLI=""
 NETNS_NAME="discord-vpn"
 WG_IF="wg-discord"
 NONINTERACTIVE=0
+
+# iproute2 imprime tanto "nome" quanto "nome (id: N)" em `ip netns list`.
+# Comparar o primeiro campo evita rejeitar o formato sem sufixo e tambem evita
+# confundir um namespace com nome apenas semelhante (ex.: discord-vpn-old).
+netns_exists() {
+    ip netns list 2>/dev/null | awk -v name="$NETNS_NAME" '$1 == name { found=1 } END { exit !found }'
+}
+
 # ---------------------------------------------------------------------------
 # Home do usuario real
 #
@@ -662,6 +671,7 @@ while [ $# -gt 0 ]; do
         --restore) MODE="restore" ;;
         --status) MODE="status" ;;
         --preflight) MODE="preflight" ;;
+        --ensure-dependencies) MODE="ensure-dependencies" ;;
         --probe) MODE="probe" ;;
         # Probes disparados por watchdog nunca podem abrir zenity/kdialog,
         # pkexec ou sudo interativo. Se nao houver autorizacao ja reutilizavel,
@@ -756,7 +766,14 @@ sudo_authenticate_once() {
     return 1
 }
 
-# Na GUI/AppImage nao existe fallback para sudo interativo ou pkexec por comando.
+# A GUI sem zenity/kdialog nao consegue apresentar a senha do sudo. Nesse caso,
+# quando o polkit esta disponivel, o proprio pkexec fornece o prompt grafico.
+# O teste fica separado da autenticacao para que cancelamento, recusa ou senha
+# incorreta no prompt do sudo nunca disparem um segundo prompt.
+sudo_has_gui_prompt() {
+    have zenity || have kdialog
+}
+
 # Quando a senha veio da janela grafica, `-k -S` a reapresenta silenciosamente a
 # cada chamada. Comandos comuns leem somente o arquivo de senha: isso impede que
 # um `cat` espere para sempre pelo stdin herdado do processo Electron destacado.
@@ -774,6 +791,12 @@ elevate() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
     elif have sudo; then
+        if [ "${NONINTERACTIVE:-0}" -ne 1 ] && [ "${SUDO_AUTH_READY:-0}" -ne 1 ] && [ "${GOLIVE_GUI:-0}" = "1" ] && ! sudo -n true 2>/dev/null && ! sudo_has_gui_prompt; then
+            if have pkexec; then
+                pkexec "$@"
+                return $?
+            fi
+        fi
         sudo_authenticate_once || return 1
         if [ "$SUDO_USE_CACHED_PASS" -eq 1 ]; then
             sudo_with_cached_password "$@"
@@ -995,12 +1018,12 @@ linux_preflight_json() {
 
     # command -> pacote Arch correspondente. O nome do comando e mantido no diagnostico
     # porque e o que o usuario ve no erro; o pacote torna o comando de reparo copiavel.
-    if ! have wg; then missing="wireguard-tools"; errors="wg (wireguard-tools)"; fi
-    if ! have ip; then
+    if ! { have wg && wg --version >/dev/null 2>&1; }; then missing="wireguard-tools"; errors="wg (wireguard-tools)"; fi
+    if ! { have ip && ip -V >/dev/null 2>&1; }; then
         [ -n "$missing" ] && missing="$missing "; missing="${missing}iproute2"
         [ -n "$errors" ] && errors="$errors,"; errors="${errors}ip (iproute2)"
     fi
-    if ! have curl; then
+    if ! { have curl && curl --version >/dev/null 2>&1; }; then
         [ -n "$missing" ] && missing="$missing "; missing="${missing}curl"
         [ -n "$errors" ] && errors="$errors,"; errors="${errors}curl"
     fi
@@ -1010,10 +1033,7 @@ linux_preflight_json() {
     if [ -e /sys/module/wireguard ] || { have modinfo && modinfo wireguard >/dev/null 2>&1; }; then kernel="available"; fi
 
     if [ -n "$missing" ]; then
-        case "$distro $id_like" in
-            *arch*) install="sudo pacman -S --needed wireguard-tools iproute2 curl" ;;
-            *) install="Instale $missing com o gerenciador de pacotes da sua distribuicao." ;;
-        esac
+        install="$(linux_dependency_install_command "$distro" "$id_like" "$missing" || true)"
     fi
 
     # discord_dirs ja foi executado pelo chamador e permanece a fonte de verdade para
@@ -1046,6 +1066,139 @@ linux_preflight_json() {
         "$(case "$distro $id_like" in *arch*) printf true ;; *) printf false ;; esac)" \
         "$missing_json" "$elevated" "$(if [ "$(id -u)" -eq 0 ]; then printf root; elif have sudo; then printf sudo; elif have pkexec; then printf pkexec; else printf none; fi)" \
         "$netns_ok" "$kernel" "$( [ "$found_count" -gt 0 ] && printf true || printf false )" "$found_count" "$(json_escape "$first_path")" "$error_json" "$(json_escape "$install")"
+}
+
+# Instala somente os comandos indispensaveis que faltam para o tunel WireGuard.
+# Este caminho e deliberadamente separado do preflight: --preflight continua
+# somente leitura e os watchdogs nunca podem chegar aqui.
+linux_dependency_plan() {
+    local distro="$1" id_like="$2" need_wg="$3" need_ip="$4" need_curl="$5" args="" ip_package="iproute2"
+    case "$distro $id_like" in
+        *arch*) args="pacman|-S --needed --noconfirm" ;;
+        *fedora*|*rhel*|*centos*) args="dnf|install -y"; ip_package="iproute" ;;
+        *opensuse*|*suse*) args="zypper|--non-interactive install --no-recommends" ;;
+        *debian*|*ubuntu*|*linuxmint*) args="apt-get|install -y --no-install-recommends" ;;
+        *) return 2 ;;
+    esac
+    [ "$need_wg" -eq 1 ] && args="$args wireguard-tools"
+    [ "$need_ip" -eq 1 ] && args="$args $ip_package"
+    [ "$need_curl" -eq 1 ] && args="$args curl"
+    printf '%s\n' "$args"
+}
+
+# Monta a sugestao exibida no preflight. Este texto e informativo: a GUI chama
+# --ensure-dependencies, que usa argv fixo e a mesma lista de pacotes. A mensagem
+# deixa claro o refresh de metadados exigido por cada familia sem propor upgrade
+# global ou um `pacman -Sy` parcial.
+linux_dependency_install_command() {
+    local distro="$1" id_like="$2" missing="$3" need_wg=0 need_ip=0 need_curl=0 item
+    local packages="" ip_package="iproute2" manager
+    case "$distro $id_like" in
+        *fedora*|*rhel*|*centos*) ip_package="iproute" ;;
+    esac
+    for item in $missing; do
+        case "$item" in
+            wireguard-tools|wg) need_wg=1 ;;
+            iproute2|ip|iproute) need_ip=1 ;;
+            curl) need_curl=1 ;;
+        esac
+    done
+    [ "$need_wg" -eq 1 ] && packages="$packages wireguard-tools"
+    [ "$need_ip" -eq 1 ] && packages="$packages $ip_package"
+    [ "$need_curl" -eq 1 ] && packages="$packages curl"
+    packages="${packages# }"
+    [ -n "$packages" ] || return 0
+    case "$distro $id_like" in
+        *arch*)
+            manager="pacman"
+            ;;
+        *fedora*|*rhel*|*centos*)
+            manager="dnf"
+            ;;
+        *opensuse*|*suse*)
+            manager="zypper"
+            ;;
+        *debian*|*ubuntu*|*linuxmint*)
+            manager="apt-get"
+            ;;
+        *)
+            printf 'Instale %s com o gerenciador de pacotes da sua distribuicao.' "$packages"
+            return 0
+            ;;
+    esac
+    case "$manager" in
+        pacman) printf 'sudo pacman -S --needed %s' "$packages" ;;
+        dnf) printf 'sudo dnf makecache --refresh && sudo dnf install -y --setopt=install_weak_deps=False %s' "$packages" ;;
+        zypper) printf 'sudo zypper refresh && sudo zypper --non-interactive install --no-recommends %s' "$packages" ;;
+        apt-get) printf 'sudo apt-get update && sudo apt-get install -y --no-install-recommends %s' "$packages" ;;
+    esac
+}
+
+linux_ensure_dependencies() {
+    local distro id_like missing="" package_manager="" package_args="" item need_wg=0 need_ip=0 need_curl=0 updates pacman_rc=0 pacman_out pacman_err
+    distro="$(os_field ID)"
+    id_like="$(os_field ID_LIKE)"
+    if ! { have wg && wg --version >/dev/null 2>&1; }; then need_wg=1; missing="$missing wireguard-tools"; fi
+    if ! { have ip && ip -V >/dev/null 2>&1; }; then need_ip=1; missing="$missing iproute2"; fi
+    if ! { have curl && curl --version >/dev/null 2>&1; }; then need_curl=1; missing="$missing curl"; fi
+    missing="${missing# }"
+    if [ -z "$missing" ]; then
+        ok "Dependencias Linux ja estao instaladas."
+        return 0
+    fi
+
+    if [ -e /run/ostree-booted ] || { have rpm-ostree && [ -d /sysroot/ostree ]; }; then
+        fail "Sistema imutavel OSTree detectado; instale dependencias com rpm-ostree em uma operacao propria e reinicie, sem upgrade global automatico."
+    fi
+
+    local plan
+    if ! plan="$(linux_dependency_plan "$distro" "$id_like" "$need_wg" "$need_ip" "$need_curl")"; then
+        fail "Dependencias ausentes ($missing); a distribuicao nao tem um instalador suportado automaticamente."
+    fi
+    package_manager="${plan%%|*}"
+    package_args="${plan#*|}"
+    case "$package_manager" in
+        pacman)
+            have pacman || fail "Dependencias ausentes ($missing), mas pacman nao foi encontrado."
+            pacman_out="$(mktemp)"; pacman_err="$(mktemp)"
+            if pacman -Qu >"$pacman_out" 2>"$pacman_err"; then :; else pacman_rc=$?; fi
+            updates="$(cat "$pacman_out")"
+            local pacman_message
+            pacman_message="$(cat "$pacman_err")"
+            rm -f "$pacman_out" "$pacman_err"
+            if [ "$pacman_rc" -ne 0 ] && { [ "$pacman_rc" -ne 1 ] || [ -n "$pacman_message" ] || [ -n "$updates" ]; }; then
+                fail "Nao foi possivel consultar atualizacoes pendentes do pacman; a base Arch nao sera alterada automaticamente."
+            fi
+            [ -z "$updates" ] || fail "Ha atualizacoes Arch pendentes; conclua a manutencao da base antes de instalar dependencias automaticamente."
+            ;;
+        dnf)
+            have dnf || fail "Dependencias ausentes ($missing), mas dnf nao foi encontrado."
+            step "Atualizando o cache do dnf"
+            elevate dnf makecache --refresh || fail "Falha ao atualizar o cache do dnf; verifique a rede e tente novamente."
+            ;;
+        zypper)
+            have zypper || fail "Dependencias ausentes ($missing), mas zypper nao foi encontrado."
+            step "Atualizando os repositorios do zypper"
+            elevate zypper refresh || fail "Falha ao atualizar os repositorios do zypper; verifique a rede e tente novamente."
+            ;;
+        apt-get)
+            have apt-get || fail "Dependencias ausentes ($missing), mas apt-get nao foi encontrado."
+            step "Atualizando os indices do apt"
+            elevate apt-get update || fail "Falha ao atualizar os indices do apt; verifique a rede e tente novamente."
+            ;;
+    esac
+
+    step "Instalando: $missing"
+    # Nao usa -Sy nem atualiza o sistema inteiro no Arch; dnf/zypper/apt recebem
+    # apenas os pacotes ausentes. O lock, cancelamento e falha de rede sobem como
+    # erro e impedem a ativacao seguinte.
+    # shellcheck disable=SC2086
+    elevate "$package_manager" $package_args || fail "Falha ao instalar dependencias Linux ($package_manager)."
+
+    { have wg && wg --version >/dev/null 2>&1; } || fail "A instalacao terminou, mas o comando 'wg' continua ausente ou inutilizavel."
+    { have ip && ip -V >/dev/null 2>&1; } || fail "A instalacao terminou, mas o comando 'ip' continua ausente ou inutilizavel."
+    { have curl && curl --version >/dev/null 2>&1; } || fail "A instalacao terminou, mas o comando 'curl' continua ausente ou inutilizavel."
+    ok "Dependencias Linux instaladas e verificadas."
 }
 
 # O id do flatpak a que um caminho pertence, ou nada se o caminho nao for de flatpak.
@@ -1160,7 +1313,7 @@ aviso_empacotado() {
 
 injection_state() {
     local resources="$1"
-    if ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if netns_exists; then
         printf 'nosso\n'
         return 0
     fi
@@ -1195,7 +1348,7 @@ asar_is_ours() {
 # motivo em vez de travar o --status inteiro -- os passos que de fato mudam algo (elevate) tem
 # a propria guarda em outro lugar.
 wg_stats_json() {
-    if ! ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if ! netns_exists; then
         printf '{"ok":false,"error":"namespace inativo"}'
         return 0
     fi
@@ -1718,7 +1871,7 @@ setup_wireguard_netns() {
     ensure_wireguard_conf
     local wg_file="$INSTALL_DIR/wireguard.conf"
 
-    if ! ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if ! netns_exists; then
         step "Criando namespace de rede '$NETNS_NAME'"
         elevate ip netns add "$NETNS_NAME"
     fi
@@ -1757,7 +1910,7 @@ setup_wireguard_netns() {
 refresh_wireguard_route() {
     have ip || fail "Comando 'ip' nao encontrado no sistema."
     have wg || fail "Comando 'wg' (wireguard-tools) nao encontrado."
-    if ! ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if ! netns_exists; then
         fail "Namespace WireGuard '$NETNS_NAME' nao esta ativo."
     fi
     if ! elevate ip netns exec "$NETNS_NAME" wg show "$WG_IF" >/dev/null 2>&1; then
@@ -1780,7 +1933,7 @@ refresh_wireguard_route() {
 # trafego real pelo peer e confirma DNS + TCP + TLS ate o host usado pelo gateway do Discord.
 wireguard_gateway_probe() {
     local code hs info
-    if ! ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if ! netns_exists; then
         printf '%s\n' '{"ready":false,"state":"tunnel_down","error":"namespace inativo"}'
         return 1
     fi
@@ -1819,7 +1972,7 @@ log_wireguard_readiness() {
 }
 
 teardown_wireguard_netns() {
-    if ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if netns_exists; then
         step "Removendo namespace de rede '$NETNS_NAME' e interface WireGuard"
         elevate ip netns del "$NETNS_NAME" 2>/dev/null || true
         elevate rm -rf "/etc/netns/$NETNS_NAME" 2>/dev/null || true
@@ -2104,6 +2257,10 @@ $FOUND
 EOF
 }
 
+[ "$MODE" = "ensure-dependencies" ] && {
+    linux_ensure_dependencies
+    exit 0
+}
 FOUND="$(discord_dirs)"
 [ "$MODE" = "preflight" ] && {
     if [ "$JSON" -eq 1 ]; then
@@ -2145,7 +2302,7 @@ if [ "$MODE" = "status" ]; then
         route_mode_disk="wireguard"
         tor_addr_disk=""
         netns_json=false
-        if ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then netns_json=true; fi
+        if netns_exists; then netns_json=true; fi
         printf '{"routeMode":"wireguard","torAddr":"","netns":%s,"wg":%s,"graphics":%s,"discords":[' "$netns_json" "$(wg_stats_json)" "$(graphics_json)"
         first=1
         printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav detect id; do
@@ -2174,7 +2331,7 @@ if [ "$MODE" = "status" ]; then
     printf '    IP Publico : %s (resto do PC navega por aqui)\n\n' "$sys_ip" >&2
 
     printf '  [Tunel WireGuard do Discord]\n' >&2
-    if ip netns list 2>/dev/null | grep -q "^$NETNS_NAME[[:space:]]"; then
+    if netns_exists; then
         printf '  [✓] Namespace "%s" ATIVO.\n' "$NETNS_NAME" >&2
         if [ "$(id -u)" -eq 0 ] || (have sudo && sudo -n true 2>/dev/null); then
             vpn_ip="$(sudo ip netns exec "$NETNS_NAME" curl -s -m 4 https://api.ipify.org 2>/dev/null || echo "N/A")"

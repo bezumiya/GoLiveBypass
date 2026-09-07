@@ -14,6 +14,7 @@ import {
   confirmSavedSessionIdentity,
   protonIdentityMatches,
   classifyProtonError,
+  normalizeProtonPlanResult,
 } from "../electron/proton";
 
 describe("ProtonVPN Integration & Sidecar", () => {
@@ -98,6 +99,22 @@ describe("ProtonVPN Integration & Sidecar", () => {
     expect(classifyProtonError("invalid password").code).toBe("INVALID_CREDENTIALS");
     expect(classifyProtonError("Tempo limite excedido").code).toBe("TIMEOUT");
     expect(classifyProtonError("spawn proton-confgen ENOENT").code).toBe("MISSING_EXECUTABLE");
+  });
+
+  it("classifica o plano somente quando MaxTier e valido", () => {
+    expect(normalizeProtonPlanResult({
+      success: true,
+      maxTier: 0,
+      planTitle: "Free",
+    })).toMatchObject({ success: true, status: "free", maxTier: 0 });
+    expect(normalizeProtonPlanResult({
+      success: true,
+      maxTier: 2,
+      planTitle: "VPN Plus",
+    })).toMatchObject({ success: true, status: "premium", maxTier: 2, planTitle: "VPN Plus" });
+    expect(normalizeProtonPlanResult({ success: true })).toMatchObject({ success: false, status: "unknown" });
+    expect(normalizeProtonPlanResult({ success: true, maxTier: -1 })).toMatchObject({ success: false, status: "unknown" });
+    expect(normalizeProtonPlanResult({ success: false, status: "free", maxTier: 0 })).toMatchObject({ success: false, status: "unknown" });
   });
 
   it("cria a pasta de dados antes de executar o login", async () => {

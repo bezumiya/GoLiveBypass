@@ -9,6 +9,7 @@ const (
 	AuthPath        = "/auth"
 	TwoFAPath       = "/auth/2fa"
 	RefreshPath     = "/auth/refresh"
+	VPNSettingsPath = "/vpn/v2"
 	CertificatePath = "/vpn/v1/certificate"
 	LogicalsPath    = "/vpn/v1/logicals"
 	// CaptchaPath serves the human verification widget for this API entry point.

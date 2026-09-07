@@ -4,6 +4,49 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [Unreleased]
+
+### Detecção do plano Proton
+
+- A GUI consulta o endpoint autenticado de configurações da Proton (`/vpn/v2`) usando somente a sessão salva e classifica `VPN.MaxTier` como Free, Premium ou desconhecido. A consulta não tenta conectar a um servidor pago, não cria túnel e não interrompe uma rota ativa.
+- O plano fica em cache por 15 minutos por conta, com coalescência de chamadas simultâneas e atualização manual. Free e respostas desconhecidas mantêm a seleção segura em tier 0; somente Premium confirmado permite tiers pagos. A sessão, o token, o IP e o endpoint não são exibidos.
+- O indicador do painel informa Free, o título do plano Premium ou “não confirmado”. Falhas de sessão/rede não viram falso Free e não impedem o login; o helper oferece `-check-plan -json` sem pedir senha. Standalone e plugin legado não usam essa integração.
+
+### Seleção inicial Proton por velocidade
+
+- O primeiro login e a abertura sem medição compatível passam a medir download e upload em até seis finalistas saudáveis. A triagem mede o ping de todas as rotas da amostra regional, ordena as doze menores latências, valida o túnel e o endpoint HTTPS das doze e começa a medição pelos seis primeiros saudáveis; uma falha de transferência avança para a próxima rota já aprovada. O ranking final escolhe a maior média harmônica de download/upload, usando ping apenas como desempate. A busca continua sendo uma amostra regional, não uma varredura de todos os servidores.
+- O painel Proton mostra skeleton, progresso por tentativa, servidores testados/restantes e Mbps medidos, com cancelamento e opções de tentar novamente ou continuar sem uma nova medição. Os resultados permanecem visíveis após reabrir o aplicativo.
+- Quando a otimização automática é iniciada na abertura do programa, o diálogo de progresso também fica visível durante toda a triagem e medição; ao terminar, ele é fechado sem deslocar o foco do usuário.
+- Em contas Premium no modo automático, rotas da América do Sul recebem preferência quando o ping medido fica até 12 ms acima de uma rota distante; uma diferença maior continua favorecendo o menor ping. A versão do critério foi incrementada para medir novamente perfis anteriores.
+- O loop real com uma sessão Premium percorreu três ciclos sul-americanos e nove ciclos globais (370 rotas regionais pingadas por ciclo no escopo global): preflight de 12 rotas e seis medições válidas foram preservados, e o melhor resultado ficou em 94 ms de RTT aquecido com `SV#36` e 54,4 Mbps de download. Depois desse ganho, cinco ciclos consecutivos não reduziram o RTT; a rodada foi encerrada sem alterar a qualidade mínima.
+- A lista de medição e o cartão da rota selecionada exibem os servidores no formato compacto `PAÍS#servidor` (por exemplo, `US#189`), mantendo o nome original internamente para seleção e cache.
+- Cada rota visível ganhou uma bandeira SVG correspondente ao país, com fallback compacto para novos códigos que a Proton venha a disponibilizar.
+- O diálogo de otimização acompanha a paleta da aplicação nos temas claro e escuro, usando superfícies, bordas e estados semânticos existentes no lugar do destaque roxo.
+- Medições são reutilizadas quando conta, filtros, versão do critério e perfil salvo correspondem. A versão do critério foi incrementada para exigir o novo preflight completo de doze rotas; resultados anteriores são medidos novamente uma vez. Não há expiração diária. Otimização manual mede novamente. Uma busca automática sem cache é adiada quando o bypass está ativo, para não interromper uma chamada.
+- Geração temporária e cancelamento aguardando o encerramento do helper preservam o perfil anterior em falhas. O login permanece válido se a medição falhar. A medição continua isolada por WireGuard/netstack, sem alterar a rota do host; diagnósticos de IP/HTTP do Discord continuam somente nos logs.
+- Mantidos até 4 MiB de download e 1 MiB de upload por candidato, 12 segundos por candidato, verificação rápida de até 6 segundos por rota (handshake e HTTPS zero-byte, até quatro túneis em paralelo, com retentativa serial das falhas transitórias), 180 segundos para a triagem e os testes e limite externo de 210 segundos. A velocidade começa pelos seis menores pings aprovados e usa as demais rotas já aprovadas como reserva até completar seis medições válidas. O resultado descreve o caminho até o endpoint de medição naquele momento, sem garantir a qualidade de cada transmissão.
+- Windows/Linux compartilham a seleção e a interface. O helper CLI oferece `-progress-json` em stderr e `-speed-test-trace` para acompanhar no terminal, sem mudar seu JSON final. Standalones e plugin legado não usam esse seletor Proton; não receberam uma tela nem mudanças de recuperação de rede.
+
+### Correções investigadas na fila de issues
+
+### Loop de estabilidade Linux
+
+- Adicionada a matriz descartável `tests/test-linux-matrix.sh` para Ubuntu 24.04/22.04, Debian 13/12, Fedora 43/42 e Arch atual, com caso histórico fixado em 2025-09-01. O runner valida o preflight JSON, detecta binários presentes mas inutilizáveis, audita bibliotecas antigas/AppImage e executa a prova de namespace sem alterar a rede do host.
+- O preflight agora sugere o comando correto por família: `apt-get update`/instalação mínima, `dnf makecache --refresh`, `zypper refresh` ou `pacman -S --needed`. A GUI continua instalando apenas dependências ausentes; não há upgrade global nem `pacman -Sy` parcial. DNF e Zypper atualizam somente os metadados antes da instalação.
+- Adicionado `tests/test-linux-vm.sh` para VMs libvirt preparadas, com preflight/reparo por SSH, conferência da rota default do host e hook opt-in para uma sessão Premium sem registrar credenciais. Distrobox fica como reprodução auxiliar, não como prova de isolamento.
+- O workflow `.github/workflows/linux-stability.yml` executa a matriz rápida e a auditoria do AppImage sem publicar artefatos. O procedimento, a política de cinco rodadas sem melhoria e as limitações estão em [loop de estabilidade Linux](docs/testing/linux-stability-loop.md).
+- Evidência local desta rodada: os sete containers sem snapshot e a prova de namespace passaram no modo rápido; Debian 12 passou uma instalação completa e a segunda chamada idempotente. O AppImage e o snapshot Arch não foram declarados cobertos quando seus artefatos/espelho não estavam disponíveis.
+
+- CAPTCHA Proton (#239): duas perdas de resposta e uma corrida de fechamento antecipado foram reproduzidas no Electron real. O preload sandbox CommonJS, a captura persistente e o tratamento imediato de preload ausente/erro e `close` corrigem esses caminhos. Linux e Windows passaram as suítes sintéticas, incluindo Full-Repeat e captura/lifecycle 13/13; o relato original com desafio oficial não foi provado. A #230 (`__dirname`, caso histórico distinto do `_dirname` relatado pelo usuário na 2.0.4) permanece separada.
+- Preflight de dependências Windows/Linux: a GUI distingue a SDK WireSock legada 1.4.7.1 da compatível 3.4.8.1, exige o par EXE/DLL e prepara `wg`/`ip`/`curl` Linux somente quando o preflight identifica um caso reparável. Linux teve validação de produto real em Debian rootless; Windows usa instalador oficial direto de hash fixado. Na VM, o runtime 1.4.7.1 interferiu no HTTPS fora do Discord em 3/3 ciclos com o formato atual; mudar somente a diretiva para o formato antigo preservou a rede nativa em 9/9 requisições. A GUI corrigida instalou a SDK 3.4.8.1 e passou três ciclos de ativação/desativação com isolamento por processo. A mudança para IP estrangeiro e os cenários de RTC/reboot ainda não foram comprovados. Detalhes: [relatório de preflight](docs/testing/2026-09-06-dependency-preflight.md).
+- Elevação Linux no standalone: preserva sudo cacheado, usa pkexec quando a GUI não tem zenity/kdialog para apresentar um prompt sudo e não faz fallback após cancelamento, recusa ou senha incorreta. Probes readonly continuam sem prompt. A suíte completa executada após o ajuste teve 243 testes aprovados em 29 arquivos, incluindo 6 novos casos; o reviewer independente marcou PASS. Build Linux local com `--publish never` regenerado e SHA do shell empacotado conferido contra a fonte. O build Windows terminou com exit 0 sem publicação e SHA `f57f629f0d145a880e206692b0bc269ce85550d48714ee3169190e320e93caf3`; a VM confirmou a instalação automática e os ciclos de isolamento descritos no relatório.
+- Linux: reconhece namespaces listados pelo `ip` tanto pelo nome puro quanto com NSID. A checagem anterior exigia um espaço após o nome, podendo tentar criar novamente `discord-vpn` e falhar com `File exists` (#228), além de omitir status e limpeza. GUI e standalone Linux compartilham a fonte corrigida. O outro sintoma da #228, `fopen: Permission denied`, ainda não tem causa confirmada.
+- CAPTCHA Proton: o cancelamento usa uma referência à sessão capturada antes da destruição da janela. Evita `Object has been destroyed` no cleanup e operação de login pendente. O defeito foi reproduzido ao fechar a janela; a relação com o relato de erro após CAPTCHA da #239 ainda requer confirmação do cenário específico.
+- Standalone Windows: a saída do `winget` vai ao console e não contamina o caminho retornado por `Ensure-WireSock` (#240). O entrypoint continua temporariamente desabilitado; esta correção da função não reativa nem publica o standalone.
+- Os caminhos de proxy/PAC, plugin e standalone Windows não usam a detecção de namespace Linux nem a janela CAPTCHA da GUI. Nenhuma alteração de recuperação/rede foi portada mecanicamente ao legado.
+
+Investigação, validação e limites por issue: [relatório da rodada](docs/testing/2026-09-05-global-issue-triage.md).
+
 ## [2.0.4] - 2026-09-05
 
 ### Perfil efetivo do WireSock

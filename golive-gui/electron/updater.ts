@@ -24,7 +24,11 @@ import { request } from "https";
 import { attemptReplace, cleanupOldExe, OLD_SUFFIX, spawnWindowsUpdateHelper } from "./updater-replace";
 import { escolherRelease, type Canal, type ReleaseCandidata } from "./updater-channel";
 
-const REPO = "bezumiya/GoLiveBypass";
+// O fork pdl-clay e o canal de distribuicao desta linha de testes/releases.
+// O updater e o publisher precisam apontar para o mesmo repositorio: consultar o
+// upstream aqui faria o app detectar uma versao que nunca conseguiria baixar do
+// fork (ou ignorar completamente a release beta criada para os testadores).
+const REPO = "pdl-clay/GoLiveBypass";
 // O artifactName leva a versao (GoLiveBypass-1.1.5.exe): o AppImageLauncher e
 // outros integradores nao sobrescrevem o arquivo quando o nome muda por versao.
 const EXE_PREFIX = "GoLiveBypass-";
@@ -53,13 +57,18 @@ function githubReleases(): Promise<ReleaseCandidata[]> {
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
+          console.warn(`[updater] consulta de releases falhou: HTTP ${res.statusCode ?? "desconhecido"}`);
           return resolve([]);
         }
         let body = "";
         res.setEncoding("utf8");
         res.on("data", (c) => {
           body += c;
-          if (body.length > 2_000_000) req.destroy();
+          if (body.length > 2_000_000) req.destroy(new Error("resposta de releases grande demais"));
+        });
+        res.on("error", (error) => {
+          console.warn("[updater] leitura das releases falhou:", error);
+          resolve([]);
         });
         res.on("end", () => {
           try {
@@ -73,7 +82,10 @@ function githubReleases(): Promise<ReleaseCandidata[]> {
                 digest?: string;
               }>;
               const asset = assets.find(
-                (a) => a.name.startsWith(EXE_PREFIX) && a.name.endsWith(".exe"),
+                (a) =>
+                  typeof a?.name === "string" &&
+                  a.name.startsWith(EXE_PREFIX) &&
+                  a.name.endsWith(".exe"),
               );
               if (!asset || !asset.browser_download_url) continue;
               releases.push({
@@ -90,8 +102,11 @@ function githubReleases(): Promise<ReleaseCandidata[]> {
         });
       },
     );
-    req.on("error", () => resolve([]));
-    req.setTimeout(15_000, () => req.destroy());
+    req.on("error", (error) => {
+      console.warn("[updater] consulta de releases falhou:", error);
+      resolve([]);
+    });
+    req.setTimeout(15_000, () => req.destroy(new Error("timeout consultando releases")));
     req.end();
   });
 }
@@ -105,17 +120,30 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
   return new Promise((resolve, reject) => {
     // So https: um redirecionamento para http rebaixaria a conexao em silencio, e o que vem por
     // ela substitui o executavel em uso.
-    if (!url.startsWith("https://")) {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return reject(new Error("URL de download invalida"));
+    }
+    if (parsedUrl.protocol !== "https:") {
       return reject(new Error("recusando destino que nao e https: " + url));
     }
 
     const req = request(url, { headers: { "User-Agent": "GoLiveBypass" } }, (res) => {
       const { statusCode, headers } = res;
+      res.on("error", reject);
 
       if (statusCode !== undefined && statusCode >= 300 && statusCode < 400 && headers.location) {
         res.resume();
         if (hops <= 0) return reject(new Error("redirecionamentos demais"));
-        return downloadFile(new URL(headers.location, url).toString(), dest, hops - 1).then(resolve, reject);
+        let redirecionada: string;
+        try {
+          redirecionada = new URL(headers.location, url).toString();
+        } catch {
+          return reject(new Error("redirecionamento de download invalido"));
+        }
+        return downloadFile(redirecionada, dest, hops - 1).then(resolve, reject);
       }
 
       if (statusCode !== 200) {
@@ -125,10 +153,9 @@ function downloadFile(url: string, dest: string, hops = MAX_REDIRECTS): Promise<
 
       const out = createWriteStream(dest);
       res.pipe(out);
-      out.on("finish", () => {
-        out.close();
-        resolve();
-      });
+      // Aguarda o fechamento do descritor, nao apenas o evento finish. Isso evita
+      // ler o arquivo enquanto o ultimo flush ainda esta terminando no Windows.
+      out.on("close", resolve);
       out.on("error", reject);
     });
     req.on("error", reject);
@@ -146,8 +173,8 @@ function digestMatches(file: string, digest: string | null): boolean {
     return false;
   }
 
-  const [algo, esperado] = digest.split(":");
-  if (algo === undefined || esperado === undefined) return false;
+  const [algo, esperado] = digest.split(":", 2);
+  if (algo !== "sha256" || esperado === undefined || !/^[0-9a-f]{64}$/i.test(esperado)) return false;
 
   try {
     const obtido = createHash(algo).update(readFileSync(file)).digest("hex");
@@ -194,10 +221,13 @@ async function updateWindowsPortable(url: string, digest: string | null): Promis
     return false;
   }
 
-  const downloaded = join(tmpdir(), "GoLiveBypass-update.exe");
+  // Um nome por processo evita reaproveitar um parcial deixado por outra cópia
+  // portable ou por uma tentativa interrompida.
+  const downloaded = join(tmpdir(), `GoLiveBypass-update-${process.pid}.exe`);
   try {
     await downloadFile(url, downloaded);
   } catch (error) {
+    await rm(downloaded, { force: true }).catch(() => {});
     console.error("[updater] download falhou:", error);
     return false;
   }
@@ -386,7 +416,7 @@ export async function checkWindowsUpdate(
         title: "Falha na atualização",
         message: `Não foi possível instalar o GoLiveBypass ${latest}.`,
         detail:
-          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
+          "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/pdl-clay/GoLiveBypass/releases.",
         buttons: ["OK"],
       };
       if (win) await dialog.showMessageBox(win, aviso);

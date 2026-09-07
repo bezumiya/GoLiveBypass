@@ -171,7 +171,7 @@ function Ensure-WireSock {
     Write-Step "Instalando WireSock VPN Client..."
     $installError = ''
     try {
-        & $winget.Source install --id 'NTKERNEL.WireSockVPNClientCLI' --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity
+        & $winget.Source install --id 'NTKERNEL.WireSockVPNClientCLI' --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "winget terminou com codigo $LASTEXITCODE" }
     } catch {
         $installError = $_.Exception.Message

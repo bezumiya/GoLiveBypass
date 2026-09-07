@@ -254,11 +254,15 @@
                 </div>
                 <button type="button" id="protonLogoutBtn" class="proton-logout-btn" title="Desconectar conta Proton">Sair</button>
               </div>
+              <div class="proton-plan-row">
+                <span id="protonPlanStatus" class="proton-plan-status proton-plan-status--loading" role="status" aria-live="polite">Plano: verificando…</span>
+                <button type="button" id="protonPlanRefreshBtn" class="proton-plan-refresh-btn">Verificando…</button>
+              </div>
 
               <div class="proton-step-label">2 <span>Escolha sua rota</span></div>
               <div class="proton-controls-row">
                 <select id="protonCountrySelect" class="proton-select">
-                  <option value="">Automático · todas as regiões</option>
+                  <option value="">Automático · menor ping, prioriza América do Sul</option>
                   <option value="US">Estados Unidos · recomendado</option>
                   <option value="NL">Holanda</option>
                   <option value="JP">Japão</option>
@@ -274,10 +278,14 @@
               </div>
 
               <div id="protonServerBadge" class="proton-server-badge">
-                <span class="proton-server-caption">Rota ativa</span>
-                <span class="proton-server-name" id="protonServerName">Servidor otimizado</span>
+                <span class="proton-server-caption">Rota selecionada</span>
+                <span class="proton-server-route">
+                  <span class="proton-country-flag proton-server-flag" id="protonServerFlag" aria-hidden="true"></span>
+                  <span class="proton-server-name" id="protonServerName">Servidor otimizado</span>
+                </span>
                 <span class="proton-ping-pill" id="protonServerPing">— ms</span>
                 <span class="proton-load-pill" id="protonServerLoad">—% carga</span>
+                <span class="proton-speed-pill" hidden>Velocidade não medida</span>
               </div>
             </div>
             <div class="proton-feedback" id="protonFeedback" hidden></div>
@@ -326,6 +334,36 @@
             </div>
           </section>
         </div>
+
+        <dialog
+          id="protonMeasurementDialog"
+          class="proton-measurement-dialog"
+          aria-modal="true"
+          aria-labelledby="protonMeasurementTitle"
+          aria-describedby="protonMeasurementCount"
+        >
+          <section id="protonMeasurement" class="proton-measurement" hidden aria-live="polite" aria-labelledby="protonMeasurementTitle">
+            <div class="proton-measurement__heading">
+              <div>
+                <span class="proton-server-caption">Otimização em andamento</span>
+                <h2 id="protonMeasurementTitle">Encontrando uma rota para sua transmissão</h2>
+              </div>
+              <button type="button" id="protonCancelMeasurementBtn" class="proton-measurement__cancel">Cancelar teste</button>
+            </div>
+            <div class="proton-measurement__progress-row">
+              <div class="proton-progress" role="progressbar" aria-label="Progresso da medição" aria-valuemin="0">
+                <span id="protonMeasurementProgress"></span>
+              </div>
+              <span id="protonMeasurementCount" class="proton-measurement__count">Preparando servidores…</span>
+            </div>
+            <div id="protonMeasurementList" class="proton-measurement__list"></div>
+            <div id="protonMeasurementActions" class="proton-measurement__actions" hidden>
+              <button type="button" id="protonRetryMeasurementBtn" class="proton-btn proton-btn--action">Tentar novamente</button>
+              <button type="button" id="protonContinueMeasurementBtn" class="proton-measurement__continue">Continuar sem medição</button>
+              <button type="button" id="protonCloseMeasurementBtn" class="proton-measurement__close" hidden>Fechar</button>
+            </div>
+          </section>
+        </dialog>
 
         <label class="switch-row" id="devModeRow">
           <input type="checkbox" id="devModeToggle" />

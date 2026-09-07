@@ -49,6 +49,7 @@ protonvpn-wg-confgen -username <username> -server <server-name> [options]
 protonvpn-wg-confgen -username <username> -list-servers [-countries <country-codes>]
 protonvpn-wg-confgen -username <username> -list-configs
 protonvpn-wg-confgen -username <username> -renew-serial <serial-number>
+protonvpn-wg-confgen -username <username> -check-plan -json
 ```
 
 `-username` is optional and prompted for when omitted, as is the password. Either `-countries` or `-server` is required when generating a configuration.
@@ -61,6 +62,8 @@ protonvpn-wg-confgen -username <username> -renew-serial <serial-number>
 | `-list-servers` | List available servers (country, name, city, load, score, tier, features) and exit. Honors `-countries`, `-secure-core`, `-p2p-only`, and `-free-only` |
 | `-list-configs` | List persistent configurations on the account (SerialNumber, DeviceName, expiry, key fingerprint) and exit |
 | `-renew-serial <serial>` | Renew a persistent certificate by SerialNumber, reusing its existing key. Extends it server-side and writes no `.conf` file |
+| `-check-plan` | Check the saved session's account plan through Proton's authenticated settings API and exit. Does not prompt for a password or open a tunnel |
+| `-speed-test` | Run the staged route comparison: ping every regional candidate, keep the twelve lowest-latency routes, validate all twelve tunnels, then measure up to six healthy routes |
 
 ### Server selection
 
@@ -99,6 +102,25 @@ protonvpn-wg-confgen -username <username> -renew-serial <serial-number>
 | `-hv-token` | | Human verification token replayed after solving a CAPTCHA out of band, see below |
 | `-api-url` | `https://vpn-api.proton.me` | ProtonVPN API base URL |
 
+### Staged speed selection and terminal trace
+
+The speed selector uses the same four stages as the GoLiveBypass dialog:
+
+1. Measure ping for every eligible route in the regional scan.
+2. Keep the twelve routes with the lowest measured ping (or deterministic fallbacks when ping is blocked).
+3. Open a temporary userspace WireGuard tunnel for **all twelve** routes and make a zero-byte HTTPS request (up to four handshakes overlap; failures are retried serially); the first six healthy routes remain in ping order.
+4. Measure download and upload sequentially on the six lowest-ping routes that passed the preflight. If a transfer fails, consume the next preflight-approved route until six valid measurements are available, then select the best result.
+
+When the account is Premium and no country is selected, South American exits are promoted when their measured RTT is within 12 ms of the fastest route. A route with a clearly lower RTT still wins; an explicit country selection is always respected.
+
+For a human-readable terminal run, add `-speed-test-trace`:
+
+```bash
+protonvpn-wg-confgen -username myusername -auto-ping -speed-test -speed-test-trace
+```
+
+The trace prints counters for ping, shortlist, tunnel preflight, and speed measurement to stderr. `-progress-json` remains available for machine-readable events; both outputs describe the same run.
+
 ## Examples
 
 ```bash
@@ -123,6 +145,9 @@ protonvpn-wg-confgen -username myusername -countries NL -moderate-nat
 
 # Free tier only, no session saved to disk
 protonvpn-wg-confgen -username myusername -countries US,NL -free-only -no-session
+
+# Inspect the same staged optimization flow used by the GUI
+protonvpn-wg-confgen -username myusername -auto-ping -speed-test -speed-test-trace
 ```
 
 Listing and maintenance:

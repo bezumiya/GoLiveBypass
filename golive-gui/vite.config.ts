@@ -34,6 +34,30 @@ export default defineConfig({
           options.reload()
         },
       },
+      {
+        entry: 'electron/proton-captcha-preload.ts',
+        vite: {
+          build: {
+            lib: {
+              formats: ['cjs'],
+            },
+            rolldownOptions: {
+              external: ['electron'],
+              output: {
+                format: 'cjs',
+                entryFileNames: 'proton-captcha-preload.cjs',
+              },
+            },
+            rollupOptions: {
+              external: ['electron'],
+              output: {
+                format: 'cjs',
+                entryFileNames: 'proton-captcha-preload.cjs',
+              },
+            },
+          },
+        },
+      },
     ]),
     renderer(),
   ],

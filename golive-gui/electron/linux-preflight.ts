@@ -17,6 +17,19 @@ export type LinuxPreflight = {
   installCommand: string;
 }
 
+/** Indica se a GUI pode tentar reparar as dependências ausentes. */
+export function linuxPreflightRepairable(preflight: LinuxPreflight): boolean {
+  const knownPackages = new Set(["wireguard-tools", "iproute2", "curl", "wg", "ip"]);
+  const missing = preflight.dependencies.missing;
+  const knownMissing = missing.length > 0 && missing.every((item) => knownPackages.has(item));
+  const iprouteMissing = missing.includes("iproute2") || missing.includes("ip");
+  return preflight.platform === "linux"
+    && knownMissing
+    && preflight.elevation.available
+    && (preflight.netns.available || iprouteMissing)
+    && preflight.discord.found;
+}
+
 export function parseLinuxPreflight(raw: string): LinuxPreflight {
   let value: unknown;
   try {

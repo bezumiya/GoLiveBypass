@@ -1,16 +1,4 @@
-export const PROTON_CAPTCHA_CAPTURE_SCRIPT = `
-new Promise((resolve) => {
-  const receive = (event) => {
-    const data = event && event.data;
-    const type = data && data.type;
-    const token = data && data.token;
-    if ((type === "pm_captcha" || type === "proton_captcha") && typeof token === "string") {
-      window.removeEventListener("message", receive);
-      resolve({ type, token, origin: typeof event.origin === "string" ? event.origin : "" });
-    }
-  };
-  window.addEventListener("message", receive);
-})`;
+export const PROTON_CAPTCHA_IPC_CHANNEL = "proton-captcha-response";
 
 export interface ProtonCaptchaChallenge {
   url: string;

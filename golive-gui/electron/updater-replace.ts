@@ -9,7 +9,7 @@
 // uso para ".old", renomeia o baixado para o lugar, e a sobra ".old" vira a sonda do
 // helper de relanço (e o boot seguinte a apaga se o helper nao conseguir).
 
-import { spawn } from "child_process";
+import { spawnSync } from "child_process";
 import { existsSync, rmSync, renameSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -115,13 +115,18 @@ export function spawnWindowsUpdateHelper(exePath: string, oldPath: string): bool
     const vbsPath = join(tmpdir(), `GoLiveBypass-update-${timestamp}.vbs`);
     writeFileSync(batPath, buildWindowsUpdateScript(), "utf8");
     writeFileSync(vbsPath, buildWindowsUpdateLauncher(batPath, exePath, oldPath, vbsPath), "utf16le");
-    spawn("wscript.exe", ["//b", "//nologo", vbsPath], {
-      detached: true,
+    // spawn() so emitiria o erro de comando ausente depois de retornar true. Nesse
+    // intervalo o chamador ja teria encerrado o app e nao haveria fallback. O
+    // wscript apenas agenda o .bat e termina, portanto a chamada sincronizada e
+    // curta e permite confirmar que o helper realmente foi criado.
+    const result = spawnSync("wscript.exe", ["//b", "//nologo", vbsPath], {
       stdio: "ignore",
       windowsHide: true,
-    })
-      .on("error", (error) => console.error("[updater] helper de relanco falhou:", error))
-      .unref();
+    });
+    if (result.error || result.status !== 0) {
+      console.error("[updater] helper de relanco falhou:", result.error ?? `exit ${result.status}`);
+      return false;
+    }
     return true;
   } catch (error) {
     console.error("[updater] erro ao agendar o relanco do Windows:", error);

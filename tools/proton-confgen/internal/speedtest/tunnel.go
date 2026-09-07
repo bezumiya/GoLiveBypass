@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"protonvpn-wg-confgen/internal/api"
@@ -39,11 +40,11 @@ func tunnelClientPort(privateKey string, peer api.PhysicalServer, port int) (*ht
 	if err != nil {
 		return nil, nil, err
 	}
-	public, err := keyHex(peer.X25519PublicKey)
+	public, err := keyHex(strings.TrimSpace(peer.X25519PublicKey))
 	if err != nil {
 		return nil, nil, err
 	}
-	ip, err := netip.ParseAddr(peer.EntryIP)
+	ip, err := netip.ParseAddr(strings.TrimSpace(peer.EntryIP))
 	if err != nil {
 		return nil, nil, errors.New("IP de entrada inválido")
 	}

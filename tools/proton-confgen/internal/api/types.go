@@ -126,6 +126,31 @@ type LogicalsResponse struct {
 	LogicalServers []LogicalServer `json:"LogicalServers"`
 }
 
+// VPNPlanInfo is the account-level plan information returned by GET /vpn/v2.
+// MaxTier is a pointer on purpose: a missing field is not equivalent to the
+// Free tier and must be treated as an indeterminate response by callers.
+type VPNPlanInfo struct {
+	PlanName  string `json:"PlanName"`
+	PlanTitle string `json:"PlanTitle"`
+	MaxTier   *int   `json:"MaxTier"`
+}
+
+// VPNSettingsResponse is the subset of GET /vpn/v2 needed to classify the
+// account. The endpoint includes many other settings which are intentionally
+// ignored here.
+type VPNSettingsResponse struct {
+	Code  int          `json:"Code"`
+	Error string       `json:"Error,omitempty"`
+	VPN   *VPNPlanInfo `json:"VPN"`
+}
+
+// AccountPlan is the validated, minimal plan value used by the CLI and GUI.
+type AccountPlan struct {
+	MaxTier   int
+	PlanName  string
+	PlanTitle string
+}
+
 // Server feature constants
 const (
 	FeatureSecureCore = 1

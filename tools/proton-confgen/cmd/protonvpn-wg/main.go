@@ -99,6 +99,54 @@ func run() error {
 		return nil
 	}
 
+	if cfg.CheckPlan {
+		session, _, sessionErr := authClient.CheckSession()
+		if sessionErr != nil || session == nil {
+			if cfg.JSONOutput {
+				data, _ := json.Marshal(map[string]any{
+					"success": false,
+					"status":  "unknown",
+					"error":   "Sessão Proton expirada ou não encontrada.",
+				})
+				fmt.Println(string(data))
+				return nil
+			}
+			return fmt.Errorf("sessão Proton expirada ou não encontrada")
+		}
+
+		plan, planErr := vpn.NewClient(cfg, session).GetAccountPlan()
+		if planErr != nil || plan == nil {
+			if cfg.JSONOutput {
+				data, _ := json.Marshal(map[string]any{
+					"success": false,
+					"status":  "unknown",
+					"error":   "Não foi possível confirmar o plano Proton.",
+				})
+				fmt.Println(string(data))
+				return nil
+			}
+			return fmt.Errorf("não foi possível confirmar o plano Proton")
+		}
+
+		status := "premium"
+		if plan.MaxTier == api.TierFree {
+			status = "free"
+		}
+		if cfg.JSONOutput {
+			data, _ := json.Marshal(map[string]any{
+				"success":   true,
+				"status":    status,
+				"maxTier":   plan.MaxTier,
+				"planName":  plan.PlanName,
+				"planTitle": plan.PlanTitle,
+			})
+			fmt.Println(string(data))
+			return nil
+		}
+		fmt.Printf("Plano Proton: %s (MaxTier %d)\n", status, plan.MaxTier)
+		return nil
+	}
+
 	session, err := authClient.Authenticate()
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
@@ -167,21 +215,79 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 	var pingMs int
 	var measured *speedtest.Result
 	if cfg.SpeedTest {
+		const (
+			pingTriageLimit       = 12
+			speedMeasurementLimit = 6
+			preflightConcurrency  = 4
+		)
+		progress := speedtest.ProgressFunc(nil)
+		if cfg.ProgressJSON || cfg.SpeedTestTrace {
+			progress = func(event speedtest.ProgressEvent) {
+				if cfg.ProgressJSON {
+					data, _ := json.Marshal(event)
+					fmt.Fprintf(os.Stderr, "GOLIVE_PROGRESS %s\n", data)
+				}
+				if cfg.SpeedTestTrace {
+					printSpeedTrace(event)
+				}
+			}
+			progress(speedtest.ProgressEvent{Phase: "ping", Total: 0, Tested: 0, Succeeded: 0})
+		}
 		var candidates []api.LogicalServer
+		var pings map[string]int
 		if cfg.ServerName != "" {
-			requested, _, selectErr := selector.SelectBestWithPing(servers)
+			requested, requestedPing, selectErr := selector.SelectBestWithPing(servers)
 			if selectErr != nil {
 				return selectErr
 			}
 			candidates = []api.LogicalServer{*requested}
+			pings = map[string]int{requested.Name: requestedPing}
+			if progress != nil {
+				status := "failed"
+				if requestedPing > 0 && requestedPing < 999 {
+					status = "success"
+				}
+				progress(speedtest.ProgressEvent{Phase: "ping", Total: 1, Tested: 1, Succeeded: boolInt(status == "success"), Server: requested.Name, PingMs: requestedPing, Status: status})
+			}
+			if cfg.SpeedTestTrace {
+				printSpeedShortlist(candidates, pings)
+			}
 		} else {
-			candidates, err = selector.SpeedCandidates(servers, 6)
+			// Stage 1 probes every normalized regional route. Stage 2 then keeps
+			// only the twelve lowest-latency routes for tunnel preflight.
+			var pingProgress vpn.PingProgressFunc
+			if progress != nil {
+				pingProgress = func(event vpn.PingProgressEvent) {
+					progress(speedtest.ProgressEvent{
+						Phase:     "ping",
+						Total:     event.Total,
+						Tested:    event.Tested,
+						Succeeded: event.Succeeded,
+						Server:    event.Server,
+						PingMs:    event.PingMs,
+						ElapsedMs: event.ElapsedMs,
+						Status:    event.Status,
+					})
+				}
+			}
+			candidates, pings, err = selector.SpeedCandidatesWithProgress(servers, pingTriageLimit, pingProgress)
 			if err != nil {
 				return err
 			}
+			if cfg.SpeedTestTrace {
+				printSpeedShortlist(candidates, pings)
+			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
-		result, measureErr := speedtest.Select(ctx, cfg.ClientPrivateKey, candidates)
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		healthyCandidates, probeErr := speedtest.FilterReachableCandidatesConcurrent(ctx, cfg.ClientPrivateKey, candidates, pingTriageLimit, preflightConcurrency, progress)
+		if probeErr != nil {
+			cancel()
+			return probeErr
+		}
+		primaryCount := min(speedMeasurementLimit, len(healthyCandidates))
+		primary := healthyCandidates[:primaryCount]
+		fallbacks := healthyCandidates[primaryCount:]
+		result, measureErr := speedtest.SelectWithProgressFallbacks(ctx, cfg.ClientPrivateKey, primary, fallbacks, speedMeasurementLimit, progress)
 		cancel()
 		if measureErr != nil {
 			return measureErr
@@ -216,9 +322,9 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 			server.Load, server.Score, pingInfo, len(server.Servers), featureStr)
 	}
 
-	physicalServer := vpn.GetBestPhysicalServer(server)
+	physicalServer := vpn.GetBestWireGuardPhysicalServer(server)
 	if physicalServer == nil {
-		return fmt.Errorf("no physical servers available")
+		return fmt.Errorf("no usable WireGuard physical servers available")
 	}
 
 	generator := wireguard.NewConfigGenerator(cfg)
@@ -266,6 +372,77 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 		mode, time.Unix(vpnInfo.ExpirationTime, 0).UTC().Format("2006-01-02 15:04 UTC"))
 	fmt.Printf("\nSuccessfully generated config for %s\n", server.ExitCountry)
 	return nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// printSpeedTrace is the human-readable counterpart of the JSON progress
+// stream consumed by the GUI. It deliberately reports only route names and
+// measurements, never keys, tokens, or tunnel internals.
+func printSpeedTrace(event speedtest.ProgressEvent) {
+	switch event.Phase {
+	case "ping":
+		if event.Server == "" {
+			if event.Total == 0 {
+				fmt.Fprintln(os.Stderr, "[1/4] Ping: iniciando a triagem das rotas")
+			}
+			return
+		}
+		ping := "sem resposta"
+		if event.Status == "success" && event.PingMs > 0 && event.PingMs < 999 {
+			ping = fmt.Sprintf("%d ms", event.PingMs)
+		}
+		fmt.Fprintf(os.Stderr, "[1/4] Ping %d/%d · %s · %s%s\n", event.Tested, event.Total, event.Server, ping, formatElapsed(event.ElapsedMs))
+	case "preparing":
+		if event.Server == "" {
+			fmt.Fprintf(os.Stderr, "[3/4] Túnel: validando %d rotas selecionadas\n", event.Total)
+			return
+		}
+		status := "descartada"
+		if event.Status == "success" {
+			status = "respondeu"
+		}
+		fmt.Fprintf(os.Stderr, "[3/4] Túnel %d/%d · %s · %s%s\n", event.Tested, event.Total, event.Server, status, formatElapsed(event.ElapsedMs))
+	case "testing":
+		if event.Server == "" {
+			fmt.Fprintf(os.Stderr, "[4/4] Velocidade: medindo %d rotas saudáveis\n", event.Total)
+			return
+		}
+		switch event.Status {
+		case "testing":
+			fmt.Fprintf(os.Stderr, "[4/4] Velocidade %d/%d · %s · medindo\n", event.Tested, event.Total, event.Server)
+		case "success":
+			fmt.Fprintf(os.Stderr, "[4/4] Velocidade %d/%d · %s · ↓ %.1f Mbps · ↑ %.1f Mbps%s\n", event.Tested, event.Total, event.Server, event.DownloadMbps, event.UploadMbps, formatElapsed(event.ElapsedMs))
+		default:
+			fmt.Fprintf(os.Stderr, "[4/4] Velocidade %d/%d · %s · falhou%s\n", event.Tested, event.Total, event.Server, formatElapsed(event.ElapsedMs))
+		}
+	case "finalizing":
+		fmt.Fprintf(os.Stderr, "[4/4] Velocidade concluída: %d/%d medições válidas\n", event.Succeeded, event.Total)
+	}
+}
+
+func formatElapsed(elapsedMs int) string {
+	if elapsedMs <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" · %d ms", elapsedMs)
+}
+
+func printSpeedShortlist(candidates []api.LogicalServer, pings map[string]int) {
+	fmt.Fprintf(os.Stderr, "[2/4] Triagem de ping concluída: %d rotas selecionadas para o túnel\n", len(candidates))
+	for index, candidate := range candidates {
+		ping := pings[candidate.Name]
+		if ping > 0 && ping < 999 {
+			fmt.Fprintf(os.Stderr, "       %2d. %s · %d ms\n", index+1, candidate.Name, ping)
+		} else {
+			fmt.Fprintf(os.Stderr, "       %2d. %s · ping sem resposta\n", index+1, candidate.Name)
+		}
+	}
 }
 
 func listServers(cfg *config.Config, vpnClient *vpn.Client) error {

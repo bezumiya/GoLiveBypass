@@ -22,15 +22,16 @@ import * as logger from "./logger";
 import * as discordscan from "./discordscan";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
-import { getWireSockConnectionStatus, getWireSockAdapterTraffic, hasWireSockAdapterTrafficIncrease, isWireSockActive, startWireSockService, recoverWireSockNetwork, type WireSockConnectionStatus } from "./wiresock";
+import { ensureWireSockInstalled, getWireSockConnectionStatus, getWireSockAdapterTraffic, hasWireSockAdapterTrafficIncrease, isWireSockActive, startWireSockService, recoverWireSockNetwork, type WireSockConnectionStatus } from "./wiresock";
 import { classifyWgReadiness, getWgStats, iniciarWgStatsWatchdog, pararWgStatsWatchdog, type WgTunnelStats } from "./wgstats";
 import { validateWgConfContent } from "./wg-validator";
 import * as proton from "./proton";
+import { ProtonOptimizationCoordinator } from "./proton-optimization";
 import { findWindowsDiscordInstall } from "./windows-discord-install";
 import { waitForProcessRunning, waitForProcessStopped, type ProcessProbeState } from "./wait-condition";
-import { parseLinuxPreflight, linuxPreflightMessage, type LinuxPreflight } from "./linux-preflight";
+import { linuxPreflightRepairable, parseLinuxPreflight, linuxPreflightMessage, type LinuxPreflight } from "./linux-preflight";
 import { classifyLinuxHealth } from "./linux-health";
-import { PROTON_CAPTCHA_CAPTURE_SCRIPT, isAllowedProtonCaptchaNavigation, parseProtonCaptchaChallenge, validateProtonCaptchaResponse } from "./proton-captcha";
+import { PROTON_CAPTCHA_IPC_CHANNEL, isAllowedProtonCaptchaNavigation, parseProtonCaptchaChallenge, validateProtonCaptchaResponse } from "./proton-captcha";
 import { observeRouteDiagnostic } from "./route-diagnostics";
 import { decideRouteProof, maskedIP, type RouteProbeResult } from "./route-proof";
 import { prepareDiscordScopeProbes } from "./discord-scope-proof";
@@ -47,6 +48,76 @@ const MAIN_WINDOW_WIDTH = 720;
 // global. Uma fila unica impede que clique, bandeja e troca Proton criem duas
 // instancias ou que uma validacao aprove a rede enquanto outra ainda a desmonta.
 let wireSockLifecycleQueue: Promise<void> = Promise.resolve();
+const protonOptimizations = new ProtonOptimizationCoordinator();
+const PROTON_PLAN_CACHE_TTL_MS = 15 * 60 * 1000;
+type ProtonPlanCacheEntry = {
+  username: string;
+  generation: number;
+  expiresAt: number;
+  result?: proton.ProtonPlanResult;
+  inFlight?: Promise<proton.ProtonPlanResult>;
+};
+let protonPlanCache: ProtonPlanCacheEntry | null = null;
+let protonPlanGeneration = 0;
+
+function normalizeProtonPlanUsername(username: string): string {
+  return username.trim().toLocaleLowerCase("en-US");
+}
+
+function unknownProtonPlan(error = "Não foi possível confirmar o plano Proton."): proton.ProtonPlanResult {
+  return { success: false, status: "unknown", error };
+}
+
+function invalidateProtonPlanCache() {
+  protonPlanGeneration += 1;
+  protonPlanCache = null;
+}
+
+function applyProtonPlanPreference(username: string, result: proton.ProtonPlanResult) {
+  const settings = readSharedSettings() as any;
+  if (normalizeProtonPlanUsername(String(settings.protonUsername || "")) !== username) return;
+  const freeOnly = result.status !== "premium";
+  if (settings.protonFreeOnly !== freeOnly) {
+    updateSharedSettings({ protonFreeOnly: freeOnly });
+  }
+}
+
+async function resolveProtonPlan(username: string, force = false): Promise<proton.ProtonPlanResult> {
+  const normalized = normalizeProtonPlanUsername(username);
+  if (!normalized) return unknownProtonPlan("Sessão Proton não encontrada.");
+
+  const now = Date.now();
+  const cached = protonPlanCache;
+  if (cached && cached.username === normalized && cached.generation === protonPlanGeneration && cached.inFlight) {
+    return cached.inFlight;
+  }
+  if (!force && cached && cached.username === normalized && cached.generation === protonPlanGeneration && cached.result && cached.expiresAt > now) {
+    applyProtonPlanPreference(normalized, cached.result);
+    return cached.result;
+  }
+
+  const generation = protonPlanGeneration;
+  const entry: ProtonPlanCacheEntry = {
+    username: normalized,
+    generation,
+    expiresAt: 0,
+  };
+  const request = proton.getProtonPlan(settingsDir(), username).catch(() => unknownProtonPlan());
+  entry.inFlight = request;
+  protonPlanCache = entry;
+  const result = await request;
+
+  // A login/logout/account switch can make this response stale while the API
+  // request is in flight. Never publish its tier into the new account's state.
+  if (generation !== protonPlanGeneration || protonPlanCache !== entry) {
+    return unknownProtonPlan("A sessão Proton mudou durante a verificação.");
+  }
+  entry.result = result;
+  entry.expiresAt = Date.now() + PROTON_PLAN_CACHE_TTL_MS;
+  entry.inFlight = undefined;
+  applyProtonPlanPreference(normalized, result);
+  return result;
+}
 type WindowsRouteState = "inactive" | "preparing" | "active" | "failed" | "recovery_required";
 let windowsRouteStarted = false;
 let windowsRouteState: WindowsRouteState = "inactive";
@@ -507,8 +578,6 @@ async function toggleFromTray() {
       const status = await linuxStatus();
       if (status === "ACTIVE") await withWireSockLifecycle("desativar-linux-bandeja", () => linuxDeactivate(() => {}));
       else await withWireSockLifecycle("ativar-linux-bandeja", async () => {
-        const preflight = await linuxPreflight();
-        if (!preflight.ok) throw new Error(`${linuxPreflightMessage(preflight)}${preflight.installCommand ? ` Execute: ${preflight.installCommand}` : ""}`);
         return linuxActivate(() => {});
       });
     } else if (getStatus() === "ACTIVE") {
@@ -713,6 +782,8 @@ app.on("before-quit", (event) => {
   // executado e precisa do lock de instancia unica. Sem esta saida, o app
   // antigo fica vivo e o novo morre — o "fecha mas nao abre".
   //
+  protonOptimizations.invalidate();
+  invalidateProtonPlanCache();
   if (isQuittingForUpdate()) return;
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
   // Discord na saida, desfazendo o bypass que a instancia principal acabou de aplicar.
@@ -1402,16 +1473,7 @@ async function executarAtivacao(event: any) {
       throw new Error("Faça login com sua conta ProtonVPN (ou selecione 'Arquivo .conf Customizado') antes de ativar.");
     }
     if (!fs.existsSync(wgConf)) {
-      const gen = await proton.generateOptimalProtonConfig(settingsDir(), {
-        username,
-        countries: (s.protonCountry as string) || undefined,
-        freeOnly: s.protonFreeOnly !== false,
-        autoPing: s.protonAutoPing !== false,
-      });
-      if (!gen.success) {
-        throw new Error(gen.error || "Falha ao selecionar servidor ProtonVPN. Verifique sua conexão e credenciais.");
-      }
-      updateSharedSettings({ protonLastServer: gen });
+      await withWireSockLifecycle("perfil-proton-ativacao", ensureProtonActivationProfile);
     }
   } else {
     if (!fs.existsSync(wgConf)) {
@@ -1419,7 +1481,24 @@ async function executarAtivacao(event: any) {
     }
   }
 
+  const windowsWasActive = IS_WINDOWS && getStatus() === "ACTIVE";
   const windowsGeneration = IS_WINDOWS ? beginWindowsRouteOperation() : 0;
+  if (IS_WINDOWS) {
+    try {
+      await withWireSockLifecycle("preflight-wiresock", async () => {
+        await ensureWireSockInstalled((message) => {
+          event?.sender?.send?.("bypass-log", `${message}\n`);
+        });
+        assertWindowsRouteGeneration(windowsGeneration);
+      });
+    } catch (error) {
+      if (windowsGeneration === windowsRouteGeneration) {
+        windowsRouteState = windowsWasActive ? "active" : "inactive";
+        refreshWindowStatus();
+      }
+      throw error;
+    }
+  }
   try {
     await killDiscord();
   } catch (error) {
@@ -1935,8 +2014,36 @@ function tailErroScript(stderr: string, linhas: number): string {
   return uteis.slice(-linhas).join("\n");
 }
 
+// Explicit activation remains available after a skipped/failed benchmark. Call only
+// inside the lifecycle queue, so this fallback cannot overwrite an ongoing selection.
+async function ensureProtonActivationProfile() {
+  const s = readSharedSettings() as any;
+  if ((s.vpnMode || "proton") !== "proton" || fs.existsSync(path.join(settingsDir(), "wireguard.conf"))) return;
+  const username = typeof s.protonUsername === "string" ? s.protonUsername : "";
+  if (!username) throw new Error("Faça login com sua conta ProtonVPN antes de ativar.");
+  const plan = await resolveProtonPlan(username);
+  const gen = await proton.generateOptimalProtonConfig(settingsDir(), {
+    username,
+    countries: s.protonCountry || undefined,
+    // Unknown/failed plan checks stay Free-safe. Only an explicit Premium
+    // response can expose paid tiers to the selector.
+    freeOnly: plan.status !== "premium",
+    autoPing: s.protonAutoPing !== false,
+    speedTest: false,
+  });
+  if (!gen.success) throw new Error(gen.error || "Não foi possível preparar uma rota ProtonVPN.");
+  updateSharedSettings({ protonLastServer: { ...gen, measurementUsername: username.trim().toLowerCase() } });
+}
+
 async function linuxActivate(onChunk: (c: string) => void) {
-  const preflight = await linuxPreflight();
+  let preflight = await linuxPreflight();
+  if (!preflight.ok && linuxPreflightRepairable(preflight)) {
+    const ensured = await runScript(["--ensure-dependencies"], onChunk);
+    if (ensured.code !== 0) {
+      throw new Error(tailErroScript(ensured.stderr, 4) || "Não foi possível preparar as dependências do Linux.");
+    }
+    preflight = await linuxPreflight(true);
+  }
   if (!preflight.ok) {
     const comando = preflight.installCommand ? ` Execute: ${preflight.installCommand}` : "";
     throw new Error(`${linuxPreflightMessage(preflight)}${comando}`);
@@ -1948,6 +2055,7 @@ async function linuxActivate(onChunk: (c: string) => void) {
     logger.info("linux", "ativacao duplicada ignorada; tunel ja ativo");
     return;
   }
+  await ensureProtonActivationProfile();
   updateSharedSettings({ routeMode: "wireguard" });
   const { code, stderr } = await runScript(["--yes", "--cleanup-legacy"], onChunk);
   if (code !== 0) {
@@ -2080,7 +2188,8 @@ ipcMain.handle("get-status", async () => {
 });
 ipcMain.handle("get-linux-preflight", async () => {
   if (!IS_LINUX) return null;
-  return linuxPreflight();
+  const preflight = await linuxPreflight();
+  return { ...preflight, repairable: linuxPreflightRepairable(preflight) };
 });
 ipcMain.handle("get-startup", () => getStartup());
 ipcMain.handle("set-startup", (_event, enabled: unknown) => {
@@ -2915,6 +3024,7 @@ function recoverProtonUsername(): string {
   if (!saved) return "";
   const current = readSharedSettings().protonUsername;
   if (current !== saved) {
+    invalidateProtonPlanCache();
     if (updateSharedSettings({ protonUsername: saved })) {
       logger.info("proton", "identidade recuperada da sessao persistida");
     } else {
@@ -3323,7 +3433,7 @@ ipcMain.handle("test-proxy", async (_event, proxyRaw: unknown) => {
 });
 
 // ------------------------------------------------------------------ diagnostico / modo dev
-const ISSUE_REPO = "bezumiya/GoLiveBypass";
+const ISSUE_REPO = "pdl-clay/GoLiveBypass";
 // A label "gui" precisa existir no repo (criar uma vez no GitHub). Sem ela o form ainda abre;
 // a API de reports usa ISSUE_LABELS no servidor.
 const ISSUE_LABELS = ["bug", "gui"];
@@ -3743,17 +3853,15 @@ async function importWgConfFromPath(chosen: string) {
       };
     }
 
-    const targetDir = settingsDir();
-    fs.mkdirSync(targetDir, { recursive: true });
-    const targetFile = path.join(targetDir, "wireguard.conf");
-    fs.copyFileSync(chosen, targetFile);
-    updateSharedSettings({ wgConfOriginalName: originalName });
-    return {
-      success: true,
-      fileName: originalName,
-      path: targetFile,
-      validation,
-    };
+    protonOptimizations.invalidate();
+    return await withWireSockLifecycle("importar-perfil", async () => {
+      const targetDir = settingsDir();
+      fs.mkdirSync(targetDir, { recursive: true });
+      const targetFile = path.join(targetDir, "wireguard.conf");
+      fs.writeFileSync(targetFile, content, { mode: 0o600 });
+      updateSharedSettings({ wgConfOriginalName: originalName, protonLastServer: undefined });
+      return { success: true, fileName: originalName, path: targetFile, validation };
+    });
   } catch (err) {
     return {
       success: false,
@@ -3876,8 +3984,12 @@ ipcMain.handle("get-vpn-mode", async () => {
 });
 
 ipcMain.handle("set-vpn-mode", async (_event, mode: "proton" | "custom") => {
-  updateSharedSettings({ vpnMode: mode });
-  return mode;
+  if (mode !== "proton" && mode !== "custom") throw new Error("Modo VPN inválido.");
+  protonOptimizations.invalidate();
+  return withWireSockLifecycle("modo-vpn", async () => {
+    updateSharedSettings({ vpnMode: mode });
+    return mode;
+  });
 });
 
 ipcMain.handle("get-proton-settings", async () => {
@@ -3893,14 +4005,24 @@ ipcMain.handle("get-proton-settings", async () => {
   };
 });
 
+ipcMain.handle("get-proton-plan", async (_event, options?: { force?: boolean }) => {
+  const s = readSharedSettings() as any;
+  const username = recoverProtonUsername() || (s.protonUsername as string) || "";
+  if (!username) return unknownProtonPlan("Sessão Proton não encontrada.");
+  return resolveProtonPlan(username, options?.force === true);
+});
+
 ipcMain.handle("set-proton-settings", async (_event, settings: any) => {
-  updateSharedSettings({
-    protonUsername: settings.username,
-    protonCountry: settings.country,
-    protonFreeOnly: settings.freeOnly !== false,
-    protonAutoPing: settings.autoPing !== false,
+  protonOptimizations.invalidate();
+  if (typeof settings?.username === "string") invalidateProtonPlanCache();
+  return withWireSockLifecycle("preferencias-proton", async () => {
+    const patch: Record<string, unknown> = {};
+    if (typeof settings?.username === "string") patch.protonUsername = settings.username;
+    if (typeof settings?.country === "string") patch.protonCountry = settings.country;
+    if (typeof settings?.freeOnly === "boolean") patch.protonFreeOnly = settings.freeOnly;
+    if (typeof settings?.autoPing === "boolean") patch.protonAutoPing = settings.autoPing;
+    return updateSharedSettings(patch);
   });
-  return true;
 });
 
 ipcMain.handle("check-proton-session", async (_event, username?: string) => {
@@ -3918,6 +4040,10 @@ async function solveProtonCaptcha(rawUrl: string, parent: BrowserWindow | null):
   const challenge = parseProtonCaptchaChallenge(rawUrl);
   if (!challenge) {
     return { ok: false, code: "CAPTCHA_INVALID", message: "O Proton forneceu um endereço de CAPTCHA inválido." };
+  }
+  const captchaPreloadPath = path.join(__dirname, "proton-captcha-preload.cjs");
+  if (!fs.existsSync(captchaPreloadPath)) {
+    return { ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível preparar a captura do CAPTCHA." };
   }
 
   return new Promise((resolve) => {
@@ -3941,13 +4067,18 @@ async function solveProtonCaptcha(rawUrl: string, parent: BrowserWindow | null):
         devTools: false,
         safeDialogs: true,
         spellcheck: false,
+        preload: captchaPreloadPath,
         partition: `proton-captcha-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       },
     });
 
     const preventDownload = (event: Electron.Event) => event.preventDefault();
-    captchaWindow.webContents.session.on("will-download", preventDownload);
-    captchaWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    // O webContents.session deixa de ser acessível depois que a janela e destruída.
+    // Guarde a referencia enquanto o webContents ainda esta vivo para que o caminho
+    // de cancelamento/fechamento consiga remover o listener sem deixar a Promise pendente.
+    const captchaSession = captchaWindow.webContents.session;
+    captchaSession.on("will-download", preventDownload);
+    captchaSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     captchaWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     captchaWindow.webContents.on("will-attach-webview", (event) => event.preventDefault());
     const guardNavigation = (event: Electron.Event, targetUrl: string) => {
@@ -3956,50 +4087,51 @@ async function solveProtonCaptcha(rawUrl: string, parent: BrowserWindow | null):
     captchaWindow.webContents.on("will-navigate", guardNavigation);
     captchaWindow.webContents.on("will-redirect", guardNavigation);
 
-    const timeout = setTimeout(() => {
-      finish({ ok: false, code: "CAPTCHA_INVALID", message: "A verificação expirou. Inicie o login novamente." });
-    }, 120_000);
-
     const finish = (result: ProtonCaptchaSolveResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      captchaWindow.webContents.session.removeListener("will-download", preventDownload);
+      ipcMain.removeListener(PROTON_CAPTCHA_IPC_CHANNEL, onCaptchaResponse);
+      captchaSession.removeListener("will-download", preventDownload);
       resolve(result);
       if (!captchaWindow.isDestroyed()) captchaWindow.destroy();
     };
 
-    const armCapture = () => {
-      if (settled || captchaWindow.isDestroyed()) return;
-      void captchaWindow.webContents.executeJavaScript(PROTON_CAPTCHA_CAPTURE_SCRIPT, true)
-        .then((message: { token?: unknown } | undefined) => {
-          if (settled) return;
-          if (validateProtonCaptchaResponse(message?.token, challenge.challenge)) {
-            finish({ ok: true, token: message.token });
-            return;
-          }
-          invalidMessages += 1;
-          if (invalidMessages >= 10) {
-            finish({ ok: false, code: "CAPTCHA_INVALID", message: "O CAPTCHA retornou uma resposta inválida. Tente novamente." });
-          } else {
-            setTimeout(armCapture, 50);
-          }
-        })
-        .catch(() => {
-          if (!settled && !captchaWindow.isDestroyed()) {
-            finish({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível capturar a resposta do CAPTCHA." });
-          }
-        });
+    const onCaptchaResponse = (event: Electron.IpcMainEvent, message: { type?: unknown; token?: unknown }) => {
+      if (settled || event.sender !== captchaWindow.webContents) return;
+      if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) return;
+      if (!isAllowedProtonCaptchaNavigation(event.senderFrame.url, challenge)) return;
+      if (message?.type !== "pm_captcha" && message?.type !== "proton_captcha") return;
+      if (validateProtonCaptchaResponse(message?.token, challenge.challenge)) {
+        finish({ ok: true, token: message.token });
+        return;
+      }
+      invalidMessages += 1;
+      if (invalidMessages >= 10) {
+        finish({ ok: false, code: "CAPTCHA_INVALID", message: "O CAPTCHA retornou uma resposta inválida. Tente novamente." });
+      }
     };
+    ipcMain.on(PROTON_CAPTCHA_IPC_CHANNEL, onCaptchaResponse);
+
+    const timeout = setTimeout(() => {
+      finish({ ok: false, code: "CAPTCHA_INVALID", message: "A verificação expirou. Inicie o login novamente." });
+    }, 120_000);
 
     captchaWindow.once("ready-to-show", () => {
       if (!settled) captchaWindow.show();
     });
-    captchaWindow.webContents.on("did-finish-load", armCapture);
     captchaWindow.webContents.on("did-fail-load", (_event, errorCode, _description, _url, isMainFrame) => {
       if (isMainFrame && errorCode !== -3) {
         finish({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível carregar o CAPTCHA oficial da Proton." });
       }
+    });
+    captchaWindow.webContents.on("preload-error", (_event, preloadPath, _error) => {
+      if (preloadPath === captchaPreloadPath) {
+        finish({ ok: false, code: "CAPTCHA_INVALID", message: "Não foi possível preparar a captura do CAPTCHA." });
+      }
+    });
+    captchaWindow.once("close", () => {
+      if (!settled) finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Verificação cancelada. Nenhuma credencial foi alterada." });
     });
     captchaWindow.on("closed", () => {
       if (!settled) finish({ ok: false, code: "CAPTCHA_CANCELLED", message: "Verificação cancelada. Nenhuma credencial foi alterada." });
@@ -4012,6 +4144,9 @@ async function solveProtonCaptcha(rawUrl: string, parent: BrowserWindow | null):
 
 let protonLoginGeneration = 0;
 ipcMain.handle("login-proton", async (event, payload: { username: string; password?: string; twoFactorCode?: string }) => {
+  protonOptimizations.invalidate();
+  invalidateProtonPlanCache();
+  await withWireSockLifecycle("aguardar-selecao-login", async () => {});
   const generation = ++protonLoginGeneration;
   let res = await proton.loginProton(settingsDir(), payload.username, payload.password, payload.twoFactorCode);
   for (let attempt = 1; !res.success && (res.code === "CAPTCHA_REQUIRED" || res.code === "CAPTCHA_INVALID") && attempt <= 3; attempt++) {
@@ -4028,11 +4163,15 @@ ipcMain.handle("login-proton", async (event, payload: { username: string; passwo
     event.sender.send("proton-captcha-status", "verifying");
     res = await proton.loginProton(settingsDir(), payload.username, payload.password, payload.twoFactorCode, solved.token);
   }
+  if (generation !== protonLoginGeneration) {
+    return { success: false, code: "CAPTCHA_CANCELLED", retryable: true, message: "Esta tentativa de login foi substituída por outra." };
+  }
   if (res.success) {
     const authenticatedUsername = res.username || payload.username.trim();
     if (!updateSharedSettings({ protonUsername: authenticatedUsername })) {
       return { success: false, code: "SESSION_PERSISTENCE", retryable: false, message: "Login concluído, mas não foi possível salvar a conta neste computador.", error: "Verifique as permissões da pasta de dados e tente novamente." };
     }
+    invalidateProtonPlanCache();
     // O sidecar só retorna sucesso depois de gravar SessionStore.Save. A
     // releitura imediata do Electron era redundante e, no Windows, podia ver o
     // arquivo tarde e transformar um login válido em erro. Confirme em segundo
@@ -4052,175 +4191,246 @@ ipcMain.handle("login-proton", async (event, payload: { username: string; passwo
         logger.warn("proton", "falha na confirmacao diagnostica da sessao", { erro: String((error as Error)?.message ?? error) });
       }
     });
-    const s = readSharedSettings() as any;
-    try {
-      const gen = await proton.generateOptimalProtonConfig(settingsDir(), {
-        username: authenticatedUsername,
-        countries: (s.protonCountry as string) || undefined,
-        freeOnly: s.protonFreeOnly !== false,
-        autoPing: s.protonAutoPing !== false,
-      });
-      if (gen.success) {
-        updateSharedSettings({ protonLastServer: gen });
-      }
-    } catch (err) {
-      logger.warn("proton", "erro ao gerar rota inicial apos login", { erro: String(err) });
-    }
+
   }
   return res;
 });
 
 ipcMain.handle("logout-proton", async () => {
-  const sessionFile = proton.getProtonSessionFile(settingsDir());
-  try {
-    if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
-  } catch {}
-  updateSharedSettings({ protonLastServer: undefined });
-  return true;
+  protonLoginGeneration++;
+  protonOptimizations.invalidate();
+  invalidateProtonPlanCache();
+  return withWireSockLifecycle("logout-proton", async () => {
+    const sessionFile = proton.getProtonSessionFile(settingsDir());
+    try {
+      if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
+    } catch {}
+    updateSharedSettings({ protonLastServer: undefined });
+    return true;
+  });
 });
 
-ipcMain.handle("optimize-proton-route", async (_event, options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean }) => {
-  // A geração também precisa ser serializada: ela grava o mesmo perfil
-  // compartilhado que a instalação lê. Se duas requisições concorrentes
-  // gerarem antes da fila, a primeira resposta pode acabar aplicando o perfil
-  // da segunda e declarar sucesso para a rota errada.
-  return withWireSockLifecycle("troca-rota-proton", async () => {
-    const s = readSharedSettings() as any;
-    const username = (s.protonUsername as string) || "";
-    if (!username) {
-      return { success: false, error: "Nenhuma conta ProtonVPN conectada." };
-    }
+type ProtonOptimizationOptions = {
+  country?: string;
+  freeOnly?: boolean;
+  autoPing?: boolean;
+  speedTest?: boolean;
+  reuseMeasured?: boolean;
+  requestId?: string;
+};
 
-    const country = options?.country !== undefined ? options.country : ((s.protonCountry as string) || "");
-    const freeOnly = options?.freeOnly !== undefined ? options.freeOnly : (s.protonFreeOnly !== false);
-    const autoPing = options?.autoPing !== undefined ? options.autoPing : (s.protonAutoPing !== false);
+ipcMain.handle("cancel-proton-optimization", (event, requestId: string) =>
+  protonOptimizations.cancel(requestId, event.sender.id));
 
-    // Startup reuses the measured profile; explicit optimization always retests.
-    const previous = s.protonLastServer;
-    if (options?.speedTest === false && previous?.downloadMbps > 0 &&
-        (!country || country === previous.country) && freeOnly === (previous.tier === "Free") &&
-        proton.matchesMeasuredProfile(settingsDir(), previous.server, previous.endpoint)) {
-      return { ...previous, success: true };
-    }
-
-    const status = IS_LINUX ? await linuxStatus() : getStatus();
-    const speedTest = options?.speedTest !== false;
-    // Do not benchmark beside the active Proton tunnel: limited accounts can
-    // evict the existing connection, and current traffic biases measurements.
-    if (speedTest) {
-      try {
-        if (IS_WINDOWS && (status === "ACTIVE" || isWireSockActive())) {
-          beginWindowsRouteOperation();
-          stopWindowsRouteWatchdog();
-          pararWgStatsWatchdog();
-          windowsRouteStarted = false;
-          await killDiscord();
-          const recovery = await recoverWireSockNetwork();
-          if (!recovery.ok) {
-            windowsRouteState = "recovery_required";
-            throw new Error("a rota anterior não encerrou com segurança. Use Restaurar internet.");
-          }
-          windowsRouteState = "inactive";
-          refreshWindowStatus();
-        } else if (IS_LINUX && status === "ACTIVE") {
-          await linuxDeactivate(() => {});
-        }
-      } catch (error) {
-        return { success: false, error: `Não foi possível preparar a medição: ${String((error as Error)?.message ?? error)}` };
-      }
-    }
-
-    let gen: Awaited<ReturnType<typeof proton.generateOptimalProtonConfig>>;
+ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizationOptions) => {
+  if (isMac) return { success: false, error: "O bypass por WireGuard ainda não está disponível no macOS." };
+  const requestId = typeof options?.requestId === "string" && options.requestId.length <= 128
+    ? options.requestId : `proton-${Date.now()}`;
+  const operation = protonOptimizations.start(requestId, event.sender.id);
+  if (!operation) return { success: false, error: "Já existe uma seleção de rota em andamento." };
+  const signal = operation.controller.signal;
+  let lastProgress: proton.ProtonOptimizationProgress = { phase: "ping", total: 0, tested: 0, succeeded: 0 };
+  const sendProgress = (progress: proton.ProtonOptimizationProgress) => {
+    if (!protonOptimizations.isCurrent(operation) || event.sender.isDestroyed()) return;
+    lastProgress = progress;
     try {
-      gen = await proton.generateOptimalProtonConfig(settingsDir(), {
-        username,
-        countries: country || undefined,
-        freeOnly,
-        autoPing,
-        speedTest,
-      });
-    } catch (error) {
-      gen = { success: false, error: String((error as Error)?.message ?? error) };
+      event.sender.send("proton-optimization-progress", { ...progress, requestId });
+    } catch {
+      // A janela pode ser destruída entre isDestroyed() e send(); o helper
+      // continua sendo cancelado pelo listener de destroyed abaixo.
     }
+  };
+  const senderDestroyed = () => protonOptimizations.cancel(requestId, event.sender.id);
+  event.sender.once("destroyed", senderDestroyed);
+  return withWireSockLifecycle("troca-rota-proton", async () => {
+      if (signal.aborted || quitting) return { success: false, cancelled: true };
+      const s = readSharedSettings() as any;
+      const username = (s.protonUsername as string) || "";
+      if (!username) {
+        return { success: false, error: "Nenhuma conta ProtonVPN conectada." };
+      }
 
-    if (!gen.success) {
-      const paused = speedTest && status === "ACTIVE";
-      return { ...gen, error: `${gen.error || "Falha ao medir servidores."}${paused ? " O Discord permanece fechado; ative o Bypass para retomar a configuração salva." : ""}` };
-    }
+      const country = options?.country !== undefined ? options.country : ((s.protonCountry as string) || "");
+      const plan = await resolveProtonPlan(username);
+      if (signal.aborted || quitting) return { success: false, cancelled: true };
+      // Plan classification is authoritative for selection. Unknown remains
+      // Free-safe; the IPC option is retained for compatibility with older
+      // renderers but cannot accidentally unlock paid tiers.
+      const freeOnly = plan.status !== "premium";
+      const autoPing = options?.autoPing !== undefined ? options.autoPing : (s.protonAutoPing !== false);
 
-    updateSharedSettings({
-      protonCountry: country,
-      protonFreeOnly: freeOnly,
-      protonAutoPing: autoPing,
-      protonLastServer: gen,
-    });
+      // Reuse is explicit: startup and login measure only when no compatible result exists.
+      const previous = s.protonLastServer;
+      const speedTest = options?.speedTest !== false;
+      if (options?.reuseMeasured && proton.canReuseMeasuredProfile(settingsDir(), previous, { username, country, freeOnly, autoPing })) {
+        return { ...previous, success: true };
+      }
+      // Continuing without a new test keeps only a profile matching the current
+      // account and filters; otherwise the helper performs its normal quick
+      // selection and writes a fresh profile.
+      if (!speedTest && proton.canReuseMeasuredProfile(settingsDir(), previous, { username, country, freeOnly, autoPing })) {
+        return { ...previous, success: true };
+      }
 
-    if (status === "ACTIVE") {
-      logger.info("proton", "bypass ativo, iniciando nova rota antes de reabrir o Discord", { server: gen.server });
-      try {
-        if (IS_WINDOWS) {
-          const installs = getDiscordInstalls();
-          const generation = beginWindowsRouteOperation();
-          stopWindowsRouteWatchdog();
-          await killDiscord();
-          const recovery = await recoverWireSockNetwork();
-          if (!recovery.ok) {
-            throw new Error(`a rota anterior não encerrou com segurança (${recovery.residual.join(", ") || recovery.error || "rede não validada"}). Use "Restaurar internet".`);
-          }
-          assertWindowsRouteGeneration(generation);
-          await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs));
-          assertWindowsRouteGeneration(generation);
-          if (!(await startDiscordAndConfirm(installs, "troca-rota-proton"))) {
-            throw new Error("a nova rota foi comprovada, mas o Discord não iniciou");
-          }
-          windowsRouteStarted = true;
-          windowsRouteState = "active";
-          startWindowsRouteWatchdog();
-          iniciarWgStatsWatchdog(wgStatsProvider);
-          void waitForWindowsWgReady().then((result) => {
-            logger.info("wiresock", "prontidao.diagnostica", result);
-          }).catch((error) => {
-            logger.warn("wiresock", "prontidao.diagnostica.erro", { erro: String((error as Error)?.message ?? error) });
-          });
-        } else if (IS_LINUX) {
-          const preflight = await linuxPreflight();
-          if (!preflight.ok) {
-            throw new Error(`${linuxPreflightMessage(preflight)}${preflight.installCommand ? ` Execute: ${preflight.installCommand}` : ""}`);
-          }
-          if (speedTest) {
-            await linuxActivate(() => {});
-          } else {
-            const refreshed = await runScript(["--refresh-route"]);
-            if (refreshed.code !== 0) {
-              throw new Error(tailErroScript(refreshed.stderr, 4) || "falha ao atualizar a rota WireGuard");
-            }
-          }
-        }
-      } catch (err) {
-        if (IS_WINDOWS) {
-          windowsRouteStarted = false;
-          windowsRouteState = "failed";
-          stopWindowsRouteWatchdog();
-          try {
+      const status = IS_LINUX ? await linuxStatus() : getStatus();
+      if (signal.aborted) return { success: false, cancelled: true };
+      if (options?.reuseMeasured && (status === "ACTIVE" || (IS_WINDOWS && isWireSockActive()))) {
+        return { success: true, deferred: true };
+      }
+      sendProgress({ phase: "ping", total: 0, tested: 0, succeeded: 0 });
+      // Do not benchmark beside the active Proton tunnel: limited accounts can
+      // evict the existing connection, and current traffic biases measurements.
+      if (speedTest) {
+        try {
+          if (IS_WINDOWS && (status === "ACTIVE" || isWireSockActive())) {
+            beginWindowsRouteOperation();
+            stopWindowsRouteWatchdog();
+            pararWgStatsWatchdog();
+            windowsRouteStarted = false;
             await killDiscord();
             const recovery = await recoverWireSockNetwork();
             if (!recovery.ok) {
               windowsRouteState = "recovery_required";
-              logger.error("wiresock", "troca-rota.rollback.incompleto", { residual: recovery.residual.join(", "), erro: recovery.error || "" });
-            } else {
-              windowsRouteState = "inactive";
+              throw new Error("a rota anterior não encerrou com segurança. Use Restaurar internet.");
             }
-          } catch (rollbackError) {
-            windowsRouteState = "recovery_required";
-            logger.error("wiresock", "troca-rota.rollback.falhou", { erro: String((rollbackError as Error)?.message ?? rollbackError) });
+            windowsRouteState = "inactive";
+            refreshWindowStatus();
+          } else if (IS_LINUX && status === "ACTIVE") {
+            await linuxDeactivate(() => {});
           }
+        } catch (error) {
+          return { success: false, error: `Não foi possível preparar a medição: ${String((error as Error)?.message ?? error)}` };
         }
-        const error = String((err as Error)?.message ?? err);
-        logger.error("proton", "nova rota nao ficou pronta", { server: gen.server, erro: error });
-        return { ...gen, success: false, error: `A rota ${gen.server ?? "selecionada"} nao ficou pronta: ${error}` };
       }
+
+      if (signal.aborted) return { success: false, cancelled: true };
+      let gen: Awaited<ReturnType<typeof proton.generateOptimalProtonConfig>>;
+      try {
+        gen = await proton.generateOptimalProtonConfig(settingsDir(), {
+          username,
+          countries: country || undefined,
+          freeOnly,
+          autoPing,
+          speedTest,
+          signal,
+          onProgress: sendProgress,
+        });
+      } catch (error) {
+        gen = { success: false, error: String((error as Error)?.message ?? error) };
+      }
+
+      if (signal.aborted) return { success: false, cancelled: true, error: status === "ACTIVE"
+        ? "Teste cancelado. Ative o Bypass para retomar a configuração salva."
+        : "Teste cancelado. A configuração anterior foi preservada." };
+      if (!gen.success) {
+        const paused = speedTest && status === "ACTIVE";
+        return { ...gen, error: `${gen.error || "Falha ao medir servidores."}${paused ? " O Discord permanece fechado; ative o Bypass para retomar a configuração salva." : ""}` };
+      }
+
+      // The staged profile has been committed. Finish applying it before another lifecycle operation.
+      operation.cancellable = false;
+      const saved = {
+        ...gen,
+        measurementUsername: username.trim().toLowerCase(),
+        ...(speedTest ? {
+          measurementVersion: proton.MEASUREMENT_CRITERION_VERSION,
+          measuredAt: new Date().toISOString(),
+          measurementCountry: country,
+          measurementFreeOnly: freeOnly,
+          measurementAutoPing: autoPing,
+        } : {}),
+      };
+      if (!updateSharedSettings({
+        protonCountry: country,
+        protonFreeOnly: freeOnly,
+        protonAutoPing: autoPing,
+        protonLastServer: saved,
+      })) {
+        return { success: false, error: "A rota foi preparada, mas não foi possível salvar suas preferências." };
+      }
+
+      if (status === "ACTIVE") {
+        logger.info("proton", "bypass ativo, iniciando nova rota antes de reabrir o Discord", { server: gen.server });
+        try {
+          if (IS_WINDOWS) {
+            const installs = getDiscordInstalls();
+            const generation = beginWindowsRouteOperation();
+            stopWindowsRouteWatchdog();
+            await killDiscord();
+            const recovery = await recoverWireSockNetwork();
+            if (!recovery.ok) {
+              throw new Error(`a rota anterior não encerrou com segurança (${recovery.residual.join(", ") || recovery.error || "rede não validada"}). Use "Restaurar internet".`);
+            }
+            assertWindowsRouteGeneration(generation);
+            await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs));
+            assertWindowsRouteGeneration(generation);
+            if (!(await startDiscordAndConfirm(installs, "troca-rota-proton"))) {
+              throw new Error("a nova rota foi comprovada, mas o Discord não iniciou");
+            }
+            windowsRouteStarted = true;
+            windowsRouteState = "active";
+            startWindowsRouteWatchdog();
+            iniciarWgStatsWatchdog(wgStatsProvider);
+            void waitForWindowsWgReady().then((result) => {
+              logger.info("wiresock", "prontidao.diagnostica", result);
+            }).catch((error) => {
+              logger.warn("wiresock", "prontidao.diagnostica.erro", { erro: String((error as Error)?.message ?? error) });
+            });
+          } else if (IS_LINUX) {
+            const preflight = await linuxPreflight();
+            if (!preflight.ok && !linuxPreflightRepairable(preflight)) {
+              throw new Error(`${linuxPreflightMessage(preflight)}${preflight.installCommand ? ` Execute: ${preflight.installCommand}` : ""}`);
+            }
+            if (speedTest) {
+              await linuxActivate(() => {});
+            } else {
+              const refreshed = await runScript(["--refresh-route"]);
+              if (refreshed.code !== 0) {
+                throw new Error(tailErroScript(refreshed.stderr, 4) || "falha ao atualizar a rota WireGuard");
+              }
+            }
+          }
+        } catch (err) {
+          if (IS_WINDOWS) {
+            windowsRouteStarted = false;
+            windowsRouteState = "failed";
+            stopWindowsRouteWatchdog();
+            try {
+              await killDiscord();
+              const recovery = await recoverWireSockNetwork();
+              if (!recovery.ok) {
+                windowsRouteState = "recovery_required";
+                logger.error("wiresock", "troca-rota.rollback.incompleto", { residual: recovery.residual.join(", "), erro: recovery.error || "" });
+              } else {
+                windowsRouteState = "inactive";
+              }
+            } catch (rollbackError) {
+              windowsRouteState = "recovery_required";
+              logger.error("wiresock", "troca-rota.rollback.falhou", { erro: String((rollbackError as Error)?.message ?? rollbackError) });
+            }
+          }
+          const error = String((err as Error)?.message ?? err);
+          logger.error("proton", "nova rota nao ficou pronta", { server: gen.server, erro: error });
+          return { ...gen, success: false, error: `A rota ${gen.server ?? "selecionada"} nao ficou pronta: ${error}` };
+        }
+      }
+      return { ...saved };
+    }).then((result) => {
+    if (signal.aborted || ("cancelled" in result && result.cancelled)) {
+      if (!event.sender.isDestroyed()) event.sender.send("proton-optimization-progress", { ...lastProgress, requestId, phase: "cancelled" });
+    } else if (!("deferred" in result && result.deferred)) {
+      sendProgress({ ...lastProgress, phase: result.success ? "completed" : "failed" });
     }
-    return { ...gen };
+    refreshWindowStatus();
+    refreshTray().catch(() => {});
+    return result;
+  }).catch((error) => {
+    if (signal.aborted) return { success: false, cancelled: true, error: "Teste cancelado." };
+    sendProgress({ ...lastProgress, phase: "failed" });
+    return { success: false, error: String((error as Error)?.message ?? error) };
+  }).finally(() => {
+    event.sender.removeListener("destroyed", senderDestroyed);
+    protonOptimizations.finish(operation);
   });
 });
 

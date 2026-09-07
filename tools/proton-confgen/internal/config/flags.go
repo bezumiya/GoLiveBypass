@@ -79,12 +79,15 @@ func Parse() (*Config, error) {
 	flag.StringVar(&cfg.RenewSerial, "renew-serial", "", "Renew a persistent configuration by SerialNumber (reuses existing key, no config file generated)")
 
 	// Automated GUI & Ping extensions
-	flag.BoolVar(&cfg.SpeedTest, "speed-test", false, "Measure real tunnel download/upload on up to six regional finalists (up to 30 MiB, about 90s)")
+	flag.BoolVar(&cfg.SpeedTest, "speed-test", false, "Ping all regional routes, validate twelve, then measure download/upload on up to six healthy finalists (up to 30 MiB, about 3m)")
+	flag.BoolVar(&cfg.ProgressJSON, "progress-json", false, "Emit speed-test progress events as JSON on stderr")
+	flag.BoolVar(&cfg.SpeedTestTrace, "speed-test-trace", false, "Print the four speed-test stages in the terminal (ping, shortlist, tunnel, speed)")
 	flag.StringVar(&cfg.TwoFactorCode, "2fa", "", "2FA TOTP code for non-interactive authentication")
 	flag.StringVar(&cfg.SessionFile, "session-file", "", "Custom path for session cache file")
 	flag.BoolVar(&cfg.AutoPing, "auto-ping", false, "Compare all eligible regions, prioritizing lower load over measured ping (not a bandwidth test)")
 	flag.BoolVar(&cfg.JSONOutput, "json", false, "Output results in JSON format")
 	flag.BoolVar(&cfg.CheckSession, "check-session", false, "Check if cached session is valid and exit")
+	flag.BoolVar(&cfg.CheckPlan, "check-plan", false, "Check the cached account plan and exit (does not prompt for a password)")
 	flag.BoolVar(&cfg.LoginOnly, "login-only", false, "Authenticate, save session, and exit")
 
 	flag.Parse()
@@ -130,6 +133,13 @@ func Parse() (*Config, error) {
 
 	// -check-session does not need country filter or server.
 	if cfg.CheckSession {
+		cfg.Username = validation.CleanUsername(cfg.Username)
+		return cfg, nil
+	}
+
+	// -check-plan uses only the cached session and does not need a country
+	// filter, server, certificate or password prompt.
+	if cfg.CheckPlan {
 		cfg.Username = validation.CleanUsername(cfg.Username)
 		return cfg, nil
 	}

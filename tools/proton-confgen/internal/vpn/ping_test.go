@@ -24,6 +24,43 @@ func TestProbeCandidatesDeduplicatesPhysicalIPs(t *testing.T) {
 	}
 }
 
+func TestProbeCandidatesProgressCountsEachLogicalRoute(t *testing.T) {
+	a := server("US", api.TierFree, 0)
+	a.Name = "US#1"
+	a.Servers[0].EntryIP = "192.0.2.1"
+	b := a
+	b.Name = "US#2"
+	c := a
+	c.Name = "NL#1"
+	c.Servers = append([]api.PhysicalServer(nil), a.Servers...)
+	c.Servers[0].EntryIP = "192.0.2.2"
+	var events []PingProgressEvent
+	result := probeCandidatesWithProgress(context.Background(), []api.LogicalServer{a, b, c}, func(_ context.Context, ip string) int {
+		if ip == "192.0.2.2" {
+			return 999
+		}
+		return 24
+	}, func(event PingProgressEvent) {
+		events = append(events, event)
+	})
+	if len(events) != 4 || len(result) != 3 {
+		t.Fatalf("events=%d results=%v; expected one event/result per logical route", len(events), result)
+	}
+	if events[len(events)-1].Tested != 3 || events[len(events)-1].Succeeded != 2 {
+		t.Fatalf("unexpected final progress: %+v", events[len(events)-1])
+	}
+	seen := map[string]string{}
+	for _, event := range events[1:] {
+		if event.Total != 3 || event.Tested < 1 || event.Tested > 3 {
+			t.Fatalf("invalid progress counters: %+v", event)
+		}
+		seen[event.Server] = event.Status
+	}
+	if seen["US#1"] != "success" || seen["US#2"] != "success" || seen["NL#1"] != "failed" {
+		t.Fatalf("unexpected route statuses: %+v", seen)
+	}
+}
+
 func TestProbeCandidatesRespectsCancellation(t *testing.T) {
 	a := server("US", api.TierFree, 0)
 	a.Servers[0].EntryIP = "192.0.2.1"

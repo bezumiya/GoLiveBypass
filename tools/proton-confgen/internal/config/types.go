@@ -56,11 +56,14 @@ type Config struct {
 	HVToken string
 
 	// Automated GUI & Ping extensions
-	TwoFactorCode string
-	SessionFile   string
-	AutoPing      bool
-	SpeedTest     bool
-	JSONOutput    bool
-	CheckSession  bool
-	LoginOnly     bool
+	TwoFactorCode  string
+	SessionFile    string
+	AutoPing       bool
+	SpeedTest      bool
+	ProgressJSON   bool
+	SpeedTestTrace bool
+	JSONOutput     bool
+	CheckSession   bool
+	CheckPlan      bool
+	LoginOnly      bool
 }

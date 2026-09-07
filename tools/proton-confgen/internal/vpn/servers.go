@@ -2,9 +2,11 @@ package vpn
 
 import (
 	"cmp"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -130,7 +132,7 @@ func regionalCandidates(servers []api.LogicalServer) []api.LogicalServer {
 	counts := make(map[location]int)
 	var first, second []api.LogicalServer
 	for _, srv := range ordered {
-		phys := GetBestPhysicalServer(&srv)
+		phys := getPhysicalServerWithEndpoint(&srv)
 		if phys == nil || phys.EntryIP == "" {
 			continue
 		}
@@ -178,53 +180,125 @@ func bestMeasuredCandidate(candidates []api.LogicalServer, pings map[string]int)
 }
 
 // SpeedCandidates uses the global regional scan as a shortlist, not as a
-// substitute for throughput. Prefer distinct locations before filling slots.
+// substitute for throughput. The ping probe narrows it to the fastest routes
+// before any bandwidth test is opened.
 func (s *ServerSelector) SpeedCandidates(servers []api.LogicalServer, limit int) ([]api.LogicalServer, error) {
-	candidates := regionalCandidates(EligibleServers(s.config, servers))
-	pings := ProbeCandidatesPing(candidates, len(candidates))
-	return speedFinalists(candidates, pings, limit)
+	candidates, _, err := s.SpeedCandidatesWithProgress(servers, limit, nil)
+	return candidates, err
+}
+
+// SpeedCandidatesWithProgress runs the first two stages of the speed
+// selection pipeline: it pings every normalized regional route, then returns
+// the requested number of lowest-latency finalists. The returned map contains
+// the measured ping for every route that was probed, allowing callers to show
+// the ranking without measuring the same endpoint a second time.
+func (s *ServerSelector) SpeedCandidatesWithProgress(servers []api.LogicalServer, limit int, progress PingProgressFunc) ([]api.LogicalServer, map[string]int, error) {
+	regional := regionalCandidates(EligibleServers(s.config, servers))
+	candidates := make([]api.LogicalServer, 0, len(regional))
+	for _, candidate := range regional {
+		peer := GetBestWireGuardPhysicalServer(&candidate)
+		if peer == nil {
+			continue
+		}
+		// Keep the peer that passed validation first. ProbeCandidatesPing and
+		// the speed test then inspect the same endpoint even if the API listed
+		// an incomplete online peer before it.
+		normalized := candidate
+		normalized.Servers = append([]api.PhysicalServer{*peer}, candidate.Servers...)
+		candidates = append(candidates, normalized)
+	}
+	pings := ProbeCandidatesPingWithProgress(candidates, len(candidates), progress)
+	finalists, err := speedFinalistsWithPreference(candidates, pings, limit, s.prefersNearbyBrazil())
+	return finalists, pings, err
 }
 
 func speedFinalists(candidates []api.LogicalServer, pings map[string]int, limit int) ([]api.LogicalServer, error) {
+	return speedFinalistsWithPreference(candidates, pings, limit, false)
+}
+
+// Premium automatic selection still ranks by measured RTT, but a route in
+// South America wins when its ping is within this small window of a farther
+// route. This keeps the route geographically close to Brazil without allowing
+// a clearly lower-latency server to lose just because of its country.
+const nearbyBrazilPingWindowMs = 12
+
+var nearbyBrazilCountries = map[string]struct{}{
+	"AR": {}, // Argentina
+	"BO": {}, // Bolivia
+	"CL": {}, // Chile
+	"CO": {}, // Colombia
+	"EC": {}, // Ecuador
+	"GY": {}, // Guyana
+	"PE": {}, // Peru
+	"PY": {}, // Paraguay
+	"SR": {}, // Suriname
+	"UY": {}, // Uruguay
+	"VE": {}, // Venezuela
+}
+
+func (s *ServerSelector) prefersNearbyBrazil() bool {
+	return s != nil && s.config != nil &&
+		!s.config.FreeOnly && !s.config.SecureCoreOnly && len(s.config.Countries) == 0
+}
+
+func isNearbyBrazilCountry(country string) bool {
+	_, ok := nearbyBrazilCountries[strings.ToUpper(strings.TrimSpace(country))]
+	return ok
+}
+
+func speedFinalistsWithPreference(candidates []api.LogicalServer, pings map[string]int, limit int, preferNearby bool) ([]api.LogicalServer, error) {
 	candidates = slices.Clone(candidates)
+	maxPing := int(^uint(0) >> 1)
+	minimumPing := maxPing
+	if preferNearby {
+		for _, candidate := range candidates {
+			ping := pingRank(pings[candidate.Name])
+			if ping < minimumPing {
+				minimumPing = ping
+			}
+		}
+	}
 	slices.SortFunc(candidates, func(a, b api.LogicalServer) int {
-		pa, pb := pings[a.Name], pings[b.Name]
-		if pa <= 0 {
-			pa = 999
-		}
-		if pb <= 0 {
-			pb = 999
-		}
-		va, vb := pa < 999, pb < 999
-		if va != vb {
-			if va {
+		// The first stage is driven by measured latency. For Premium automatic
+		// selection, nearby routes within the small window from the best measured
+		// RTT are promoted as a group; this keeps the ordering transitive while
+		// preserving a clearly lower-latency route anywhere else.
+		pa, pb := pingRank(pings[a.Name]), pingRank(pings[b.Name])
+		nearbyA := preferNearby && minimumPing < maxPing && pa <= minimumPing+nearbyBrazilPingWindowMs && isNearbyBrazilCountry(a.ExitCountry)
+		nearbyB := preferNearby && minimumPing < maxPing && pb <= minimumPing+nearbyBrazilPingWindowMs && isNearbyBrazilCountry(b.ExitCountry)
+		if nearbyA != nearbyB {
+			if nearbyA {
 				return -1
 			}
 			return 1
 		}
-		if c := cmp.Compare(routeCost(a.Load, pa), routeCost(b.Load, pb)); c != 0 {
+		if c := cmp.Compare(pa, pb); c != 0 {
+			return c
+		}
+		// Keep deterministic ordering for equal/unknown probes while retaining
+		// useful fallbacks when ICMP/TCP probing is blocked.
+		if c := cmp.Compare(a.Load, b.Load); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Score, b.Score); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.Name, b.Name)
 	})
-	var selected, rest []api.LogicalServer
-	seen := make(map[string]bool)
-	for _, srv := range candidates {
-		// ICMP/TCP failure is not proof that WireGuard is unusable. Keep such
-		// candidates as fallbacks; only the real transfer can qualify the winner.
-		key := srv.ExitCountry + "/" + srv.Region + "/" + srv.City
-		if seen[key] {
-			rest = append(rest, srv)
-		} else {
-			selected = append(selected, srv)
-			seen[key] = true
-		}
-	}
-	selected = append(selected, rest...)
-	if len(selected) == 0 {
+	if len(candidates) == 0 {
 		return nil, errors.New("nenhum candidato elegível na busca regional")
 	}
-	return selected[:min(max(0, limit), len(selected))], nil
+	// Unknown probes sort after every measured RTT and remain only as
+	// fallbacks. The tunnel preflight removes them when the endpoint itself is
+	// unavailable, while still allowing a healthy route behind an ICMP block.
+	return candidates[:min(max(0, limit), len(candidates))], nil
+}
+
+func pingRank(ping int) int {
+	if ping <= 0 || ping >= 999 {
+		return int(^uint(0) >> 1)
+	}
+	return ping
 }
 
 func (s *ServerSelector) buildNoServersError() error {
@@ -243,9 +317,53 @@ func (s *ServerSelector) buildNoServersError() error {
 // logical server has none. Returning an offline server would produce a config
 // pointing at a dead endpoint.
 func GetBestPhysicalServer(server *api.LogicalServer) *api.PhysicalServer {
+	if server == nil {
+		return nil
+	}
 	for i := range server.Servers {
 		if server.Servers[i].Status == constants.StatusOnline {
 			return &server.Servers[i]
+		}
+	}
+	return nil
+}
+
+// GetBestWireGuardPhysicalServer returns the first online peer that can be
+// consumed by the userspace WireGuard measurement and by the generated
+// profile. API entries can briefly remain online while their endpoint or key
+// is incomplete; letting those entries reach the transfer only creates a
+// predictable failure after the expensive setup.
+func GetBestWireGuardPhysicalServer(server *api.LogicalServer) *api.PhysicalServer {
+	if server == nil {
+		return nil
+	}
+	for i := range server.Servers {
+		if usableWireGuardPhysicalServer(&server.Servers[i]) {
+			return &server.Servers[i]
+		}
+	}
+	return nil
+}
+
+func usableWireGuardPhysicalServer(peer *api.PhysicalServer) bool {
+	if peer == nil || peer.Status != constants.StatusOnline || strings.TrimSpace(peer.ServicesDownReason) != "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(strings.TrimSpace(peer.EntryIP)); err != nil {
+		return false
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(peer.X25519PublicKey))
+	return err == nil && len(key) == 32
+}
+
+func getPhysicalServerWithEndpoint(server *api.LogicalServer) *api.PhysicalServer {
+	if server == nil {
+		return nil
+	}
+	for i := range server.Servers {
+		peer := &server.Servers[i]
+		if peer.Status == constants.StatusOnline && strings.TrimSpace(peer.EntryIP) != "" {
+			return peer
 		}
 	}
 	return nil

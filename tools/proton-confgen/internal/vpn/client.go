@@ -120,6 +120,35 @@ func (c *Client) GetServers() ([]api.LogicalServer, error) {
 	return response.LogicalServers, nil
 }
 
+// GetAccountPlan fetches the account plan from the authenticated VPN settings
+// endpoint. It deliberately does not request a certificate or open a tunnel:
+// plan classification is an account API concern, independent of route reachability.
+func (c *Client) GetAccountPlan() (*api.AccountPlan, error) {
+	var response api.VPNSettingsResponse
+	if err := c.doJSON(http.MethodGet, c.config.APIURL+constants.VPNSettingsPath, nil, &response); err != nil {
+		return nil, err
+	}
+
+	if response.Code != 0 && !constants.IsSuccessCode(response.Code) {
+		if response.Error != "" {
+			return nil, fmt.Errorf("account plan error (code %d): %s", response.Code, response.Error)
+		}
+		return nil, fmt.Errorf("account plan request failed, code: %d", response.Code)
+	}
+	if response.VPN == nil || response.VPN.MaxTier == nil {
+		return nil, fmt.Errorf("account plan response did not include VPN.MaxTier")
+	}
+	if *response.VPN.MaxTier < 0 {
+		return nil, fmt.Errorf("account plan response included an invalid MaxTier")
+	}
+
+	return &api.AccountPlan{
+		MaxTier:   *response.VPN.MaxTier,
+		PlanName:  response.VPN.PlanName,
+		PlanTitle: response.VPN.PlanTitle,
+	}, nil
+}
+
 // ListCertificates fetches all persistent certificates on the account, paginating via BeginID.
 func (c *Client) ListCertificates() ([]api.VPNCertificate, error) {
 	const pageSize = 50

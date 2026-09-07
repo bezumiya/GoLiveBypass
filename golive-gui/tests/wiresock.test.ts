@@ -3,9 +3,16 @@ import { wireSockServiceScript } from "../electron/wiresock-service";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockSearchRoots } from "../electron/wiresock";
+import { findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
 
 describe("WireSock no Windows", () => {
+  it("classifica cancelamento e reboot do instalador sem permitir retry silencioso", () => {
+    expect(wireSockInstallerExitKind({ code: 1223 })).toBe("cancel");
+    expect(wireSockInstallerExitKind({ code: 3010 })).toBe("reboot");
+    expect(wireSockInstallerExitKind({ code: 1641 })).toBe("reboot");
+    expect(wireSockInstallerExitKind({ code: 1 })).toBe("failure");
+  });
+
   it("reconhece drivers WireSock atual e legado sem confundir servico comum", () => {
     expect(wireSockDriverQueryShowsInstalled("SERVICE_NAME: NDISRD\n        STATE: 4 RUNNING")).toBe(true);
     expect(wireSockDriverQueryShowsInstalled("SERVICE_NAME: ndiswg\nDISPLAY_NAME: WireSock VPN Client Filter Driver\nSTATE: 4 RUNNING")).toBe(true);
@@ -41,20 +48,20 @@ describe("WireSock no Windows", () => {
     expect(src).toContain("-WindowStyle Hidden");
   });
 
-  it("trata Windows 10 sem winget sem mascarar o motivo", () => {
+  it("usa instalador oficial fixado quando não há par compatível", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
-    expect(src).toContain("function temWinget(): boolean");
-    expect(src).toContain("Este Windows não tem o winget");
-    expect(src).toContain("https://v3.wiresock.net/wiresock-sdk");
+    expect(src).toContain("wiresock.net/_api/download-release.php");
+    expect(src).toContain("/quiet");
+    expect(src).toContain("/norestart");
+    expect(src).toContain("abfeebdc645de36b95fabbed00c7fdb0bf4d0c68c5518608450619c61876d33e");
   });
 
-  it("preserva a saida do winget e deixa o driver como diagnostico", () => {
+  it("valida o instalador antes de elevar e deixa o driver como diagnostico", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
-    expect(src).toContain("--source winget");
-    expect(src).toContain("detalheErro(err)");
-    expect(src).toContain("instalacao pelo winget falhou; tentando UAC");
+    expect(src).toContain("const hash = await");
+    expect(src).toContain("hash.toLowerCase() !== WIRESOCK_INSTALLER_HASHES[platform.hash]");
+    expect(src).toContain("-Verb RunAs");
     expect(src).toContain("driver nao ficou visivel ao processo; seguindo para prova funcional");
-    expect(src).toContain("a prova funcional confirmara o resultado");
     expect(src).not.toContain("driver de filtro de rede (ndiswg/NDISRD) não foi carregado");
   });
 
@@ -174,9 +181,10 @@ describe("WireSock no Windows", () => {
   });
 
   it("limita as raizes de busca aos locais de instalacao esperados", () => {
-    const roots = wireSockSearchRoots({ LOCALAPPDATA: "C:\\Users\\teste\\AppData\\Local", ProgramFiles: "C:\\Program Files" });
+    const roots = wireSockSearchRoots({ LOCALAPPDATA: "C:\\Users\\teste\\AppData\\Local", ProgramFiles: "C:\\Program Files", PATH: "C:\\Arbitrary\\attacker-bin" });
     expect(roots).toContain(path.join("C:\\Program Files", "WireSock Secure Connect"));
     expect(roots).toContain(path.join("C:\\Users\\teste\\AppData\\Local", "Microsoft", "WinGet", "Packages"));
+    expect(roots).not.toContain("C:\\Arbitrary\\attacker-bin");
     expect(roots.some((root) => root.includes("Windows\\System32"))).toBe(false);
   });
 });

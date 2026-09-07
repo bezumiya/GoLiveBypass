@@ -1,10 +1,13 @@
 import path from "path";
 import fs from "fs";
-import { execFileSync, execSync, spawn } from "child_process";
+import os from "os";
+import crypto from "crypto";
+import { execFile, execFileSync, execSync } from "child_process";
 import dns from "dns/promises";
 import https from "https";
 import * as logger from "./logger";
 import { elevatedPowerShellArgs, wireSockServiceScript } from "./wiresock-service";
+import { enumerateWireSockCandidatesAsync, selectSupportedWireSock } from "./wiresock-preflight";
 
 const EMBEDDED_WG_CONF = `[Interface]
 PrivateKey = sLPBSsrhzoqZSOY/XxAzGAy5F+sQKQIIE3WoxG8buWM=
@@ -19,13 +22,18 @@ Endpoint = 84.20.27.53:51820
 PersistentKeepalive = 25
 `;
 
-const WIRESOCK_PACKAGE_ID = "NTKERNEL.WireSockVPNClientCLI";
-const WIRESOCK_DOWNLOAD_PAGE = "https://v3.wiresock.net/wiresock-sdk";
+const WIRESOCK_OFFICIAL_DOWNLOAD = "https://wiresock.net/_api/download-release.php?product=wiresock-secure-connect-sdk&platform={platform}&version=3.4.8.1&channel=winget";
+const WIRESOCK_INSTALLER_HASHES: Record<string, string> = {
+  x64: "abfeebdc645de36b95fabbed00c7fdb0bf4d0c68c5518608450619c61876d33e",
+  x86: "53c8b434482043b2eb734d05595fb357ce87460dc60f49c79f57011d655539b0",
+  arm64: "62f641a19c2d4a89ce58ba4c0539166982fb89373aef3c87b66fea33e26db311",
+};
 const WIRESOCK_SERVICE_NAMES = ["wiresock-client-service", "wiresock-pro-client-service"] as const;
 // O SDK 3.4.x instala o filtro WireGuard como `ndiswg`; releases antigas do
 // mecanismo por aplicativo expunham `NDISRD`. Ambos são nomes oficiais vistos
 // em campo. A prova funcional é apenas diagnóstico, sem bloquear a ativação.
 const WIRESOCK_DRIVER_SERVICE_NAMES = ["ndiswg", "NDISRD"] as const;
+let wiresockRebootPending = false;
 
 export type WireSockConnectionState = "connected" | "connecting" | "disconnected" | "unknown";
 
@@ -65,21 +73,123 @@ function detalheErro(err: unknown): string {
   return texto.slice(0, 500) || "sem detalhes retornados pelo Windows";
 }
 
-function temWinget(): boolean {
+export function wireSockInstallerExitKind(error: unknown): "reboot" | "cancel" | "failure" {
+  const code = Number((error as { code?: unknown })?.code);
+  if (code === 3010 || code === 1641) return "reboot";
+  if (code === 1223 || /cancel(?:led|ed)|user.?declin|recus/i.test(detalheErro(error))) return "cancel";
+  return "failure";
+}
+
+function wireSockBootTime(): number {
+  return Date.now() - Math.round(os.uptime() * 1000);
+}
+
+function wireSockRebootMarker(): string {
+  const base = process.env.LOCALAPPDATA || process.env.APPDATA || os.tmpdir();
+  return path.join(base, "GoLiveBypass", "wiresock-reboot-pending.json");
+}
+
+function assertNoPendingWireSockReboot(): void {
+  if (wiresockRebootPending) throw new Error("O WireSock solicitou reinicialização; reinicie o Windows antes de tentar novamente.");
+  const marker = wireSockRebootMarker();
   try {
-    execSync("where.exe winget.exe", { stdio: "ignore", windowsHide: true });
-    return true;
-  } catch {
-    return false;
+    const saved = JSON.parse(fs.readFileSync(marker, "utf8")) as { lastBootUpTime?: unknown };
+    const previous = Number(saved.lastBootUpTime);
+    if (Number.isFinite(previous) && Math.abs(previous - wireSockBootTime()) < 60_000) {
+      wiresockRebootPending = true;
+      throw new Error("O WireSock solicitou reinicialização; reinicie o Windows antes de tentar novamente.");
+    }
+    fs.unlinkSync(marker);
+  } catch (error) {
+    if (error instanceof Error && /solicitou reinicialização/.test(error.message)) throw error;
   }
 }
 
-function abrirDownloadWireSock(): void {
+function markWireSockRebootPending(): never {
+  wiresockRebootPending = true;
+  const marker = wireSockRebootMarker();
   try {
-    // Windows 10 nem sempre traz o App Installer/winget. Abrir somente a pagina
-    // oficial evita baixar e executar um binario sem checksum fixado pelo app.
-    spawn("explorer.exe", [WIRESOCK_DOWNLOAD_PAGE], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-  } catch {}
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, JSON.stringify({ lastBootUpTime: wireSockBootTime() }), "utf8");
+  } catch (error) {
+    logger.warn("wiresock", "nao consegui persistir reboot pendente", { erro: detalheErro(error) });
+  }
+  throw new Error("O instalador WireSock solicitou reinicialização (código 3010/1641). Reinicie o Windows e tente ativar novamente.");
+}
+
+function wireSockPlatform(): { hash: keyof typeof WIRESOCK_INSTALLER_HASHES; query: "x64" | "x86" | "ARM64" } {
+  if (process.arch === "ia32") return { hash: "x86", query: "x86" };
+  if (process.arch === "arm64") return { hash: "arm64", query: "ARM64" };
+  if (process.arch === "x64") return { hash: "x64", query: "x64" };
+  throw new Error(`Arquitetura Windows não suportada para WireSock: ${process.arch}`);
+}
+
+function downloadOfficialWireSock(platform: "x64" | "x86" | "ARM64", target: string): Promise<void> {
+  const start = WIRESOCK_OFFICIAL_DOWNLOAD.replace("{platform}", platform);
+  const maxBytes = 512 * 1024 * 1024;
+  const request = (url: string, redirects = 0): Promise<void> => new Promise((resolve, reject) => {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { reject(new Error("URL oficial do WireSock inválida")); return; }
+    if (parsed.protocol !== "https:" || !/(^|\.)wiresock\.net$/i.test(parsed.hostname)) {
+      reject(new Error("Redirecionamento para host não autorizado do instalador WireSock")); return;
+    }
+    const req = https.get(parsed, (response) => {
+      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume();
+        if (redirects >= 3) { reject(new Error("Muitos redirecionamentos no instalador WireSock")); return; }
+        request(new URL(response.headers.location, parsed).toString(), redirects + 1).then(resolve, reject);
+        return;
+      }
+      if (response.statusCode !== 200) { response.resume(); reject(new Error(`Download WireSock retornou HTTP ${response.statusCode ?? "desconhecido"}`)); return; }
+      const output = fs.createWriteStream(target, { flags: "wx" });
+      let total = 0;
+      let settled = false;
+      const abort = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        response.destroy(); output.destroy(); req.destroy(); reject(error);
+      };
+      response.on("data", (chunk: Buffer) => { total += chunk.length; if (total > maxBytes) abort(new Error("Instalador WireSock excede o limite de tamanho")); });
+      response.on("error", abort); output.on("error", abort);
+      response.pipe(output);
+      output.on("finish", () => output.close((error) => { if (error) abort(error); else if (!settled) { settled = true; resolve(); } }));
+    });
+    req.setTimeout(120_000, () => req.destroy(new Error("Timeout ao baixar o instalador WireSock")));
+    req.on("error", reject);
+  });
+  return request(start);
+}
+
+async function installOfficialWireSock(onProgress?: (message: string) => void): Promise<string> {
+  const platform = wireSockPlatform();
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "golive-wiresock-"));
+  const installer = path.join(tempDir, "wiresock-sdk.exe");
+  try {
+    onProgress?.("Baixando o instalador oficial do WireSock…");
+    await downloadOfficialWireSock(platform.query, installer);
+    const hash = await new Promise<string>((resolve, reject) => {
+      const digest = crypto.createHash("sha256"); const input = fs.createReadStream(installer);
+      input.on("data", (chunk) => digest.update(chunk)); input.on("error", reject); input.on("end", () => resolve(digest.digest("hex")));
+    });
+    if (hash.toLowerCase() !== WIRESOCK_INSTALLER_HASHES[platform.hash]) throw new Error("Hash do instalador WireSock não corresponde ao release oficial fixado.");
+    onProgress?.("Instalando o WireSock SDK validado…");
+    const file = installer.replace(/'/g, "''");
+    const command = `try { $p=Start-Process -FilePath '${file}' -ArgumentList @('/quiet','/norestart') -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop; if($null -eq $p){ exit 1223 }; exit [int]$p.ExitCode } catch { $c=$_.Exception.HResult; if($c -eq -2147023673 -or $_.Exception.NativeErrorCode -eq 1223){ exit 1223 }; Write-Error $_; exit 1 }`;
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true }, (error) => error ? reject(error) : resolve());
+      child.once("error", reject);
+    }).catch((error) => {
+      const kind = wireSockInstallerExitKind(error);
+      if (kind === "reboot") markWireSockRebootPending();
+      if (kind === "cancel") throw new Error("A instalação do WireSock foi cancelada pelo usuário; nenhuma tentativa adicional foi executada.");
+      throw error;
+    });
+    const selected = await findCompatibleWireSockAsync();
+    if (!selected) throw new Error("O instalador oficial terminou, mas não deixou um par WireSock SDK compatível.");
+    return selected;
+  } finally {
+    try { await fs.promises.rm(tempDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 export function wireSockDriverQueryShowsInstalled(output: string): boolean {
@@ -198,31 +308,6 @@ export function wireSockSearchRoots(env: NodeJS.ProcessEnv = process.env): strin
   return [...roots];
 }
 
-function findExecutableInTree(root: string, maxDepth: number, maxEntries = 500): string | null {
-  const pending: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
-  let visited = 0;
-  while (pending.length > 0 && visited < maxEntries) {
-    const current = pending.shift()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current.dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (++visited > maxEntries) break;
-      const fullPath = path.join(current.dir, entry.name);
-      if (entry.isFile() && WIRESOCK_EXECUTABLE_NAMES.includes(entry.name.toLowerCase() as typeof WIRESOCK_EXECUTABLE_NAMES[number])) {
-        return fullPath;
-      }
-      if (entry.isDirectory() && current.depth < maxDepth) {
-        pending.push({ dir: fullPath, depth: current.depth + 1 });
-      }
-    }
-  }
-  return null;
-}
-
 export function findWireSockInKnownRoots(env: NodeJS.ProcessEnv = process.env): string | null {
   const roots = wireSockSearchRoots(env);
   // The normal installer layout is cheap to check explicitly and handles
@@ -236,9 +321,8 @@ export function findWireSockInKnownRoots(env: NodeJS.ProcessEnv = process.env): 
     }
   }
 
-  // WinGet stores the package below LOCALAPPDATA and the versioned directory
-  // can contain an architecture subdirectory. Scan only package directories
-  // whose names identify WireSock, with a small depth/entry bound.
+  // WinGet stores the package below LOCALAPPDATA. Check only its known layout;
+  // never recursively scan arbitrary PATH/System32 trees.
   const packagesRoot = env.LOCALAPPDATA
     ? path.join(env.LOCALAPPDATA, "Microsoft", "WinGet", "Packages")
     : "";
@@ -247,8 +331,19 @@ export function findWireSockInKnownRoots(env: NodeJS.ProcessEnv = process.env): 
       const packages = fs.readdirSync(packagesRoot, { withFileTypes: true });
       for (const packageDir of packages) {
         if (!packageDir.isDirectory() || !/wiresock|ntkernel\.wiresock/i.test(packageDir.name)) continue;
-        const found = findExecutableInTree(path.join(packagesRoot, packageDir.name), 5);
-        if (found) return found;
+        const packageRoot = path.join(packagesRoot, packageDir.name);
+        const layouts = [packageRoot];
+        try {
+          for (const entry of fs.readdirSync(packageRoot, { withFileTypes: true })) {
+            if (entry.isDirectory() && /^(x64|x86|arm64)$/i.test(entry.name)) layouts.push(path.join(packageRoot, entry.name));
+          }
+        } catch {}
+        for (const layout of layouts) {
+          for (const relative of ["wiresock-client.exe", path.join("sdk", "wiresock-client.exe")]) {
+            const found = path.join(layout, relative);
+            if (fs.existsSync(found)) return found;
+          }
+        }
       }
     } catch {}
   }
@@ -341,77 +436,44 @@ export function ensureWireGuardConf(installDir: string, customPath?: string): st
   return confPath;
 }
 
-export function findWireSockExe(): string | null {
-  const known = findWireSockInKnownRoots();
-  if (known) return known;
-  try {
-    const out = execSync("where wiresock-client.exe", {
-      stdio: ["pipe", "pipe", "ignore"],
-      encoding: "utf8",
-      windowsHide: true,
-    }).trim();
-    const firstLine = out.split(/\r?\n/)[0]?.trim();
-    if (firstLine && fs.existsSync(firstLine)) return firstLine;
-  } catch {}
-  return null;
+// Cleanup must also find a legacy client left by an older installation. This
+// path is never used to start or install WireSock.
+function findWireSockCleanupExe(): string | null {
+  return findWireSockInKnownRoots();
 }
 
-export async function ensureWireSockInstalled(): Promise<string> {
-  const found = findWireSockExe();
-  if (found) {
+async function findCompatibleWireSockAsync(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  try {
+    const candidates = await enumerateWireSockCandidatesAsync(wireSockSearchRoots(env));
+    return selectSupportedWireSock(candidates).executable;
+  } catch {
+    return null;
+  }
+}
+
+let wireSockInstallInFlight: Promise<string> | null = null;
+export async function ensureWireSockInstalled(onProgress?: (message: string) => void): Promise<string> {
+  if (wireSockInstallInFlight) return wireSockInstallInFlight;
+  wireSockInstallInFlight = ensureWireSockInstalledOnce(onProgress).finally(() => { wireSockInstallInFlight = null; });
+  return wireSockInstallInFlight;
+}
+
+async function ensureWireSockInstalledOnce(onProgress?: (message: string) => void): Promise<string> {
+  assertNoPendingWireSockReboot();
+  onProgress?.("Verificando instalação compatível do WireSock…");
+  const existing = await findCompatibleWireSockAsync();
+  if (existing) {
     // Consultar o SCM a partir de um Electron não elevado pode ocultar drivers
     // que estão carregados (confirmado com `ndiswg` no SDK 3.4.x). Isso é
     // telemetria: a observação funcional após o start fica apenas nos logs.
     if (!isWireSockPacketFilterDriverInstalled()) {
       logger.warn("wiresock", "driver nao ficou visivel ao processo; seguindo para prova funcional", {});
     }
-    return found;
+    return existing;
   }
 
-  if (!temWinget()) {
-    abrirDownloadWireSock();
-    logger.warn("wiresock", "winget ausente; pagina oficial do WireSock aberta", { url: WIRESOCK_DOWNLOAD_PAGE });
-    throw new Error(
-      "Este Windows não tem o winget (comum no Windows 10). Abri a página oficial do WireSock CLI: instale a versão do seu sistema, feche e abra o GoLiveBypass e ative novamente.",
-    );
-  }
-
-  let erroInstalacao = "";
-  const wingetArgs = `install --id ${WIRESOCK_PACKAGE_ID} --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity`;
-  try {
-    execSync(`winget ${wingetArgs}`, {
-      stdio: ["ignore", "pipe", "pipe"],
-      encoding: "utf8",
-      windowsHide: true,
-    });
-  } catch (err) {
-    erroInstalacao = detalheErro(err);
-    logger.warn("wiresock", "instalacao pelo winget falhou; tentando UAC", { erro: erroInstalacao });
-    try {
-      execSync(`powershell.exe -NoProfile -Command "$p = Start-Process winget -ArgumentList '${wingetArgs}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($p.ExitCode -ne 0) { exit $p.ExitCode }"`, {
-        stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", windowsHide: true,
-      });
-    } catch (elevatedErr) {
-      erroInstalacao = detalheErro(elevatedErr) || erroInstalacao;
-      logger.warn("wiresock", "instalacao elevada do winget falhou", { erro: erroInstalacao });
-    }
-  }
-
-  const retry = findWireSockExe();
-  if (retry) {
-    if (!isWireSockPacketFilterDriverInstalled()) {
-      logger.warn("wiresock", "instalacao terminou sem driver visivel; a prova funcional confirmara o resultado", {});
-    }
-    return retry;
-  }
-  logger.error("wiresock", "winget terminou, mas o executavel nao foi localizado", {
-    pacote: WIRESOCK_PACKAGE_ID,
-    etapa: "pos-instalacao",
-  });
-  throw new Error(
-    `O WireSock foi instalado pelo winget, mas o executável não foi localizado nos diretórios suportados. ${erroInstalacao}. ` +
-    `Tente abrir o GoLiveBypass como administrador ou instale manualmente com: winget install --id ${WIRESOCK_PACKAGE_ID} --exact`,
-  );
+  logger.info("wiresock", "nenhuma instalação compatível; usando instalador oficial com hash fixado", { url: WIRESOCK_OFFICIAL_DOWNLOAD });
+  return installOfficialWireSock(onProgress);
 }
 
 export function formatAllowedApps(paths: string[]): string {
@@ -604,7 +666,7 @@ export async function stopWireSockService(): Promise<WireSockCleanupResult> {
     processResidual = isWireSockProcessAlive();
     if (servicesResidual.length === 0 && !processResidual) break;
     logger.warn("wiresock", "residuo encontrado; repetindo limpeza elevada", { pass: pass + 1, servicesResidual, processResidual });
-    const wsExe = findWireSockExe();
+    const wsExe = findWireSockCleanupExe();
     if (wsExe) resetNetworkLock = resetWireSockNetworkLock(wsExe) || resetNetworkLock;
   }
   servicesResidual = WIRESOCK_SERVICE_NAMES.filter(isServiceRunning);
@@ -613,7 +675,7 @@ export async function stopWireSockService(): Promise<WireSockCleanupResult> {
   if (processResidual) residual.push("wiresock-client.exe: ainda em execucao");
 
   if (estavaAtivo || residual.length > 0) {
-    const wsExe = findWireSockExe();
+    const wsExe = findWireSockCleanupExe();
     if (wsExe) resetNetworkLock = resetWireSockNetworkLock(wsExe) || resetNetworkLock;
   }
   let dnsFlushed = false;

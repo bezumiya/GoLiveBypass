@@ -47,8 +47,15 @@ import { ipcRenderer } from 'electron';
   onProtonCaptchaStatus: (callback: (status: string) => void) =>
     ipcRenderer.on('proton-captcha-status', (_event, status: string) => callback(status)),
   logoutProton: () => ipcRenderer.invoke('logout-proton'),
-  optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean }) =>
+  optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; requestId?: string }) =>
     ipcRenderer.invoke('optimize-proton-route', options),
+  cancelProtonOptimization: (requestId: string) => ipcRenderer.invoke('cancel-proton-optimization', requestId),
+  onProtonOptimizationProgress: (callback: (progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => callback(progress);
+    ipcRenderer.on('proton-optimization-progress', listener);
+    return () => ipcRenderer.removeListener('proton-optimization-progress', listener);
+  },
   getProtonSettings: () => ipcRenderer.invoke('get-proton-settings'),
+  getProtonPlan: (options?: { force?: boolean }) => ipcRenderer.invoke('get-proton-plan', options),
   setProtonSettings: (settings: any) => ipcRenderer.invoke('set-proton-settings', settings),
 };
