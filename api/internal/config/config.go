@@ -26,7 +26,7 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		GitHubRepo:      getenv("GITHUB_REPO", "pdl-clay/GoLiveBypass"),
+		GitHubRepo:      getenv("GITHUB_REPO", "bezumiya/GoLiveBypass"),
 		Port:            getenv("PORT", "8080"),
 		RateLimitPerMin: getenvFloat("RATE_LIMIT", 10),
 		BlockSeconds:    getenvInt("BLOCK_SECONDS", 300),

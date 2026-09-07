@@ -15,8 +15,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.GitHubRepo != "pdl-clay/GoLiveBypass" {
-		t.Errorf("GitHubRepo = %q, want pdl-clay/GoLiveBypass", cfg.GitHubRepo)
+	if cfg.GitHubRepo != "bezumiya/GoLiveBypass" {
+		t.Errorf("GitHubRepo = %q, want bezumiya/GoLiveBypass", cfg.GitHubRepo)
 	}
 	if cfg.GitHubWebhookSecret != "webhook-secret" {
 		t.Errorf("GitHubWebhookSecret = %q, want webhook-secret", cfg.GitHubWebhookSecret)

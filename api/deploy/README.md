@@ -36,7 +36,7 @@ completo (`/bugs/...`) — por isso o container recebe o prefixo e a API usa
 3. **Docker** + plugin compose instalados no host.
 4. Segredos:
    - `API_TOKEN`: `openssl rand -hex 32` (compartilhado com os apps clientes).
-   - `GITHUB_TOKEN`: PAT fine-grained no repo `pdl-clay/GoLiveBypass`, permissão **Issues: Read and write**, sem acesso a código.
+   - `GITHUB_TOKEN`: PAT fine-grained no repo `bezumiya/GoLiveBypass`, permissão **Issues: Read and write**, sem acesso a código.
    - `GITHUB_WEBHOOK_SECRET`: `openssl rand -hex 32`; o mesmo valor será cadastrado no webhook de Release.
 
 ## Passos
@@ -76,7 +76,7 @@ O script valida pré-requisitos, faz build, sobe o compose e espera `GET /health
 
 ### 4. Cadastrar o webhook no GitHub
 
-No repositório `pdl-clay/GoLiveBypass`, em *Settings → Webhooks → Add webhook*:
+No repositório `bezumiya/GoLiveBypass`, em *Settings → Webhooks → Add webhook*:
 
 - Payload URL: `https://api.skyplaceia.com/bugs/v1/updates/github/webhook`
 - Content type: `application/json`

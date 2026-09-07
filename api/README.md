@@ -42,7 +42,7 @@ app (GUI/standalone)                       API (este serviço)              GitH
 
 ### Webhook de release
 
-No repositório `pdl-clay/GoLiveBypass`, abra *Settings → Webhooks → Add webhook*
+No repositório `bezumiya/GoLiveBypass`, abra *Settings → Webhooks → Add webhook*
 e configure:
 
 - Payload URL: `https://api.skyplaceia.com/bugs/v1/updates/github/webhook`
@@ -68,7 +68,7 @@ Variáveis (todas em `.env.example`):
 | `API_TOKEN` | sim | — | segredo compartilhado com os apps (Bearer) |
 | `GITHUB_TOKEN` | sim | — | PAT com permissão Issues: write no repo alvo |
 | `GITHUB_WEBHOOK_SECRET` | sim | — | segredo HMAC do webhook de Release |
-| `GITHUB_REPO` | não | `pdl-clay/GoLiveBypass` | `owner/repo` da issue e do webhook |
+| `GITHUB_REPO` | não | `bezumiya/GoLiveBypass` | `owner/repo` da issue e do webhook |
 | `ISSUE_LABELS` | não | `bug,gui` | labels separadas por vírgula (precisam existir no repo) |
 | `PORT` | não | `8080` | porta HTTP |
 | `RATE_LIMIT` | não | `10` | requisições por minuto por IP |
@@ -89,7 +89,7 @@ curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer <API_TOKEN>'
   -d '{"title":""}'
 
 # com token fake → 502 (chega no GitHub e falha na auth) — confirma o fluxo
-API_TOKEN=dev GITHUB_TOKEN=fake GITHUB_WEBHOOK_SECRET=dev-secret GITHUB_REPO=pdl-clay/GoLiveBypass go run ./cmd/api
+API_TOKEN=dev GITHUB_TOKEN=fake GITHUB_WEBHOOK_SECRET=dev-secret GITHUB_REPO=bezumiya/GoLiveBypass go run ./cmd/api
 curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer dev' \
   -d '{"title":"Teste","log":"linha do log","meta":{"app":"cli","os":"linux"}}'
 
@@ -104,7 +104,7 @@ docker build -t golive-api api
 docker run --rm -p 8080:8080 \
   -e API_TOKEN=... -e GITHUB_TOKEN=... \
   -e GITHUB_WEBHOOK_SECRET=... \
-  -e GITHUB_REPO=pdl-clay/GoLiveBypass \
+  -e GITHUB_REPO=bezumiya/GoLiveBypass \
   golive-api
 ```
 
