@@ -91,6 +91,44 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  proton-runtime-assets:
+    # Os helpers sao um reparo de contingencia para instalacoes que perderam
+    # extraResources. Compila com as mesmas flags deterministicas do build local
+    # e so publica depois dos dois artefatos da GUI estarem prontos.
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - name: Compilar helpers Proton para reparo
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          mkdir -p runtime
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
+            -o "runtime/GoLiveBypass-${VERSION}-proton-confgen-linux-x64" ./tools/proton-confgen/cmd/protonvpn-wg
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
+            -o "runtime/GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe" ./tools/proton-confgen/cmd/protonvpn-wg
+          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64 > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64.sha256
+          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe.sha256
+      - name: Upload dos helpers Proton
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          draft: ${{ inputs.rascunho }}
+          files: |
+            runtime/GoLiveBypass-*-proton-confgen-linux-x64
+            runtime/GoLiveBypass-*-proton-confgen-linux-x64.sha256
+            runtime/GoLiveBypass-*-proton-confgen-win-x64.exe
+            runtime/GoLiveBypass-*-proton-confgen-win-x64.exe.sha256
+          fail_on_unmatched_files: true
+
   macos:
     # No canal beta o mac pula: o updater dele ja esta desligado no codigo (app
     # nao assinado) — nao ha o que testar lá, e buildar sem consumidor e ruido.
@@ -196,7 +234,7 @@ jobs:
     # o que o testador le ao abrir a release.
     if: ${{ inputs.canal == 'beta' && !inputs.rascunho }}
     runs-on: ubuntu-latest
-    needs: [windows, linux]
+    needs: [windows, linux, proton-runtime-assets]
     steps:
       - name: Marcar prerelease e escrever a linha do canal
         env:

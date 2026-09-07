@@ -38,6 +38,11 @@ describe("compararVersoes (semver minimo do projeto)", () => {
     expect(compararVersoes("1.1.12-beta.10", "1.1.12-beta.9")).toBeGreaterThan(0); // numerico, nao lexicografico
   });
 
+  it("ordena o novo formato beta-10 acima de beta-9 e mantém compatibilidade", () => {
+    expect(compararVersoes("1.1.12-beta-10", "1.1.12-beta-9")).toBeGreaterThan(0);
+    expect(compararVersoes("1.1.12-beta-8", "1.1.12-beta.7")).toBeGreaterThan(0);
+  });
+
   it("prerelease de triplo maior ganha de stable de triplo menor", () => {
     expect(compararVersoes("1.1.13-beta.1", "1.1.12")).toBeGreaterThan(0);
   });

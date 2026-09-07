@@ -27,7 +27,12 @@ function partir(versao: string): { base: number[]; pre: string[] | null } {
   while (base.length < 3) base.push(0);
   return {
     base: base.slice(0, 3),
-    pre: partePre === null ? null : partePre.split("."),
+    // As betas novas usam beta-8 por compatibilidade com o formato de release
+    // definido no projeto; internamente normalizamos para identificadores
+    // numericos separados para que beta-10 continue maior que beta-9.
+    pre: partePre === null
+      ? null
+      : partePre.replace(/^beta-(\d+)$/, "beta.$1").split("."),
   };
 }
 

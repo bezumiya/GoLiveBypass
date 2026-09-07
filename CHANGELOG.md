@@ -6,6 +6,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-8] - 2026-09-07
+
+### Preparação automática da GUI
+
+- A GUI agora procura o `proton-confgen` em todos os layouts de desenvolvimento e empacotados, valida o hash e repara a cópia ausente ou corrompida usando o asset da mesma release.
+- O Windows continua instalando o WireSock automaticamente via UAC quando necessário; o Linux instala apenas `wireguard-tools`, `iproute2`/`iproute` e `curl` ausentes via `pkexec`/`sudo`, sem upgrade global.
+- A versão não exige Go, WireSock ou o aplicativo ProtonVPN instalados manualmente pelo usuário.
+
 ## [2.0.5-beta.7] - 2026-09-07
 
 ### Atualização da GUI
