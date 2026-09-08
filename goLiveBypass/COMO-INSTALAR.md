@@ -18,7 +18,35 @@ eles registram evidências sem derrubar o Discord por uma leitura transitória.
 
 O beta ainda não é um release estável. O updater ignora prereleases quando consulta o
 canal estável; para testar esta linha, instale o código-fonte do plugin e recompile o
-checkout do Equicord/Vencord.
+checkout do Equicord/Vencord. A versão `2.0.0-beta.1` também pode aparecer como
+`2.0.0-beta-1` nas releases; os dois formatos representam a mesma sequência beta.
+
+## Atualizações do plugin
+
+O plugin tem um updater próprio, separado do updater da GUI e do standalone. Ele consulta
+as releases do repositório do projeto e instala somente o asset
+`goLiveBypass-vencord.zip`, acompanhado de `goLiveBypass-vencord.zip.sha256`.
+
+- **Estável** é o canal padrão: recebe somente releases estáveis e nunca instala uma
+  prerelease. Quem estiver usando uma beta pode voltar para uma versão estável quando
+  houver uma versão estável mais nova, sem downgrade.
+- **Beta** é opcional: nas configurações do GoLiveBypass, selecione o canal **Beta** para
+  participar dos testes e receber releases estáveis e prereleases. A beta continua marcada
+  como prerelease no GitHub e não substitui a release estável do canal padrão.
+- **Atualização automática** vem ligada por padrão. Quando ligada, o plugin verifica em
+  segundo plano e prepara a atualização; quando desligada, as verificações automáticas são
+  interrompidas, mas **Verificar agora** e **Atualizar** continuam disponíveis no painel.
+- Antes de substituir os arquivos, o updater confere HTTPS, o manifesto do plugin, o
+  tamanho do arquivo e o **SHA-256** publicado. Se a validação ou a recompilação falhar,
+  o backup anterior é restaurado e a VPN, a chamada e o Discord permanecem intactos.
+- A atualização nunca reinicia o Discord silenciosamente. Depois de uma atualização
+  preparada, o painel informa que é necessário fazer um **reload/recarregar manualmente o
+  Discord** para executar a nova versão; faça isso fora de uma chamada quando for possível.
+
+As preferências do plugin ficam no próprio checkout do Vencord/Equicord e não são
+compartilhadas com a GUI Electron ou com o standalone. Atualizar o plugin não atualiza a
+GUI, não altera o `app.asar` e não assume nem controla um WireSock iniciado por outro
+componente.
 
 ## Instalação resumida
 

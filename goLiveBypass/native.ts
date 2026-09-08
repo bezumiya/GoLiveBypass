@@ -11,7 +11,9 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
+    realpathSync,
     renameSync,
     rmSync,
     statSync,
@@ -23,16 +25,32 @@ import { request } from "https";
 import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 
+import {
+    choosePluginRelease,
+    comparePluginVersions,
+    normalizePluginVersion,
+    type PluginReleaseCandidate,
+    type PluginUpdateChannel,
+} from "./update-channel";
 import { defaultPluginVpnDataDir, PluginVpnController, type ProtonLoginPayload, type ProtonOptimizationOptions } from "./vpn-controller";
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
 
 const PLUGIN_VERSION = "2.0.0-beta.1";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
-const GITHUB_RELEASES_URL = "https://api.github.com/repos/pdl-clay/GoLiveBypass/releases/latest";
+const PLUGIN_CHECKSUM_ASSET = `${PLUGIN_ASSET}.sha256`;
+const GITHUB_RELEASES_URL = "https://api.github.com/repos/pdl-clay/GoLiveBypass/releases?per_page=20";
 const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
+const PLUGIN_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+const PLUGIN_UPDATE_INITIAL_DELAY_MS = 8_000;
+const PLUGIN_API_MAX_BYTES = 2 * 1024 * 1024;
+const PLUGIN_ARCHIVE_MAX_BYTES = 16 * 1024 * 1024;
+const PLUGIN_MAX_REDIRECTS = 4;
 const USERPLUGIN_DIR = "goLiveBypass";
 const USERPLUGIN_BUILD_TIMEOUT_MS = 120_000;
+const PENDING_UPDATE_FILE = "plugin-update-pending.json";
+const BACKUP_DIR = ".golivebypass-update-backups";
+const SAFE_BACKUP_NAME = /^goLiveBypass-[0-9]{10,}$/;
 const MAX_LOG_LINES = 400;
 const MAX_LOG_BYTES = 256 * 1024;
 const CAPTCHA_IPC_CHANNEL = "golive-plugin-proton-captcha-response";
@@ -44,6 +62,58 @@ const LOG_FILE = join(VPN_DATA_DIR, "plugin-vpn.log");
 
 const history: string[] = [];
 let quitting = false;
+
+type PluginUpdatePolicy = { enabled: boolean; channel: PluginUpdateChannel };
+type PendingPluginUpdate = {
+    version: string;
+    channel: PluginUpdateChannel;
+    prerelease: boolean;
+    digest: string;
+    backupName: string;
+    createdAt: number;
+};
+
+type PluginUpdateCheckResult = {
+    ok: true;
+    current: string;
+    channel: PluginUpdateChannel;
+    latest: string;
+    available: boolean;
+    pending: boolean;
+} | {
+    ok: false;
+    current: string;
+    channel: PluginUpdateChannel;
+    latest?: string;
+    available: false;
+    pending: boolean;
+    error: string;
+};
+
+type PluginUpdateResult = {
+    ok: true;
+    updated: boolean;
+    current: string;
+    latest: string;
+    channel: PluginUpdateChannel;
+    pending: boolean;
+    reloadRequired: boolean;
+} | {
+    ok: false;
+    updated: false;
+    current: string;
+    channel: PluginUpdateChannel;
+    pending: boolean;
+    error: string;
+};
+
+let pluginUpdatePolicy: PluginUpdatePolicy = { enabled: true, channel: "stable" };
+let pluginUpdateInitialTimer: ReturnType<typeof setTimeout> | undefined;
+let pluginUpdatePeriodicTimer: ReturnType<typeof setInterval> | undefined;
+let pluginUpdateCheckFlight: Promise<PluginUpdateCheckResult> | null = null;
+let pluginUpdateFlight: Promise<PluginUpdateResult> | null = null;
+let pluginUpdateLastCheckedAt: number | null = null;
+let pluginUpdateLastError: string | null = null;
 
 type PluginSettingsRecord = Record<string, unknown>;
 
@@ -353,51 +423,42 @@ export function cancelProtonOptimization(_: IpcMainInvokeEvent, requestId: unkno
 
 // ------------------------------------------------------------------ atualização do userplugin
 
-function downloadText(url: string, redirects = 0): Promise<string> {
-    return new Promise((resolveText, reject) => {
-        const req = request(url, { headers: { "User-Agent": "GoLiveBypass-updater/1.0" } }, response => {
-            if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-                response.resume();
-                if (redirects >= 4) { reject(new Error("redirecionamentos demais no update")); return; }
-                void downloadText(new URL(response.headers.location, url).toString(), redirects + 1).then(resolveText, reject);
-                return;
-            }
-            if (response.statusCode !== 200) { response.resume(); reject(new Error(`HTTP ${response.statusCode ?? 0}`)); return; }
-            const chunks: Buffer[] = [];
-            let size = 0;
-            response.on("data", (chunk: Buffer) => {
-                size += chunk.length;
-                if (size > 2 * 1024 * 1024) { response.destroy(new Error("resposta do update grande demais")); return; }
-                chunks.push(chunk);
-            });
-            response.on("end", () => resolveText(Buffer.concat(chunks).toString("utf8")));
-            response.on("error", reject);
-        });
-        req.setTimeout(PLUGIN_UPDATE_TIMEOUT_MS, () => req.destroy(new Error("update request timed out")));
-        req.on("error", reject);
-        req.end();
-    });
+function secureHttpsUrl(rawUrl: string, baseUrl?: string): string {
+    const parsed = new URL(rawUrl, baseUrl);
+    if (parsed.protocol !== "https:") throw new Error("update recusou URL que não usa HTTPS");
+    return parsed.toString();
 }
 
-function downloadBytes(url: string, redirects = 0): Promise<Buffer> {
+function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: string): Promise<Buffer> {
+    const safeUrl = secureHttpsUrl(url, baseUrl);
     return new Promise((resolveBytes, reject) => {
-        const req = request(url, { headers: { "User-Agent": "GoLiveBypass-updater/1.0" } }, response => {
+        const req = request(safeUrl, { headers: { "User-Agent": "GoLiveBypass-updater/1.0" } }, response => {
             if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
                 response.resume();
-                if (redirects >= 4) { reject(new Error("redirecionamentos demais no update")); return; }
-                void downloadBytes(new URL(response.headers.location, url).toString(), redirects + 1).then(resolveBytes, reject);
+                if (redirects >= PLUGIN_MAX_REDIRECTS) { reject(new Error("redirecionamentos demais no update")); return; }
+                try {
+                    void downloadBytes(response.headers.location, maxBytes, redirects + 1, safeUrl).then(resolveBytes, reject);
+                } catch (error) {
+                    reject(error);
+                }
                 return;
             }
             if (response.statusCode !== 200) { response.resume(); reject(new Error(`HTTP ${response.statusCode ?? 0}`)); return; }
+            const contentLength = Number(response.headers["content-length"] ?? "");
+            if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+                response.resume();
+                reject(new Error("resposta do update grande demais"));
+                return;
+            }
             const chunks: Buffer[] = [];
             let size = 0;
             let tooLarge = false;
             response.on("data", (chunk: Buffer) => {
                 if (tooLarge) return;
                 size += chunk.length;
-                if (size > 16 * 1024 * 1024) {
+                if (size > maxBytes) {
                     tooLarge = true;
-                    response.destroy(new Error("pacote do update grande demais"));
+                    response.destroy(new Error("resposta do update grande demais"));
                     return;
                 }
                 chunks.push(chunk);
@@ -411,49 +472,373 @@ function downloadBytes(url: string, redirects = 0): Promise<Buffer> {
     });
 }
 
-function updateVersion(value: string): string {
-    return value.trim().replace(/^v/i, "");
+function downloadText(url: string, maxBytes = PLUGIN_API_MAX_BYTES, redirects = 0, baseUrl?: string): Promise<string> {
+    return downloadBytes(url, maxBytes, redirects, baseUrl).then(value => value.toString("utf8"));
 }
 
 function compareUpdateVersion(local: string, remote: string): number {
-    const parse = (value: string) => updateVersion(value).split(/[.-]/).map(part => /^\d+$/.test(part) ? Number(part) : part);
-    const a = parse(local);
-    const b = parse(remote);
-    for (let i = 0; i < Math.max(a.length, b.length); i++) {
-        const left = a[i] ?? 0;
-        const right = b[i] ?? 0;
-        if (left === right) continue;
-        if (typeof left === "number" && typeof right === "number") return left < right ? -1 : 1;
-        if (typeof left === "number") return 1;
-        if (typeof right === "number") return -1;
-        return String(left).localeCompare(String(right)) < 0 ? -1 : 1;
-    }
-    return 0;
+    return comparePluginVersions(local, remote);
 }
 
-function releaseInfo(): Promise<{ version: string; zipUrl: string; shaUrl: string; prerelease: boolean }> {
+function pendingUpdatePath(): string {
+    return join(VPN_DATA_DIR, PENDING_UPDATE_FILE);
+}
+
+function policyFrom(value: unknown, fallback = pluginUpdatePolicy): PluginUpdatePolicy {
+    const raw = value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
+    const channelValue = raw.channel ?? raw.updateChannel;
+    const channel: PluginUpdateChannel = channelValue === "beta" ? "beta" : channelValue === "stable" ? "stable" : fallback.channel;
+    const enabled = typeof raw.enabled === "boolean"
+        ? raw.enabled
+        : typeof raw.autoUpdate === "boolean" ? raw.autoUpdate : fallback.enabled;
+    return { enabled, channel };
+}
+
+function clearPluginUpdateTimers(): void {
+    if (pluginUpdateInitialTimer) clearTimeout(pluginUpdateInitialTimer);
+    if (pluginUpdatePeriodicTimer) clearInterval(pluginUpdatePeriodicTimer);
+    pluginUpdateInitialTimer = undefined;
+    pluginUpdatePeriodicTimer = undefined;
+}
+
+function validPendingUpdate(value: unknown): PendingPluginUpdate | null {
+    if (value === null || typeof value !== "object") return null;
+    const raw = value as Record<string, unknown>;
+    const version = typeof raw.version === "string" ? normalizePluginVersion(raw.version) : null;
+    const channel = raw.channel === "beta" || raw.channel === "stable" ? raw.channel : null;
+    const digest = typeof raw.digest === "string" && /^[a-f0-9]{64}$/i.test(raw.digest) ? raw.digest.toLowerCase() : null;
+    const backupName = typeof raw.backupName === "string" && SAFE_BACKUP_NAME.test(raw.backupName) ? raw.backupName : null;
+    if (!version || !channel || !digest || !backupName || typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) return null;
+    return {
+        version,
+        channel,
+        prerelease: raw.prerelease === true,
+        digest,
+        backupName,
+        createdAt: raw.createdAt,
+    };
+}
+
+function readPendingUpdate(): PendingPluginUpdate | null {
+    if (!existsSync(pendingUpdatePath())) return null;
+    try {
+        const pending = validPendingUpdate(JSON.parse(readFileSync(pendingUpdatePath(), "utf8")));
+        if (pending) return pending;
+    } catch (error) {
+        log("warn", "marcador de update pendente inválido", { erro: error });
+    }
+    rmSync(pendingUpdatePath(), { force: true });
+    return null;
+}
+
+function writePendingUpdate(pending: PendingPluginUpdate): void {
+    mkdirSync(VPN_DATA_DIR, { recursive: true });
+    const temporary = join(VPN_DATA_DIR, `${PENDING_UPDATE_FILE}.tmp-${Date.now()}`);
+    writeFileSync(temporary, `${JSON.stringify(pending)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(temporary, pendingUpdatePath());
+}
+
+function safeBackupPath(projectRoot: string, backupName: string): string {
+    if (!SAFE_BACKUP_NAME.test(backupName) || basename(backupName) !== backupName)
+        throw new Error("backup do update inválido");
+    const backupRoot = resolve(projectRoot, BACKUP_DIR);
+    const backupPath = resolve(backupRoot, backupName);
+    if (!backupPath.startsWith(`${backupRoot}${process.platform === "win32" ? "\\" : "/"}`))
+        throw new Error("backup do update fora da pasta reservada");
+    return backupPath;
+}
+
+function clearPendingUpdate(pending: PendingPluginUpdate, projectRoot?: string): void {
+    if (projectRoot) {
+        try { rmSync(safeBackupPath(projectRoot, pending.backupName), { recursive: true, force: true }); }
+        catch (error) { log("warn", "não consegui remover backup pendente", { erro: error }); }
+    }
+    rmSync(pendingUpdatePath(), { force: true });
+}
+
+function readManifest(target: string): { name?: unknown; version?: unknown } {
+    const manifestPath = join(target, "manifest.json");
+    if (!existsSync(manifestPath)) throw new Error("manifest do plugin ausente");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: unknown; version?: unknown };
+    if (manifest.name !== "GoLiveBypass") throw new Error("o destino do updater não é o userplugin GoLiveBypass");
+    return manifest;
+}
+
+function reconcileReachedPendingUpdate(): PendingPluginUpdate | null {
+    const pending = readPendingUpdate();
+    if (!pending) return null;
+    if (compareUpdateVersion(PLUGIN_VERSION, pending.version) >= 0) {
+        try { clearPendingUpdate(pending, userpluginSource().projectRoot); }
+        catch { clearPendingUpdate(pending); }
+        return null;
+    }
+    return pending;
+}
+
+function discardPendingBetaForStable(): void {
+    const pending = readPendingUpdate();
+    if (!pending || pending.channel !== "beta") return;
+    if (compareUpdateVersion(PLUGIN_VERSION, pending.version) >= 0) {
+        try { clearPendingUpdate(pending, userpluginSource().projectRoot); }
+        catch { clearPendingUpdate(pending); }
+        return;
+    }
+
+    const { projectRoot, target } = userpluginSource();
+    const backup = safeBackupPath(projectRoot, pending.backupName);
+    if (!existsSync(backup)) {
+        clearPendingUpdate(pending);
+        throw new Error("backup do beta pendente não foi encontrado");
+    }
+
+    const currentManifest = readManifest(target);
+    const currentVersion = typeof currentManifest.version === "string" ? normalizePluginVersion(currentManifest.version) : null;
+    if (currentVersion !== pending.version) {
+        log("warn", "ignorei rollback beta porque a fonte atual não corresponde ao marcador", { atual: currentVersion ?? "inválida", pendente: pending.version });
+        clearPendingUpdate(pending, projectRoot);
+        return;
+    }
+
+    const displaced = join(projectRoot, `${BACKUP_DIR}/goLiveBypass-pending-${Date.now()}`);
+    renameSync(target, displaced);
+    try {
+        renameSync(backup, target);
+        rebuildUserplugin(projectRoot);
+        rmSync(displaced, { recursive: true, force: true });
+        clearPendingUpdate(pending);
+        log("info", `update beta pendente descartado ao selecionar stable (${pending.version})`);
+    } catch (error) {
+        if (existsSync(target)) rmSync(target, { recursive: true, force: true });
+        if (existsSync(displaced)) renameSync(displaced, target);
+        try { rebuildUserplugin(projectRoot); } catch (rollbackError) { log("error", "falha ao restaurar beta pendente", { erro: rollbackError }); }
+        throw error;
+    }
+}
+
+function releaseAssetUrl(value: unknown): string | null {
+    if (typeof value !== "string" || !value.trim()) return null;
+    try { return secureHttpsUrl(value); } catch { return null; }
+}
+
+function releaseInfo(channel: PluginUpdateChannel): Promise<PluginReleaseCandidate | null> {
     return downloadText(GITHUB_RELEASES_URL).then(raw => {
-        const release = JSON.parse(raw) as {
-            tag_name?: unknown;
-            prerelease?: unknown;
-            draft?: unknown;
-            assets?: Array<{ name?: unknown; browser_download_url?: unknown }>;
-        };
-        if (release.draft === true || release.prerelease === true || typeof release.tag_name !== "string")
-            throw new Error("nenhum release estável disponível");
-        const asset = release.assets?.find(item => item.name === PLUGIN_ASSET && typeof item.browser_download_url === "string");
-        if (!asset || typeof asset.browser_download_url !== "string") throw new Error("release sem o pacote do plugin");
-        return { version: updateVersion(release.tag_name), zipUrl: asset.browser_download_url, shaUrl: `${asset.browser_download_url}.sha256`, prerelease: false };
+        const releases = JSON.parse(raw) as unknown;
+        if (!Array.isArray(releases)) throw new Error("resposta de releases inválida");
+        const candidates: PluginReleaseCandidate[] = [];
+        for (const value of releases) {
+            if (value === null || typeof value !== "object") continue;
+            const release = value as Record<string, unknown>;
+            if (release.draft === true || typeof release.tag_name !== "string") continue;
+            const version = normalizePluginVersion(release.tag_name);
+            if (!version) continue;
+            const assets = Array.isArray(release.assets) ? release.assets : [];
+            const zipAsset = assets.find(asset => asset !== null && typeof asset === "object" && (asset as Record<string, unknown>).name === PLUGIN_ASSET);
+            const shaAsset = assets.find(asset => asset !== null && typeof asset === "object" && (asset as Record<string, unknown>).name === PLUGIN_CHECKSUM_ASSET);
+            const zipUrl = releaseAssetUrl(zipAsset && (zipAsset as Record<string, unknown>).browser_download_url);
+            const shaUrl = releaseAssetUrl(shaAsset && (shaAsset as Record<string, unknown>).browser_download_url);
+            if (!zipUrl || !shaUrl) continue;
+            const prerelease = release.prerelease === true;
+            candidates.push({ tag: release.tag_name, version, zipUrl, shaUrl, prerelease });
+        }
+        if (candidates.length === 0 && channel === "stable") throw new Error("nenhum release estável disponível");
+        return choosePluginRelease(candidates, PLUGIN_VERSION, channel);
     });
 }
 
-export async function checkPluginUpdate(_: IpcMainInvokeEvent) {
+function validateArchiveEntries(archive: string, extracted: string): void {
+    let listing: string;
     try {
-        const release = await releaseInfo();
-        return { ok: true as const, current: PLUGIN_VERSION, latest: release.version, available: compareUpdateVersion(PLUGIN_VERSION, release.version) < 0 };
-    } catch (error) {
-        return { ok: false as const, current: PLUGIN_VERSION, error: safeDiagnosticDetail(error, 500) };
+        listing = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+        listing = execFileSync("tar", ["-tf", archive], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     }
+    const root = resolve(extracted);
+    for (const entry of listing.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+        const normalized = entry.replaceAll("\\", "/");
+        if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.split("/").includes(".."))
+            throw new Error("archive do plugin contém caminho inseguro");
+        const candidate = resolve(root, normalized);
+        if (candidate !== root && !candidate.startsWith(`${root}${process.platform === "win32" ? "\\" : "/"}`))
+            throw new Error("archive do plugin escapa da pasta temporária");
+    }
+}
+
+function validateExtractedTree(root: string): void {
+    const resolvedRoot = realpathSync(root);
+    const pending = [root];
+    while (pending.length > 0) {
+        const current = pending.pop()!;
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+            const candidate = join(current, entry.name);
+            if (entry.isSymbolicLink()) throw new Error("archive do plugin contém link simbólico");
+            const resolved = realpathSync(candidate);
+            if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${process.platform === "win32" ? "\\" : "/"}`))
+                throw new Error("archive do plugin escapa da pasta temporária");
+            if (entry.isDirectory()) pending.push(candidate);
+        }
+    }
+}
+
+function extractAndValidatePlugin(zip: Buffer, release: PluginReleaseCandidate): { work: string; source: string } {
+    const work = mkdtempSync(join(tmpdir(), "golivebypass-update-"));
+    const archive = join(work, PLUGIN_ASSET);
+    const extracted = join(work, "extract");
+    writeFileSync(archive, zip, { mode: 0o600 });
+    mkdirSync(extracted);
+    try {
+        validateArchiveEntries(archive, extracted);
+        try { execFileSync("unzip", ["-q", archive, "-d", extracted], { stdio: "ignore" }); }
+        catch { execFileSync("tar", ["-xf", archive, "-C", extracted], { stdio: "ignore" }); }
+        validateExtractedTree(extracted);
+        const source = join(extracted, USERPLUGIN_DIR);
+        const sourceResolved = resolve(source);
+        const rootResolved = resolve(extracted);
+        if (!sourceResolved.startsWith(`${rootResolved}${process.platform === "win32" ? "\\" : "/"}`))
+            throw new Error("fonte extraída fora da pasta temporária");
+        const manifest = readManifest(source);
+        if (typeof manifest.version !== "string" || normalizePluginVersion(manifest.version) !== release.version)
+            throw new Error("manifest do plugin não corresponde ao release");
+        return { work, source };
+    } catch (error) {
+        rmSync(work, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+async function performPluginUpdateCheck(policy: PluginUpdatePolicy): Promise<PluginUpdateCheckResult> {
+    if (policy.channel === "stable") discardPendingBetaForStable();
+    const pending = reconcileReachedPendingUpdate();
+    if (pending) {
+        return { ok: true, current: PLUGIN_VERSION, channel: policy.channel, latest: pending.version, available: false, pending: true };
+    }
+    const release = await releaseInfo(policy.channel);
+    if (!release) return { ok: true, current: PLUGIN_VERSION, channel: policy.channel, latest: PLUGIN_VERSION, available: false, pending: false };
+    return {
+        ok: true,
+        current: PLUGIN_VERSION,
+        channel: policy.channel,
+        latest: release.version,
+        available: compareUpdateVersion(PLUGIN_VERSION, release.version) < 0,
+        pending: false,
+    };
+}
+
+function runPluginUpdateCheck(policy: PluginUpdatePolicy): Promise<PluginUpdateCheckResult> {
+    if (pluginUpdateCheckFlight) return pluginUpdateCheckFlight;
+    const flight = performPluginUpdateCheck(policy)
+        .catch(error => ({ ok: false as const, current: PLUGIN_VERSION, channel: policy.channel, available: false as const, pending: Boolean(readPendingUpdate()), error: safeDiagnosticDetail(error, 500) }))
+        .finally(() => { pluginUpdateCheckFlight = null; pluginUpdateLastCheckedAt = Date.now(); });
+    pluginUpdateCheckFlight = flight;
+    return flight;
+}
+
+async function performPluginUpdate(policy: PluginUpdatePolicy): Promise<PluginUpdateResult> {
+    if (policy.channel === "stable") discardPendingBetaForStable();
+    const pending = reconcileReachedPendingUpdate();
+    if (pending)
+        return { ok: true, updated: false, current: PLUGIN_VERSION, latest: pending.version, channel: policy.channel, pending: true, reloadRequired: true };
+
+    const release = await releaseInfo(policy.channel);
+    if (!release) return { ok: true, updated: false, current: PLUGIN_VERSION, latest: PLUGIN_VERSION, channel: policy.channel, pending: false, reloadRequired: false };
+    const [zip, checksumText] = await Promise.all([downloadBytes(release.zipUrl, PLUGIN_ARCHIVE_MAX_BYTES), downloadText(release.shaUrl)]);
+    const expected = /^([a-f0-9]{64})\b/i.exec(checksumText)?.[1]?.toLowerCase();
+    if (!expected) throw new Error("release sem SHA-256 válido");
+    const digest = createHash("sha256").update(zip).digest("hex");
+    if (digest !== expected) throw new Error("SHA-256 do plugin não confere");
+
+    const extracted = extractAndValidatePlugin(zip, release);
+    try {
+        const { projectRoot, target } = userpluginSource();
+        const backupRoot = join(projectRoot, BACKUP_DIR);
+        mkdirSync(backupRoot, { recursive: true });
+        const backupName = `${USERPLUGIN_DIR}-${Date.now()}`;
+        const backup = safeBackupPath(projectRoot, backupName);
+        renameSync(target, backup);
+        try {
+            renameSync(extracted.source, target);
+            rebuildUserplugin(projectRoot);
+            writePendingUpdate({ version: release.version, channel: policy.channel, prerelease: release.prerelease, digest, backupName, createdAt: Date.now() });
+        } catch (error) {
+            if (existsSync(target)) rmSync(target, { recursive: true, force: true });
+            if (existsSync(backup)) renameSync(backup, target);
+            try { rebuildUserplugin(projectRoot); } catch (rollbackError) { log("error", "falha ao restaurar o build anterior", { erro: rollbackError }); }
+            throw error;
+        }
+        log("info", `plugin preparado de ${PLUGIN_VERSION} para ${release.version}; reload necessário`);
+        return { ok: true, updated: true, current: PLUGIN_VERSION, latest: release.version, channel: policy.channel, pending: true, reloadRequired: true };
+    } finally {
+        rmSync(extracted.work, { recursive: true, force: true });
+    }
+}
+
+function runPluginUpdate(policy: PluginUpdatePolicy): Promise<PluginUpdateResult> {
+    if (pluginUpdateFlight) return pluginUpdateFlight;
+    const flight = performPluginUpdate(policy)
+        .catch(error => ({ ok: false as const, updated: false as const, current: PLUGIN_VERSION, channel: policy.channel, pending: Boolean(readPendingUpdate()), error: safeDiagnosticDetail(error, 500) }))
+        .finally(() => { pluginUpdateFlight = null; });
+    pluginUpdateFlight = flight;
+    return flight;
+}
+
+async function automaticPluginUpdate(policy: PluginUpdatePolicy): Promise<void> {
+    if (!policy.enabled) return;
+    const check = await runPluginUpdateCheck(policy);
+    if (!check.ok) {
+        pluginUpdateLastError = check.error;
+        return;
+    }
+    if (check.available && !check.pending && pluginUpdatePolicy.enabled && pluginUpdatePolicy.channel === policy.channel) {
+        const update = await runPluginUpdate(policy);
+        if (!update.ok) pluginUpdateLastError = update.error;
+    }
+}
+
+export function configurePluginUpdates(_: IpcMainInvokeEvent, value?: unknown): PluginUpdatePolicy {
+    const next = policyFrom(value, { enabled: true, channel: "stable" });
+    const changed = next.enabled !== pluginUpdatePolicy.enabled || next.channel !== pluginUpdatePolicy.channel;
+    pluginUpdatePolicy = next;
+    clearPluginUpdateTimers();
+    if (changed && next.channel === "stable") {
+        try { discardPendingBetaForStable(); }
+        catch (error) {
+            pluginUpdateLastError = safeDiagnosticDetail(error, 500);
+            log("warn", "não consegui descartar o beta pendente ao selecionar stable", { erro: error });
+        }
+    }
+    if (!next.enabled) return next;
+    pluginUpdateInitialTimer = setTimeout(() => { void automaticPluginUpdate(pluginUpdatePolicy); }, PLUGIN_UPDATE_INITIAL_DELAY_MS);
+    pluginUpdateInitialTimer.unref?.();
+    pluginUpdatePeriodicTimer = setInterval(() => { void automaticPluginUpdate(pluginUpdatePolicy); }, PLUGIN_UPDATE_INTERVAL_MS);
+    pluginUpdatePeriodicTimer.unref?.();
+    if (changed) void automaticPluginUpdate(next);
+    return next;
+}
+
+export function getPluginUpdateStatus(_: IpcMainInvokeEvent) {
+    const pending = reconcileReachedPendingUpdate();
+    return {
+        current: PLUGIN_VERSION,
+        channel: pluginUpdatePolicy.channel,
+        enabled: pluginUpdatePolicy.enabled,
+        pending: Boolean(pending),
+        pendingVersion: pending?.version,
+        lastCheckedAt: pluginUpdateLastCheckedAt,
+        lastError: pluginUpdateLastError,
+    };
+}
+
+export async function checkPluginUpdate(_: IpcMainInvokeEvent, value?: unknown): Promise<PluginUpdateCheckResult> {
+    const policy = policyFrom(value);
+    const result = runPluginUpdateCheck(policy);
+    void result.then(valueResult => { pluginUpdateLastError = valueResult.ok ? null : valueResult.error; });
+    return await result;
+}
+
+export async function updatePlugin(_: IpcMainInvokeEvent, value?: unknown): Promise<PluginUpdateResult> {
+    const policy = policyFrom(value);
+    const result = runPluginUpdate(policy);
+    void result.then(valueResult => { pluginUpdateLastError = valueResult.ok ? null : valueResult.error; });
+    return await result;
 }
 
 function userpluginSource() {
@@ -507,50 +892,6 @@ function rebuildUserplugin(projectRoot: string): void {
         const failure = error as { stderr?: Buffer | string; stdout?: Buffer | string; message?: string };
         const detail = [failure.message, failure.stderr, failure.stdout].filter(Boolean).map(value => String(value).trim()).join("\n").slice(-1200);
         throw new Error(`não consegui recompilar o plugin${detail ? `: ${detail}` : ""}`);
-    }
-}
-
-export async function updatePlugin(_: IpcMainInvokeEvent) {
-    const release = await releaseInfo();
-    if (compareUpdateVersion(PLUGIN_VERSION, release.version) >= 0)
-        return { ok: true as const, updated: false as const, current: PLUGIN_VERSION, latest: release.version };
-
-    const [zip, checksumText] = await Promise.all([downloadBytes(release.zipUrl), downloadText(release.shaUrl)]);
-    const expected = /^([a-f0-9]{64})\b/i.exec(checksumText)?.[1]?.toLowerCase();
-    if (!expected) throw new Error("release sem SHA-256 válido");
-    if (createHash("sha256").update(zip).digest("hex") !== expected) throw new Error("SHA-256 do plugin não confere");
-
-    const work = mkdtempSync(join(tmpdir(), "golivebypass-update-"));
-    const archive = join(work, PLUGIN_ASSET);
-    const extracted = join(work, "extract");
-    writeFileSync(archive, zip);
-    mkdirSync(extracted);
-    try {
-        try { execFileSync("unzip", ["-q", archive, "-d", extracted], { stdio: "ignore" }); }
-        catch { execFileSync("tar", ["-xf", archive, "-C", extracted], { stdio: "ignore" }); }
-        const source = join(extracted, USERPLUGIN_DIR);
-        const manifest = JSON.parse(readFileSync(join(source, "manifest.json"), "utf8")) as { name?: unknown; version?: unknown };
-        if (manifest.name !== "GoLiveBypass" || typeof manifest.version !== "string" || updateVersion(manifest.version) !== release.version)
-            throw new Error("manifest do plugin não corresponde ao release");
-
-        const { projectRoot, target } = userpluginSource();
-        const backupRoot = join(projectRoot, ".golivebypass-update-backups");
-        mkdirSync(backupRoot, { recursive: true });
-        const backup = join(backupRoot, `${USERPLUGIN_DIR}-${Date.now()}`);
-        renameSync(target, backup);
-        try {
-            renameSync(source, target);
-            rebuildUserplugin(projectRoot);
-        } catch (error) {
-            rmSync(target, { recursive: true, force: true });
-            renameSync(backup, target);
-            try { rebuildUserplugin(projectRoot); } catch (rollbackError) { log("error", "falha ao restaurar o build anterior", { erro: rollbackError }); }
-            throw error;
-        }
-        log("info", `plugin atualizado de ${PLUGIN_VERSION} para ${release.version}; reload necessário`);
-        return { ok: true as const, updated: true as const, current: PLUGIN_VERSION, latest: release.version };
-    } finally {
-        rmSync(work, { recursive: true, force: true });
     }
 }
 

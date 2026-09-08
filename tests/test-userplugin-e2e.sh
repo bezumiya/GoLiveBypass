@@ -86,7 +86,7 @@ fi
 
 # --------------------------------------------------------------------------- 2. Conteudo do zip
 step "2. Conteudo do zip"
-expected_files="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/stability.ts goLiveBypass/vpn-controller.ts goLiveBypass/vpn-proton.ts goLiveBypass/vpn-types.ts goLiveBypass/vpn-windows.ts goLiveBypass/manifest.json"
+expected_files="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/update-channel.ts goLiveBypass/stability.ts goLiveBypass/vpn-controller.ts goLiveBypass/vpn-proton.ts goLiveBypass/vpn-types.ts goLiveBypass/vpn-windows.ts goLiveBypass/manifest.json"
 content=$(list_zip_py "$ASSET" | sort)
 for f in $expected_files; do
     if printf '%s\n' "$content" | grep -qF "$f"; then
@@ -135,7 +135,7 @@ else
     bad "pasta $target NAO foi criada"
 fi
 # Validar arquivos extraidos
-for f in index.tsx native.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
+for f in index.tsx native.ts update-channel.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
     if [ -f "$target/$f" ]; then
         ok "extraido $f ($(stat -c%s "$target/$f" 2>/dev/null || stat -f%z "$target/$f") bytes)"
     else
@@ -229,7 +229,7 @@ step "7. Hash dos arquivos extraidos confere com o repo"
 # Re-extrair para ter o estado novo
 rm -rf "$target"
 extract_zip_py "$ASSET" "$USERPLUGINS" >/dev/null
-for f in index.tsx native.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
+for f in index.tsx native.ts update-channel.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
     if [ -f "$target/$f" ] && [ -f "$REPO/goLiveBypass/$f" ]; then
         hash_target=$(sha256sum "$target/$f" | awk '{print $1}')
         hash_repo=$(sha256sum "$REPO/goLiveBypass/$f" | awk '{print $1}')

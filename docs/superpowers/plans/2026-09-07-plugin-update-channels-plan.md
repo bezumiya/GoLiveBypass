@@ -155,7 +155,7 @@ git commit -m "feat(plugin): portar updater stable e beta para o processo nativo
 
 **Files:**
 - Modify: goLiveBypass/index.tsx
-- Test: golive-gui/tests/plugin-update-ui.test.tsx
+- Test: golive-gui/tests/plugin-update-ui.test.ts
 
 **Interfaces:**
 - settings.updateChannel: SELECT, default stable, values stable/beta.
@@ -169,7 +169,7 @@ O teste deve exigir updateChannel, values stable/beta, autoUpdate, default true,
 - [ ] **Step 2: Confirm the failure**
 
 ~~~bash
-npm test -- --run tests/plugin-update-ui.test.tsx
+npm test -- --run tests/plugin-update-ui.test.ts
 ~~~
 
 Expected: FAIL porque as preferências ainda não existem.
@@ -187,8 +187,8 @@ Mostrar versão corrente, canal, estado automático, último erro e reload pende
 - [ ] **Step 5: Test and commit**
 
 ~~~bash
-npm test -- --run tests/plugin-update-ui.test.tsx tests/plugin-update-native.test.ts tests/plugin-update-channel.test.ts tests/plugin-v2-version.test.ts
-git add goLiveBypass/index.tsx golive-gui/tests/plugin-update-ui.test.tsx
+npm test -- --run tests/plugin-update-ui.test.ts tests/plugin-update-native.test.ts tests/plugin-update-channel.test.ts tests/plugin-v2-version.test.ts
+git add goLiveBypass/index.tsx golive-gui/tests/plugin-update-ui.test.ts
 git commit -m "feat(plugin): adicionar seletor beta e auto update"
 ~~~
 
