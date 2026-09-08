@@ -6,13 +6,6 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-## [2.0.5-beta-9] - 2026-09-07
-
-### Ativação imediata do canal beta
-
-- Ao ativar o canal beta nas configurações, a GUI consulta imediatamente a última beta compatível, baixa o instalador e abre o pedido para reiniciar e aplicar a atualização.
-- A checagem aguarda uma consulta inicial em andamento para não perder a troca de canal; desativar o canal continua respeitando a preferência de atualizações automáticas.
-
 ## [2.0.5-beta-8] - 2026-09-07
 
 ### Preparação automática da GUI
@@ -20,6 +13,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - A GUI agora procura o `proton-confgen` em todos os layouts de desenvolvimento e empacotados, valida o hash e repara a cópia ausente ou corrompida usando o asset da mesma release.
 - O Windows continua instalando o WireSock automaticamente via UAC quando necessário; o Linux instala apenas `wireguard-tools`, `iproute2`/`iproute` e `curl` ausentes via `pkexec`/`sudo`, sem upgrade global.
 - A versão não exige Go, WireSock ou o aplicativo ProtonVPN instalados manualmente pelo usuário.
+
+### Ativação imediata do canal beta
+
+- Ao ativar o canal beta nas configurações, a GUI consulta imediatamente a última beta compatível, baixa o instalador e abre o pedido para reiniciar e aplicar a atualização.
+- A checagem aguarda uma consulta inicial em andamento para não perder a troca de canal; desativar o canal continua respeitando a preferência de atualizações automáticas.
 
 ## [2.0.5-beta.7] - 2026-09-07
 
