@@ -73,7 +73,7 @@ describe("updater-replace", () => {
     // %3 (exe novo versionado) e %4 (vbs a limpar).
     expect(script).toContain('move /Y "%~1" "%~1.old" >NUL 2>&1');
     expect(script).toContain('move /Y "%~2" "%~3" >NUL 2>&1');
-    expect(script).toContain('start "" "%~3"');
+    expect(script).toContain("Start-Process -FilePath $env:GOLIVE_NEW_EXE -PassThru");
     expect(script).toContain('del "%~1.old" >NUL 2>&1');
     expect(script).toContain('del "%~2" >NUL 2>&1');
     expect(script).toContain('del "%~4" >NUL 2>&1');
@@ -85,6 +85,22 @@ describe("updater-replace", () => {
     // Esgotou as tentativas e restaura/lanca a versao antiga.
     expect(script).toContain("goto fail");
     expect(script).toContain(":installed");
+  });
+
+  it("so apaga o exe antigo depois de confirmar que a nova versao continua aberta", () => {
+    const script = buildWindowsUpdateScript();
+    const installed = script.indexOf(":installed");
+    const launched = script.indexOf("Start-Process -FilePath $env:GOLIVE_NEW_EXE -PassThru", installed);
+    const verified = script.indexOf("Start-Sleep -Seconds 5", launched);
+    const failed = script.indexOf("if errorlevel 1 goto fail", verified);
+    const cleaned = script.indexOf('del "%~1.old" >NUL 2>&1', failed);
+
+    expect(launched).toBeGreaterThan(installed);
+    expect(verified).toBeGreaterThan(installed);
+    expect(failed).toBeGreaterThan(verified);
+    expect(cleaned).toBeGreaterThan(failed);
+    expect(script).toContain("$ErrorActionPreference='Stop'");
+    expect(script).toContain("if ($null -eq $p -or $p.HasExited) { exit 1 }");
   });
 
   it("vbs do helper comeca com BOM UTF-16LE e cita os cinco caminhos", () => {

@@ -4,8 +4,9 @@
 //
 // No Windows, a imagem do exe em execucao permanece bloqueada para rename/delete.
 // Portanto o processo Electron apenas baixa e confere o candidato, agenda o helper e
-// encerra. O helper espera o processo antigo morrer e so entao faz a troca em tres
-// passos: renomeia o exe antigo para ".old", move o baixado para o lugar e relanca.
+// encerra. O helper espera o processo antigo morrer e so entao faz a troca em quatro
+// passos: renomeia o exe antigo para ".old", move o baixado para o lugar, abre a
+// versao nova e so remove o ".old" depois de confirmar que ela continua viva.
 
 import { spawnSync } from "child_process";
 import { existsSync, rmSync, renameSync, writeFileSync } from "fs";
@@ -101,10 +102,14 @@ export function buildWindowsUpdateScript(): string {
     "goto retry",
     "",
     ":installed",
-    // O novo processo faz a limpeza final do .old no boot; aqui tentamos adiantar.
+    // O PowerShell devolve falha se nao conseguir abrir o exe ou se ele encerrar
+    // durante a janela de inicializacao. Ate este ponto o .old continua intacto.
+    `set "GOLIVE_NEW_EXE=%~3"`,
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath $env:GOLIVE_NEW_EXE -PassThru; Start-Sleep -Seconds 5; if ($null -eq $p -or $p.HasExited) { exit 1 }"`,
+    `set "GOLIVE_NEW_EXE="`,
+    "if errorlevel 1 goto fail",
+    // So depois de a nova versao permanecer aberta o backup pode ser removido.
     `del "%~1.old" >NUL 2>&1`,
-    `ping 127.0.0.1 -n 2 >NUL`,
-    `start "" "%~3"`,
     "goto cleanup",
     "",
     ":fail",
