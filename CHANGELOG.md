@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-9] - 2026-09-07
+
 ### Card persistente de atualização
 
 - O aviso de atualização passou a ser um card fixo no canto superior direito, exibido somente quando há uma versão pronta.
