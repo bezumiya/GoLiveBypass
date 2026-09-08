@@ -149,12 +149,12 @@ test("instalador Windows distribui stability.ts", () => {
     assert.match(windowsInstaller, /goLiveBypass\/stability\.ts/);
 });
 
-test("manifesto local e beta 13", () => {
-    assert.equal(manifest.version, "1.1.12-beta.13");
+test("manifesto local e linha v2 beta", () => {
+    assert.equal(manifest.version, "2.0.0-beta.1");
 });
 
 test("plugin mostra versao e oferece verificacao na configuracao", () => {
-    assert.match(pluginRenderer, /PLUGIN_VERSION = "1\.1\.12-beta\.13"/);
+    assert.match(pluginRenderer, /PLUGIN_VERSION = "2\.0\.0-beta\.1"/);
     assert.match(pluginRenderer, /checkPluginUpdate\(\)/);
     assert.match(pluginRenderer, /Atualizar/);
 });

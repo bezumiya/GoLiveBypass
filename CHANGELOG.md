@@ -6,6 +6,25 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-09-08
+
+### Devlog da release estável
+
+- O updater Windows agora baixa somente o portable da versão correta, valida o SHA-256 e só remove a versão anterior depois que a nova inicializa com sucesso.
+- O card persistente de atualização concentra o aviso e o botão de reinício; os popups nativos foram removidos do fluxo de atualização.
+- O SSE da API acorda o updater rapidamente, com polling de segurança, ordenação SemVer e proteção contra eventos atrasados ou downgrades.
+- A GUI instala automaticamente os componentes de runtime necessários no Windows e no Linux, sem exigir Go, WireSock ou ProtonVPN instalados manualmente.
+- A seleção e a medição de rotas Proton receberam preflight, fallback e melhorias de diagnóstico sem bloquear a ativação do Discord.
+
+### Plugin Vencord/Equicord
+
+- O plugin já está funcional na linha de testes e continua em validação de compatibilidade antes de ser promovido como parte estável.
+
+### Agradecimentos
+
+- Obrigado a @bezu, criador do projeto: sem ele, nada do que está sendo construído aqui existiria.
+- Obrigado a todos os beta testers e, em especial, ao usuário 505133988369661955, que passou mais de oito horas em call corrigindo bugs e testando as betas.
+
 ## [2.0.5-beta-15] - 2026-09-08
 
 ### Teste adicional do update beta
