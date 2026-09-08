@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { wireSockServiceScript } from "../electron/wiresock-service";
+import { elevatedPowerShellFileArgs, wireSockServiceScript } from "../electron/wiresock-service";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
+import { classifyWireSockActivationFailure, findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
 
 describe("WireSock no Windows", () => {
   it("classifica cancelamento e reboot do instalador sem permitir retry silencioso", () => {
@@ -11,6 +11,25 @@ describe("WireSock no Windows", () => {
     expect(wireSockInstallerExitKind({ code: 3010 })).toBe("reboot");
     expect(wireSockInstallerExitKind({ code: 1641 })).toBe("reboot");
     expect(wireSockInstallerExitKind({ code: 1 })).toBe("failure");
+  });
+
+  it("transforma falhas localizadas do Windows em orientações acionáveis", () => {
+    expect(classifyWireSockActivationFailure({ stderr: "GOLIVE_WIRESOCK_ERROR: Access is denied" })).toMatchObject({
+      kind: "permission",
+      code: "WIRESOCK_PERMISSION",
+    });
+    expect(classifyWireSockActivationFailure({ stderr: "START_FAILED: driver ndiswg not ready" })).toMatchObject({
+      kind: "driver",
+      code: "WIRESOCK_DRIVER",
+    });
+    expect(classifyWireSockActivationFailure({ stderr: "STOP_TIMEOUT: estado=StopPending" })).toMatchObject({
+      kind: "timeout",
+      code: "WIRESOCK_TIMEOUT",
+    });
+    expect(classifyWireSockActivationFailure({ stderr: "CONFIG_FAILED: AllowedApps inválido" })).toMatchObject({
+      kind: "profile",
+      code: "WIRESOCK_PROFILE",
+    });
   });
 
   it("reconhece drivers WireSock atual e legado sem confundir servico comum", () => {
@@ -27,6 +46,24 @@ describe("WireSock no Windows", () => {
       "C:\\GoLiveBypass\\proton-confgen.exe",
     ])).toBe("C:\\Apps\\Discord.exe, C:\\GoLiveBypass\\proton-confgen.exe");
     expect(() => formatAllowedApps(["C:\\Apps, Inc\\Discord.exe"])).toThrow("AllowedApps");
+  });
+
+  it("torna a configuração do serviço idempotente e preserva detalhes do SCM no log", () => {
+    const script = wireSockServiceScript("C:\\WireSock\\client.exe", "C:\\GoLive\\wg.conf");
+    expect(script).toContain("Wait-WireSockState 'Stopped' 45");
+    expect(script).toContain("for ($attempt = 1; $attempt -le 2; $attempt++)");
+    expect(script).toContain("GOLIVE_WIRESOCK_ERROR");
+    expect(script).toContain("ServiceSpecificExitCode");
+  });
+
+  it("eleva um arquivo temporário para não estourar o limite de argumentos do Windows", () => {
+    const args = elevatedPowerShellFileArgs("C:\\Users\\teste\\AppData\\Local\\Temp\\golive-wiresock\\activate-service.ps1");
+    expect(args).toHaveLength(4);
+    expect(args[2]).toBe("-EncodedCommand");
+    const decoded = Buffer.from(args[3], "base64").toString("utf16le");
+    expect(decoded).toContain("-File $scriptPath");
+    expect(decoded).toContain("Start-Process powershell.exe -Verb RunAs");
+    expect(decoded).not.toContain("GOLIVE_WIRESOCK_ERROR");
   });
 
   it("inclui o diretorio app do Discord para cobrir todos os subprocessos", () => {

@@ -98,7 +98,10 @@ describe("ProtonVPN Integration & Sidecar", () => {
     expect(classifyProtonError("CAPTCHA_INVALID").code).toBe("CAPTCHA_INVALID");
     expect(classifyProtonError("invalid password").code).toBe("INVALID_CREDENTIALS");
     expect(classifyProtonError("Tempo limite excedido").code).toBe("TIMEOUT");
-    expect(classifyProtonError("spawn proton-confgen ENOENT").code).toBe("MISSING_EXECUTABLE");
+    const missing = classifyProtonError("spawn proton-confgen ENOENT");
+    expect(missing.code).toBe("MISSING_EXECUTABLE");
+    expect(missing.retryable).toBe(true);
+    expect(missing.message).not.toContain("Reinstale o GoLiveBypass");
   });
 
   it("classifica o plano somente quando MaxTier e valido", () => {

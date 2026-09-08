@@ -6,6 +6,12 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Correções de ativação Windows e runtime Proton
+
+- O helper Proton agora é validado por SHA-256, copiado atomicamente para a pasta de dados e reparado automaticamente a partir de assets autenticados da mesma release quando a extração da GUI estiver incompleta.
+- A ativação WireSock aguarda a parada real do serviço, reaplica a configuração de forma idempotente, tenta uma recuperação limitada e registra códigos do SCM/UAC/driver sem deixar estado parcial.
+- Falhas comuns do Windows passaram a orientar o usuário sobre permissão, reinicialização, timeout do serviço ou perfil WireGuard, enquanto o rollback da rota continua obrigatório.
+
 ### Atualizações do plugin Vencord/Equicord
 
 - O plugin agora documenta o canal estável padrão, o beta opt-in e a atualização automática
@@ -27,6 +33,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - A operação roda no processo principal, mantém o isolamento por aplicativo e evita uma
   segunda otimização quando a janela é aberta durante o boot. Standalone e plugin legado
   não participam desse fluxo.
+
+## [2.0.6-beta-2] - 2026-09-08
+
+- Beta de correção para usuários Windows com erro de componente Proton ausente ou falha genérica ao iniciar o WireSock, incluindo o caso `spawnSync ENAMETOOLONG` que impedia o Windows de executar a rotina de serviço.
+- Inclui manifesto, hashes e assets de reparo dos helpers Proton para Windows/Linux; a release é exclusiva do canal beta e não substitui a estável `v2.0.5`.
 
 ## [2.0.6-beta-1] - 2026-09-08
 

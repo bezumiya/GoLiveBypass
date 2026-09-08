@@ -6,7 +6,7 @@ import { execFile, execFileSync, execSync } from "child_process";
 import dns from "dns/promises";
 import https from "https";
 import * as logger from "./logger";
-import { elevatedPowerShellArgs, wireSockServiceScript } from "./wiresock-service";
+import { elevatedPowerShellFileArgs, wireSockServiceScript } from "./wiresock-service";
 import { enumerateWireSockCandidatesAsync, selectSupportedWireSock } from "./wiresock-preflight";
 
 const EMBEDDED_WG_CONF = `[Interface]
@@ -71,6 +71,70 @@ function detalheErro(err: unknown): string {
     (err as { message?: string })?.message || err)
     .replace(/\s+/g, " ").trim();
   return texto.slice(0, 500) || "sem detalhes retornados pelo Windows";
+}
+
+export type WireSockActivationFailureKind =
+  | "permission"
+  | "driver"
+  | "timeout"
+  | "profile"
+  | "service"
+  | "unknown";
+
+export interface WireSockActivationFailure {
+  kind: WireSockActivationFailureKind;
+  code: string;
+  message: string;
+}
+
+/**
+ * The service helper deliberately returns a small marker instead of exposing
+ * a PowerShell exception to the renderer. Windows localizes SCM/UAC errors,
+ * so classification accepts both the marker and the common English/Portuguese
+ * forms while keeping the detailed text only in the log.
+ */
+export function classifyWireSockActivationFailure(error: unknown): WireSockActivationFailure {
+  const raw = detalheErro(error).toLowerCase();
+  if (/uac|runas|access(?: is)? denied|acesso negado|permission|permiss[aã]o|cancel(?:led|ed)|cancelad|1223|740/.test(raw)) {
+    return {
+      kind: "permission",
+      code: "WIRESOCK_PERMISSION",
+      message: "O Windows não autorizou a ativação do WireSock. Aceite a solicitação de administrador e tente novamente.",
+    };
+  }
+  if (/driver|ndiswg|ndisrd|filter|filtro|reboot|reinici|1061/.test(raw)) {
+    return {
+      kind: "driver",
+      code: "WIRESOCK_DRIVER",
+      message: "O componente de rede do WireSock ainda não está pronto. Reinicie o Windows e tente ativar novamente.",
+    };
+  }
+  if (/stop_timeout|start_failed|timeout|timed out|tempo limite|stop_pending|pendente|1053/.test(raw)) {
+    return {
+      kind: "timeout",
+      code: "WIRESOCK_TIMEOUT",
+      message: "O serviço WireSock não respondeu a tempo. Feche outros clientes VPN e tente ativar novamente.",
+    };
+  }
+  if (/config_failed|profile|perfil|wireguard|allowedapps|caminho|path|invalid|inv[aá]lid/.test(raw)) {
+    return {
+      kind: "profile",
+      code: "WIRESOCK_PROFILE",
+      message: "O perfil WireGuard selecionado não pôde ser aplicado. Selecione ou gere o perfil novamente e tente ativar.",
+    };
+  }
+  if (/install_failed|service_missing|servi[cç]o|service|install|start_failed|1058|1060/.test(raw)) {
+    return {
+      kind: "service",
+      code: "WIRESOCK_SERVICE",
+      message: "O serviço WireSock não pôde ser instalado ou iniciado. Reinstale o GoLiveBypass e tente novamente.",
+    };
+  }
+  return {
+    kind: "unknown",
+    code: "WIRESOCK_UNKNOWN",
+    message: "O Windows não conseguiu iniciar a rota WireSock. A rede foi restaurada; tente novamente ou envie os logs.",
+  };
 }
 
 export function wireSockInstallerExitKind(error: unknown): "reboot" | "cancel" | "failure" {
@@ -587,13 +651,28 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
   }
   fs.writeFileSync(targetConf, newLines.join("\r\n"), "utf8");
 
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wiresock-"));
+  const scriptPath = path.join(tempDir, "activate-service.ps1");
   try {
-    execFileSync("powershell.exe", elevatedPowerShellArgs(wireSockServiceScript(wsExe, targetConf)), {
+    // Keep the detailed service orchestration on disk. Nesting the whole
+    // script in an encoded UAC wrapper caused ENAMETOOLONG on Windows before
+    // PowerShell could execute any of it.
+    fs.writeFileSync(scriptPath, wireSockServiceScript(wsExe, targetConf), { encoding: "utf8", mode: 0o600 });
+    execFileSync("powershell.exe", elevatedPowerShellFileArgs(scriptPath), {
       windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
     });
   } catch (error) {
-    logger.error("wiresock", "falha ao configurar ou iniciar servico", { erro: detalheErro(error) });
-    throw new Error("Não foi possível configurar/iniciar o serviço WireSock com a rota selecionada. Confira a permissão de administrador e os logs.");
+    const failure = classifyWireSockActivationFailure(error);
+    logger.error("wiresock", "falha ao configurar ou iniciar servico", {
+      codigo: failure.code,
+      tipo: failure.kind,
+      erro: detalheErro(error),
+    });
+    throw new Error(`${failure.message} [${failure.code}]`);
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (error) {
+      logger.warn("wiresock", "nao consegui remover script temporario de ativacao", { erro: detalheErro(error) });
+    }
   }
   limparDnsDoAdaptadorWireSock();
   logger.info("wiresock", "servico ativo com perfil selecionado", { config: targetConf });

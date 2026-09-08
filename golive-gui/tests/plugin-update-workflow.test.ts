@@ -40,7 +40,7 @@ describe("workflow de release do plugin", () => {
   it("faz beta-marcar aguardar todos os produtores de assets", () => {
     const marker = jobBlock("beta-marcar");
 
-    expect(marker).toContain("needs: [windows, linux, release-assets]");
+    expect(marker).toMatch(/needs: \[windows, linux, release-assets, proton-runtime-assets\]/);
     expect(marker).toContain("--prerelease");
     expect(marker).toContain("--draft=false");
   });

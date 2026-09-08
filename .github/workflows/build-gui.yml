@@ -93,6 +93,73 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  proton-runtime-assets:
+    # Reparo para instalações que perderam ou não conseguiram extrair o helper
+    # Proton de extraResources. As saídas usam as mesmas flags determinísticas
+    # da build local e o manifesto é publicado junto com os hashes.
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - name: Compilar helpers Proton para reparo
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          MANIFEST="tools/proton-confgen/build/proton-confgen-manifest.json"
+          node golive-gui/scripts/build-proton.mjs
+          test "$(jq -r '.version' "$MANIFEST")" = "$VERSION"
+          mkdir -p runtime
+          cp tools/proton-confgen/build/proton-confgen \
+            "runtime/GoLiveBypass-${VERSION}-proton-confgen-linux-x64"
+          cp tools/proton-confgen/build/proton-confgen.exe \
+            "runtime/GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe"
+          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64 \
+            > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64.sha256
+          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe \
+            > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe.sha256
+          cp "$MANIFEST" runtime/proton-confgen-manifest.json
+      - name: Comparar hashes do manifesto com os assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          MANIFEST="tools/proton-confgen/build/proton-confgen-manifest.json"
+          test "$(jq -r '.version' "$MANIFEST")" = "$VERSION"
+          for pair in \
+            "linux-x64|GoLiveBypass-${VERSION}-proton-confgen-linux-x64" \
+            "win32-x64|GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe"; do
+            key="${pair%%|*}"
+            asset="${pair#*|}"
+            expected="$(jq -r --arg key "$key" '.assets[$key].sha256' "$MANIFEST")"
+            actual="$(sha256sum "runtime/$asset" | awk '{print $1}')"
+            test "$expected" != "null"
+            test "$expected" = "$actual"
+          done
+      - name: Upload dos helpers Proton
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          draft: ${{ inputs.rascunho || inputs.canal == 'beta' }}
+          files: |
+            runtime/GoLiveBypass-*-proton-confgen-linux-x64
+            runtime/GoLiveBypass-*-proton-confgen-linux-x64.sha256
+            runtime/GoLiveBypass-*-proton-confgen-win-x64.exe
+            runtime/GoLiveBypass-*-proton-confgen-win-x64.exe.sha256
+            runtime/proton-confgen-manifest.json
+          fail_on_unmatched_files: true
+
   macos:
     # No canal beta o mac pula: o updater dele ja esta desligado no codigo (app
     # nao assinado) — nao ha o que testar lá, e buildar sem consumidor e ruido.
@@ -159,7 +226,7 @@ jobs:
         run: |
           mkdir -p goLiveBypass/bin/win32-x64
           cd tools/proton-confgen
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags='-s -w' \
             -o ../../goLiveBypass/bin/win32-x64/proton-confgen.exe ./cmd/protonvpn-wg
           cd ../..
           cd goLiveBypass
@@ -196,7 +263,7 @@ jobs:
     # o que o testador le ao abrir a release.
     if: ${{ inputs.canal == 'beta' && !inputs.rascunho }}
     runs-on: ubuntu-latest
-    needs: [windows, linux, release-assets]
+    needs: [windows, linux, release-assets, proton-runtime-assets]
     steps:
       - name: Marcar prerelease e escrever a linha do canal
         env:
