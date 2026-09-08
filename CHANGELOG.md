@@ -6,6 +6,12 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Paridade dos helpers Proton no empacotamento
+
+- A compilação dos helpers agora desativa o carimbo VCS do Go (`-buildvcs=false`) e o job de assets de reparo reutiliza exatamente as saídas que geram o manifesto.
+- O pipeline compara a versão e o SHA-256 de cada helper com `proton-confgen-manifest.json` antes do upload; qualquer divergência interrompe a release.
+- O incidente de paridade encontrado na `v2.0.5-beta-10` está documentado em [`docs/releases/2026-09-08-proton-helper-hash-parity.md`](docs/releases/2026-09-08-proton-helper-hash-parity.md).
+
 ## [2.0.5-beta-10] - 2026-09-07
 
 ### Fluxo de atualização na GUI

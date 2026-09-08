@@ -13,7 +13,10 @@ const targets = [
   { key: 'linux-x64', output: 'build/proton-confgen', env: { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' } },
   { key: 'win32-x64', output: 'build/proton-confgen.exe', env: { GOOS: 'windows', GOARCH: 'amd64', CGO_ENABLED: '0' } },
 ];
-const buildArgs = ['build', '-trimpath', '-ldflags=-s -w -buildid=', '-o'];
+// Nunca deixe o estado do checkout alterar os bytes do helper. O workflow cria
+// arquivos no checkout antes de compilar o segundo target, o que ativaria
+// vcs.modified=true sem esta flag e quebraria o hash do manifesto.
+const buildArgs = ['build', '-buildvcs=false', '-trimpath', '-ldflags=-s -w -buildid=', '-o'];
 
 // Explicit env objects work with cmd.exe, PowerShell and POSIX shells alike.
 for (const target of targets) {

@@ -12,6 +12,7 @@ describe("empacotamento do runtime Proton", () => {
     ]));
     const script = fs.readFileSync(path.join(root, "golive-gui/scripts/build-proton.mjs"), "utf8");
     expect(script).toContain("proton-confgen-manifest.json");
+    expect(script).toContain("-buildvcs=false");
     expect(script).toContain("-trimpath");
     expect(script).toContain("-buildid=");
   });
@@ -21,6 +22,11 @@ describe("empacotamento do runtime Proton", () => {
     expect(workflow).toContain("proton-runtime-assets:");
     expect(workflow).toContain("proton-confgen-win-x64.exe");
     expect(workflow).toContain("proton-confgen-linux-x64");
+    expect(workflow).toContain("node golive-gui/scripts/build-proton.mjs");
+    expect(workflow).toContain(".assets[$key].sha256");
+    expect(workflow).toContain("Comparar hashes do manifesto com os assets");
+    expect(workflow).toContain("cp tools/proton-confgen/build/proton-confgen");
+    expect(workflow).toContain("-buildvcs=false");
     expect(workflow).toContain("needs: [windows, linux, proton-runtime-assets]");
   });
 });
