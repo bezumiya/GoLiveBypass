@@ -124,10 +124,8 @@ jobs:
   release-assets:
     # Sobe os assets de update que NAO dependem do electron-builder: o zip do
     # userplugin Vencord e o bypass standalone "puro". Roda em paralelo com os
-    # builds da GUI (sao independentes). No canal beta pula: plugin/CLI nao estao
-    # no ciclo de teste da GUI, e um goLiveBypass-vencord.zip beta numa prerelease
-    # poderia ser pego pelo updater do plugin.
-    if: ${{ inputs.canal != 'beta' }}
+    # builds da GUI (sao independentes). No beta, todos os assets permanecem em
+    # draft ate beta-marcar concluir a classificacao da release.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -181,7 +179,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ inputs.tag }}"
-          draft: ${{ inputs.rascunho }}
+          draft: ${{ inputs.rascunho || inputs.canal == 'beta' }}
           files: |
             ${{ steps.version.outputs.vencord_basename }}.zip
             ${{ steps.version.outputs.vencord_basename }}.zip.sha256
@@ -196,7 +194,7 @@ jobs:
     # o que o testador le ao abrir a release.
     if: ${{ inputs.canal == 'beta' && !inputs.rascunho }}
     runs-on: ubuntu-latest
-    needs: [windows, linux]
+    needs: [windows, linux, release-assets]
     steps:
       - name: Marcar prerelease e escrever a linha do canal
         env:
