@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-13] - 2026-09-08
+
 ### Proteção contra downgrade no SSE e no updater Windows
 
 - O broker SSE agora rejeita releases antigas ou iguais, evitando que um

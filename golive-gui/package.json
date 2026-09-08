@@ -1,7 +1,7 @@
 {
   "name": "golive-gui",
   "private": true,
-  "version": "2.0.5-beta-12",
+  "version": "2.0.5-beta-13",
   "desktopName": "com.golivebypass.gui.desktop",
   "description": "Devolve o Go Live e a camera do Discord para contas que cairam no bloqueio regional brasileiro",
   "author": "bezumiya",
