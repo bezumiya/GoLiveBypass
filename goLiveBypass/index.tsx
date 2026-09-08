@@ -23,7 +23,45 @@ import {
     type StreamObservationStatus,
 } from "./stability";
 
-const Native = VencordNative?.pluginHelpers?.GoLiveBypass as PluginNative<typeof import("./native")> | undefined;
+type PluginUpdateChannel = "stable" | "beta";
+
+interface PluginUpdateStatus {
+    current: string;
+    channel: PluginUpdateChannel;
+    enabled: boolean;
+    pending: boolean;
+    pendingVersion?: string;
+    lastCheckedAt?: number;
+    lastError?: string;
+}
+
+interface PluginUpdateCheckResult {
+    ok: boolean;
+    current?: string;
+    channel?: PluginUpdateChannel;
+    latest?: string;
+    available?: boolean;
+    pending?: boolean;
+    error?: string;
+}
+
+interface PluginUpdateResult {
+    ok: boolean;
+    updated: boolean;
+    current?: string;
+    latest?: string;
+    channel?: PluginUpdateChannel;
+    pending?: boolean;
+    reloadRequired?: boolean;
+    error?: string;
+}
+
+interface PluginUpdateNative {
+    configurePluginUpdates?: (input: unknown) => Promise<{ enabled: boolean; channel: PluginUpdateChannel }>;
+    getPluginUpdateStatus?: () => Promise<PluginUpdateStatus>;
+}
+
+const Native = VencordNative?.pluginHelpers?.GoLiveBypass as (PluginNative<typeof import("./native")> & PluginUpdateNative) | undefined;
 
 const logger = new Logger("GoLiveBypass");
 
@@ -65,6 +103,7 @@ const RTCConnectionStore: DiagnosticStore = findStoreLazy("RTCConnectionStore");
 const VIDEO_GUARD = "2026-08-video-guard";
 
 const PLUGIN_VERSION = "2.0.0-beta.1";
+const PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS = 15_000;
 
 const AUTOMATIC = "";
 const VOICE_KEYS: "voiceRegion"[] = ["voiceRegion"];
@@ -73,6 +112,7 @@ const STREAM_KEYS: "streamRegion"[] = ["streamRegion"];
 let original: RegionStore | undefined;
 let streamClaimTimer: ReturnType<typeof setInterval> | null = null;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+let lastNotifiedPendingVersion: string | null = null;
 let streamClaimState: StreamClaimState = initialStreamClaimState();
 let streamClaimStatus = "idle";
 let streamClaimProbeFailed = false;
@@ -83,6 +123,16 @@ let lastStreamObservation: {
     nativeStreamCount: number | null;
 } | null = null;
 let lastSelectedStreamRegion: string | null = null;
+
+function normalizedUpdateChannel(value: unknown): PluginUpdateChannel {
+    return value === "beta" ? "beta" : "stable";
+}
+
+function notifyPendingPluginUpdate(version: unknown): void {
+    if (typeof version !== "string" || !version || version === lastNotifiedPendingVersion) return;
+    lastNotifiedPendingVersion = version;
+    showToast(`GoLiveBypass v${version} pronto; recarregue o Discord para aplicar a atualização.`, Toasts.Type.SUCCESS);
+}
 
 interface RegionSelectProps {
     value: string;
@@ -159,23 +209,48 @@ function AboutPlugin() {
 }
 
 function PluginUpdateSettings() {
-    const [state, setState] = useState<{ label: string; tone: "neutral" | "success" | "warning" }>({
+    const { updateChannel, autoUpdate } = settings.use(["updateChannel", "autoUpdate"]);
+    const [state, setState] = useState<{ label: string; tone: "neutral" | "success" | "warning"; available?: boolean }>({
         label: `v${PLUGIN_VERSION} · instalada`, tone: "neutral"
     });
+    const [status, setStatus] = useState<PluginUpdateStatus | null>(null);
     const [busy, setBusy] = useState(false);
+
+    const refreshStatus = async () => {
+        const getStatus = Native?.getPluginUpdateStatus;
+        if (typeof getStatus !== "function") return;
+        try {
+            const next = await getStatus();
+            setStatus(next);
+            if (next.pending) {
+                notifyPendingPluginUpdate(next.pendingVersion);
+                const version = next.pendingVersion ? `v${next.pendingVersion}` : "a nova versão";
+                setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning" });
+            } else if (next.lastError) {
+                setState({ label: `v${next.current || PLUGIN_VERSION} · atualização falhou`, tone: "neutral" });
+            }
+        } catch (error) {
+            logger.error("Falha ao consultar o estado do updater do plugin", error);
+        }
+    };
 
     const check = async () => {
         if (!Native || busy) return;
         setBusy(true);
         try {
-            const result = await Native.checkPluginUpdate();
+            const result = await Native.checkPluginUpdate() as PluginUpdateCheckResult;
+            const current = result.current || PLUGIN_VERSION;
             if (!result.ok) {
                 const detail = result.error ? ` · ${result.error.slice(0, 48)}` : "";
-                setState({ label: `v${PLUGIN_VERSION} · verificação falhou${detail}`, tone: "neutral" });
+                setState({ label: `v${current} · verificação falhou${detail}`, tone: "neutral" });
+            } else if (result.pending) {
+                const version = result.latest ? `v${result.latest}` : "a nova versão";
+                notifyPendingPluginUpdate(result.latest);
+                setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning" });
             } else if (result.available) {
-                setState({ label: `v${PLUGIN_VERSION} · v${result.latest} disponível`, tone: "warning" });
+                setState({ label: `v${current} · v${result.latest || "nova"} disponível`, tone: "warning", available: true });
             } else {
-                setState({ label: `v${PLUGIN_VERSION} · atualizada`, tone: "success" });
+                setState({ label: `v${current} · sem atualização disponível`, tone: "success" });
             }
         } catch (error) {
             // Native.checkPluginUpdate() em si nunca rejeita (o corpo inteiro do lado nativo
@@ -192,18 +267,49 @@ function PluginUpdateSettings() {
         }
     };
 
-    useEffect(() => { void check(); }, []);
+    useEffect(() => {
+        let disposed = false;
+        const configure = async () => {
+            try {
+                const configureUpdates = Native?.configurePluginUpdates;
+                if (typeof configureUpdates === "function") {
+                    await configureUpdates({
+                        enabled: autoUpdate,
+                        channel: normalizedUpdateChannel(updateChannel)
+                    });
+                }
+                if (!disposed) await refreshStatus();
+            } catch (error) {
+                if (!disposed) logger.error("Falha ao configurar o updater do plugin", error);
+            }
+        };
+        void configure();
+
+        const timer = setInterval(() => {
+            if (!disposed) void refreshStatus();
+        }, PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS);
+        return () => {
+            disposed = true;
+            clearInterval(timer);
+        };
+    }, [updateChannel, autoUpdate]);
 
     const update = async () => {
         if (!Native || busy) return;
         setBusy(true);
         try {
-            const result = await Native.updatePlugin();
-            if (result.updated) {
-                setState({ label: `v${result.latest} · atualizada`, tone: "success" });
-                showToast("GoLiveBypass atualizado. Recarregue o Discord para aplicar a nova versão.", Toasts.Type.SUCCESS);
+            const result = await Native.updatePlugin() as PluginUpdateResult;
+            if (!result.ok) throw new Error(result.error || "O updater recusou a atualização.");
+            if (result.updated || result.pending || result.reloadRequired) {
+                const version = result.latest || result.current;
+                notifyPendingPluginUpdate(version);
+                setState({
+                    label: version ? `v${version} pronta; recarregue o Discord` : "Atualização pronta; recarregue o Discord",
+                    tone: "warning"
+                });
+                await refreshStatus();
             } else {
-                setState({ label: `v${result.latest} · atualizada`, tone: "success" });
+                setState({ label: `v${result.current || PLUGIN_VERSION} · sem atualização disponível`, tone: "success" });
             }
         } catch (error) {
             setState({ label: `v${PLUGIN_VERSION} · atualização falhou`, tone: "warning" });
@@ -213,12 +319,24 @@ function PluginUpdateSettings() {
         }
     };
 
+    const channelLabel = updateChannel === "beta" ? "Beta (opt-in)" : "Estável";
+    const checkedLabel = typeof status?.lastCheckedAt === "number"
+        ? ` · última consulta ${new Date(status.lastCheckedAt).toLocaleTimeString()}`
+        : "";
+
     return (
-        <Paragraph>
-            <strong>{state.label}</strong>{" "}
-            <Button onClick={() => void check()} disabled={busy}>{busy ? "Verificando…" : "Verificar"}</Button>{" "}
-            {state.tone === "warning" && <Button onClick={() => void update()} disabled={busy}>Atualizar</Button>}
-        </Paragraph>
+        <section>
+            <Paragraph>
+                <strong>Atualizações</strong> — canal {channelLabel}; automática {autoUpdate ? "ligada" : "desligada"}{checkedLabel}
+            </Paragraph>
+            <Paragraph>
+                <strong>{state.label}</strong>{" "}
+                <Button onClick={() => void check()} disabled={busy}>{busy ? "Verificando…" : "Verificar"}</Button>{" "}
+                {state.available && <Button onClick={() => void update()} disabled={busy}>Atualizar</Button>}
+            </Paragraph>
+            {status?.pending && <Paragraph>Atualização {status.pendingVersion ? `v${status.pendingVersion}` : "preparada"} pronta; recarregue o Discord para aplicar.</Paragraph>}
+            {status?.lastError && <Paragraph>Último erro do updater: {status.lastError.slice(0, 240)}</Paragraph>}
+        </section>
     );
 }
 
@@ -232,6 +350,19 @@ const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         component: StreamRegionPicker,
         default: AUTOMATIC
+    },
+    updateChannel: {
+        type: OptionType.SELECT,
+        description: "Escolha se o updater deve receber somente versões estáveis ou também versões beta.",
+        options: [
+            { label: "Estável", value: "stable", default: true },
+            { label: "Beta", value: "beta" }
+        ]
+    },
+    autoUpdate: {
+        type: OptionType.BOOLEAN,
+        description: "Verificar, baixar e preparar atualizações em segundo plano. O Discord nunca é reiniciado automaticamente.",
+        default: true
     },
     vpnMode: {
         type: OptionType.SELECT,
@@ -761,15 +892,24 @@ export default definePlugin({
         forceRegion();
         startStreamClaimWatch();
 
-        // O aviso aparece mesmo para quem nunca abre a aba de configuracao. Consulta uma vez
-        // por sessao; o botao da configuracao continua disponivel para uma consulta manual.
+        const configure = Native?.configurePluginUpdates;
+        if (typeof configure === "function") {
+            void configure({
+                enabled: settings.store.autoUpdate !== false,
+                channel: normalizedUpdateChannel(settings.store.updateChannel)
+            }).catch(error => logger.error("Falha ao configurar o updater do plugin", error));
+        }
+
+        // O aviso aparece mesmo para quem nunca abre a aba de configuração. O processo
+        // principal faz a checagem/download; o renderer só observa se há reload pendente.
         if (updateCheckTimer !== null) clearTimeout(updateCheckTimer);
         updateCheckTimer = setTimeout(() => {
             updateCheckTimer = null;
-            Native?.checkPluginUpdate().then(result => {
-                if (result.ok && result.available)
-                    showToast(`GoLiveBypass v${result.latest} disponível. Abra as configurações do plugin para atualizar.`, Toasts.Type.MESSAGE);
-            }).catch(() => { });
+            const getStatus = Native?.getPluginUpdateStatus;
+            if (typeof getStatus !== "function") return;
+            getStatus().then(status => {
+                if (status.pending) notifyPendingPluginUpdate(status.pendingVersion);
+            }).catch(error => logger.error("Falha ao consultar atualização pendente do plugin", error));
         }, 8_000);
 
         Native?.enable().then(result => {
