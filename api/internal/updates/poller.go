@@ -140,7 +140,18 @@ func (p *ReleasePoller) newestRelease(ctx context.Context) (githubRelease, error
 		if release.Draft || release.PublishedAt == "" || !releaseTagPattern.MatchString(release.TagName) {
 			continue
 		}
-		if newest.PublishedAt == "" || release.PublishedAt > newest.PublishedAt {
+		if _, valid := CompareReleaseTags(release.TagName, release.TagName); !valid {
+			continue
+		}
+		if newest.PublishedAt == "" {
+			newest = release
+			continue
+		}
+		comparison, valid := CompareReleaseTags(release.TagName, newest.TagName)
+		if !valid {
+			continue
+		}
+		if comparison > 0 || (comparison == 0 && release.PublishedAt > newest.PublishedAt) {
 			newest = release
 		}
 	}

@@ -74,6 +74,27 @@ func TestReleasePollerEstablishesBaselineAndPublishesNewRelease(t *testing.T) {
 	}
 }
 
+func TestReleasePollerChoosesHighestSemVerNotLatestDate(t *testing.T) {
+	broker := NewBroker()
+	client := &fakeReleaseHTTP{bodies: [][]byte{
+		[]byte(`[
+			{"tag_name":"v2.0.5-beta-9","draft":false,"prerelease":true,"published_at":"2026-09-08T03:00:00Z"},
+			{"tag_name":"v2.0.5-beta-12","draft":false,"prerelease":true,"published_at":"2026-09-08T02:00:00Z"},
+			{"tag_name":"v2.0.5-beta-13","draft":true,"prerelease":true,"published_at":"2026-09-08T04:00:00Z"}
+		]`),
+	}}
+	poller := NewReleasePoller("token", "owner/repo", broker, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	poller.client = client
+
+	got, err := poller.newestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TagName != "v2.0.5-beta-12" {
+		t.Fatalf("release escolhida = %+v, want beta-12", got)
+	}
+}
+
 func TestBrokerDeduplicatesWebhookAndPollingForSameRelease(t *testing.T) {
 	broker := NewBroker()
 	subscription, _, err := broker.Subscribe("203.0.113.21")
