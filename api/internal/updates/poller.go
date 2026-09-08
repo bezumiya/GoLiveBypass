@@ -90,6 +90,12 @@ func (p *ReleasePoller) pollOnce(ctx context.Context) error {
 	key := release.TagName + "|" + release.PublishedAt
 	if p.lastKey == "" {
 		p.lastKey = key
+		p.broker.SeedLatest(ReleaseEvent{
+			DeliveryID:  "github-poll:" + key,
+			Tag:         release.TagName,
+			Prerelease:  release.Prerelease,
+			PublishedAt: release.PublishedAt,
+		})
 		p.logger.Info("linha de base do polling de releases definida", "tag", release.TagName)
 		return nil
 	}

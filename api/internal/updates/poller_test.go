@@ -74,6 +74,30 @@ func TestReleasePollerEstablishesBaselineAndPublishesNewRelease(t *testing.T) {
 	}
 }
 
+func TestReleasePollerBaselineProtectsReplayFromDelayedWebhook(t *testing.T) {
+	broker := NewBroker()
+	client := &fakeReleaseHTTP{bodies: [][]byte{[]byte(`[
+		{"tag_name":"v2.0.5-beta-12","draft":false,"prerelease":true,"published_at":"2026-09-08T02:00:00Z"}
+	]`)}}
+	poller := NewReleasePoller("token", "owner/repo", broker, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	poller.client = client
+
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if broker.Publish("delayed-beta-9", ReleaseEvent{Tag: "v2.0.5-beta-9", Prerelease: true}) {
+		t.Fatal("webhook atrasado foi publicado")
+	}
+	subscription, replay, err := broker.Subscribe("203.0.113.41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if replay == nil || replay.Tag != "v2.0.5-beta-12" {
+		t.Fatalf("replay apos webhook atrasado = %+v", replay)
+	}
+}
+
 func TestReleasePollerChoosesHighestSemVerNotLatestDate(t *testing.T) {
 	broker := NewBroker()
 	client := &fakeReleaseHTTP{bodies: [][]byte{

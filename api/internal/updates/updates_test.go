@@ -119,6 +119,34 @@ func TestBrokerRejectsOlderRelease(t *testing.T) {
 	}
 }
 
+func TestBrokerSeedsLatestWithoutPublishing(t *testing.T) {
+	broker := NewBroker()
+	if !broker.SeedLatest(ReleaseEvent{
+		DeliveryID: "github-poll:v2.0.5-beta-12|2026-09-08T02:00:00Z",
+		Tag:        "v2.0.5-beta-12",
+		Prerelease: true,
+	}) {
+		t.Fatal("baseline nao foi registrada")
+	}
+
+	subscription, replay, err := broker.Subscribe("203.0.113.32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if replay == nil || replay.Tag != "v2.0.5-beta-12" || replay.DeliveryID == "" {
+		t.Fatalf("replay da baseline = %+v", replay)
+	}
+	select {
+	case event := <-subscription.Events():
+		t.Fatalf("baseline acordou cliente: %+v", event)
+	default:
+	}
+	if broker.Publish("atrasado-beta-9", ReleaseEvent{Tag: "v2.0.5-beta-9", Prerelease: true}) {
+		t.Fatal("webhook atrasado rebaixou a baseline")
+	}
+}
+
 func TestBrokerLimitsConnectionsPerIP(t *testing.T) {
 	broker := NewBroker()
 	first, _, err := broker.Subscribe("203.0.113.12")

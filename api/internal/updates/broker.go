@@ -103,6 +103,27 @@ func (b *Broker) Subscribe(ip string) (*Subscription, *ReleaseEvent, error) {
 	return &Subscription{broker: b, client: c}, latest, nil
 }
 
+// SeedLatest registra a linha de base conhecida pelo poller sem acordar os
+// clientes. Isso fecha a janela logo apos um restart: um webhook atrasado nao
+// pode ser o primeiro evento e rebaixar o replay antes do proximo poll.
+func (b *Broker) SeedLatest(event ReleaseEvent) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, valid := CompareReleaseTags(event.Tag, event.Tag); !valid {
+		return false
+	}
+	if b.latest != nil {
+		comparison, valid := CompareReleaseTags(event.Tag, b.latest.Tag)
+		if !valid || comparison <= 0 {
+			return false
+		}
+	}
+	copy := event
+	b.latest = &copy
+	return true
+}
+
 // Publish retorna false quando o delivery ja foi processado. Eventos novos
 // substituem o pulso pendente de um cliente lento, em vez de travar o webhook.
 func (b *Broker) Publish(deliveryID string, event ReleaseEvent) bool {
