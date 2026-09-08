@@ -80,10 +80,9 @@ try {
 }
 
 /**
- * Starts WireSock in its official application mode. This is the fallback for
- * machines where the global Windows service is stale, locked by another VPN,
- * or cannot be reconfigured. The process still runs elevated, but only routes
- * applications from the logged-in user.
+ * Starts WireSock in its official application mode. This is the primary path:
+ * it routes only the configured applications for the logged-in user and avoids
+ * inheriting a stale global Windows service profile.
  */
 export function wireSockDirectScript(executable: string, config: string, resultPath: string): string {
   for (const value of [executable, config, resultPath]) {

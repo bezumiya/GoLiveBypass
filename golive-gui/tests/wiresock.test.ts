@@ -75,12 +75,17 @@ describe("WireSock no Windows", () => {
     expect(script).toContain("-network-lock', 'disabled'");
   });
 
-  it("usa o modo direto quando o wrapper do serviço não confirma a rota", () => {
+  it("prioriza o modo direto oficial e usa o serviço apenas como fallback", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
-    expect(src).toContain("servico indisponivel; tentando modo direto oficial");
     expect(src).toContain("wireSockDirectScript(wsExe, targetConf, directResultPath)");
+    expect(src).toContain("modo direto oficial indisponivel; tentando servico");
+    expect(src).toContain("wireSockServiceScript(wsExe, targetConf, serviceResultPath)");
+    expect(src.indexOf("wireSockDirectScript(wsExe, targetConf, directResultPath)")).toBeLessThan(
+      src.indexOf("wireSockServiceScript(wsExe, targetConf, serviceResultPath)"),
+    );
+    expect(src).toContain('directDetail.startsWith("DIRECT_RUNNING")');
     expect(src).toContain("await esperarTunel(12, 250)");
-    expect(src).toContain('activationMode = "direct"');
+    expect(src).toContain('activationMode = "service"');
   });
 
   it("eleva um arquivo temporário para não estourar o limite de argumentos do Windows", () => {

@@ -663,68 +663,87 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
       return "";
     }
   };
-  let activationMode: "service" | "direct" = "service";
+  let activationMode: "service" | "direct" = "direct";
   try {
-    // Keep the detailed service orchestration on disk. Nesting the whole
-    // script in an encoded UAC wrapper caused ENAMETOOLONG on Windows before
-    // PowerShell could execute any of it.
+    // The official WireSock Discord setup uses `run -config`. It owns only
+    // this user's application tunnel and does not inherit a stale global
+    // service profile. Starting a service merely proves that SCM accepted a
+    // process; it does not prove that the WFP filter captured Discord.
     fs.writeFileSync(
-      serviceScriptPath,
-      wireSockServiceScript(wsExe, targetConf, serviceResultPath),
+      directScriptPath,
+      wireSockDirectScript(wsExe, targetConf, directResultPath),
       { encoding: "utf8", mode: 0o600 },
     );
-    let serviceError: unknown = null;
+    let directError: unknown = null;
     try {
-      execFileSync("powershell.exe", elevatedPowerShellFileArgs(serviceScriptPath), {
+      execFileSync("powershell.exe", elevatedPowerShellFileArgs(directScriptPath), {
         windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
       });
     } catch (error) {
-      serviceError = error;
+      directError = error;
     }
 
-    // PowerShell can return a non-zero wrapper status while the elevated child
-    // already left the service running. Never tear down a working route solely
-    // because CLIXML/progress output confused the wrapper.
-    if (serviceError && !(await esperarTunel(6, 250))) {
-      const serviceDetail = readResult(serviceResultPath) || detalheErro(serviceError);
-      logger.warn("wiresock", "servico indisponivel; tentando modo direto oficial", {
-        erro: serviceDetail,
+    // The result file belongs to the elevated child. Unlike an SCM RUNNING
+    // state, DIRECT_RUNNING means that the exact application-mode process
+    // stayed alive after parsing this profile.
+    const directDetail = readResult(directResultPath);
+    const directStarted = directDetail.startsWith("DIRECT_RUNNING") && await esperarTunel(12, 250);
+    if (!directStarted) {
+      const directFailure = directDetail || (directError ? detalheErro(directError) : "o processo direto não permaneceu ativo");
+      logger.warn("wiresock", "modo direto oficial indisponivel; tentando servico", {
+        erro: directFailure,
       });
+      // Keep the detailed service orchestration on disk. Nesting the whole
+      // script in an encoded UAC wrapper caused ENAMETOOLONG on Windows before
+      // PowerShell could execute any of it.
       fs.writeFileSync(
-        directScriptPath,
-        wireSockDirectScript(wsExe, targetConf, directResultPath),
+        serviceScriptPath,
+        wireSockServiceScript(wsExe, targetConf, serviceResultPath),
         { encoding: "utf8", mode: 0o600 },
       );
+      let serviceError: unknown = null;
       try {
-        execFileSync("powershell.exe", elevatedPowerShellFileArgs(directScriptPath), {
+        execFileSync("powershell.exe", elevatedPowerShellFileArgs(serviceScriptPath), {
           windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
         });
-      } catch (directError) {
-        const directDetail = readResult(directResultPath) || detalheErro(directError);
-        const failure = classifyWireSockActivationFailure(`${serviceDetail} ${directDetail}`);
-        logger.error("wiresock", "servico e modo direto falharam", {
+      } catch (error) {
+        serviceError = error;
+      }
+
+      // PowerShell can return a non-zero wrapper status while the elevated
+      // child already left the service running. Preserve that route only if it
+      // is genuinely active; otherwise expose the combined actionable cause.
+      if (serviceError && !(await esperarTunel(6, 250))) {
+        const serviceDetail = readResult(serviceResultPath) || detalheErro(serviceError);
+        const failure = classifyWireSockActivationFailure(`${directFailure} ${serviceDetail}`);
+        logger.error("wiresock", "modo direto e servico falharam", {
           codigo: failure.code,
           tipo: failure.kind,
+          direto: directFailure,
           servico: serviceDetail,
-          direto: directDetail,
         });
         throw new Error(`${failure.message} [${failure.code}]`);
       }
-      if (!(await esperarTunel(12, 250))) {
-        const directDetail = readResult(directResultPath) || "processo direto não permaneceu ativo";
-        const failure = classifyWireSockActivationFailure(`${serviceDetail} ${directDetail}`);
-        logger.error("wiresock", "modo direto nao confirmou processo ativo", {
+      if (!serviceError && !(await esperarTunel(6, 250))) {
+        const serviceDetail = readResult(serviceResultPath) || "serviço encerrou logo após iniciar";
+        const failure = classifyWireSockActivationFailure(`${directFailure} ${serviceDetail}`);
+        logger.error("wiresock", "servico nao confirmou processo ativo", {
           codigo: failure.code,
           tipo: failure.kind,
+          direto: directFailure,
           servico: serviceDetail,
-          direto: directDetail,
         });
         throw new Error(`${failure.message} [${failure.code}]`);
       }
-      activationMode = "direct";
-    } else if (serviceError) {
-      logger.warn("wiresock", "wrapper retornou erro, mas o servico foi confirmado ativo", {
-        erro: readResult(serviceResultPath) || detalheErro(serviceError),
+      activationMode = "service";
+      if (serviceError) {
+        logger.warn("wiresock", "wrapper do servico retornou erro, mas o processo foi confirmado ativo", {
+          erro: readResult(serviceResultPath) || detalheErro(serviceError),
+        });
+      }
+    } else if (directError) {
+      logger.warn("wiresock", "wrapper do modo direto retornou erro, mas o processo foi confirmado ativo", {
+        erro: directDetail || detalheErro(directError),
       });
     }
   } finally {

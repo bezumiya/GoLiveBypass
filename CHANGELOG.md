@@ -9,7 +9,7 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ### Correções de ativação Windows e runtime Proton
 
 - O helper Proton agora é validado por SHA-256, copiado atomicamente para a pasta de dados e reparado automaticamente a partir de assets autenticados da mesma release quando a extração da GUI estiver incompleta.
-- A ativação WireSock aguarda a parada real do serviço, reaplica a configuração de forma idempotente e confirma o processo antes de considerar a rota ativa. Se o serviço global falhar, a GUI usa automaticamente o modo oficial por aplicativo do WireSock para o usuário logado.
+- A ativação WireSock no Windows passa a usar primeiro o modo oficial por aplicativo (`run`), evitando perfis globais de serviço que podem aparecer como ativos sem capturar o Discord. O serviço permanece apenas como fallback idempotente quando o modo direto não pode iniciar.
 - A rotina elevada devolve um resultado próprio em arquivo temporário; mensagens CLIXML do PowerShell não são mais confundidas com falhas do serviço nem provocam rollback de uma rota que já iniciou.
 - Falhas comuns do Windows passaram a orientar o usuário sobre permissão, reinicialização, timeout do serviço ou perfil WireGuard, enquanto o rollback da rota continua obrigatório.
 
@@ -34,6 +34,10 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - A operação roda no processo principal, mantém o isolamento por aplicativo e evita uma
   segunda otimização quando a janela é aberta durante o boot. Standalone e plugin legado
   não participam desse fluxo.
+
+## [2.0.6-beta-4] - 2026-09-08
+
+- Corrige o caso da issue #256 no Windows em que o serviço WireSock aparecia como ativo, mas o filtro não capturava o Discord e a rota continuava brasileira. A GUI agora prioriza o modo oficial por aplicativo (`wiresock-client run`), confirma o processo que leu o perfil e mantém o serviço global apenas como fallback.
 
 ## [2.0.6-beta-3] - 2026-09-08
 
