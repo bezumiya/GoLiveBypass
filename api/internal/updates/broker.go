@@ -114,15 +114,26 @@ func (b *Broker) Publish(deliveryID string, event ReleaseEvent) bool {
 	if _, ok := b.seen[deliveryID]; ok {
 		return false
 	}
+	if _, valid := CompareReleaseTags(event.Tag, event.Tag); !valid {
+		return false
+	}
 	// O polling usa um delivery proprio. Se o webhook chegar tambem, o mesmo
 	// release nao deve acordar cada cliente duas vezes.
 	if b.latest != nil && b.latest.Tag == event.Tag && b.latest.PublishedAt == event.PublishedAt {
+		b.rememberDelivery(deliveryID, now)
 		return false
 	}
-	b.seen[deliveryID] = now
-	if len(b.seen) > maxRememberedDelivery {
-		b.pruneOldest()
+	if b.latest != nil {
+		comparison, valid := CompareReleaseTags(event.Tag, b.latest.Tag)
+		if !valid || comparison <= 0 {
+			// Um webhook atrasado nunca pode rebaixar o replay deixado pelo
+			// poller (ou por outro webhook). Ainda marcamos o delivery como
+			// visto para nao reprocessa-lo em cada retry do GitHub.
+			b.rememberDelivery(deliveryID, now)
+			return false
+		}
 	}
+	b.rememberDelivery(deliveryID, now)
 
 	event.DeliveryID = deliveryID
 	copy := event
@@ -144,6 +155,13 @@ func (b *Broker) Publish(deliveryID string, event ReleaseEvent) bool {
 		}
 	}
 	return true
+}
+
+func (b *Broker) rememberDelivery(deliveryID string, now time.Time) {
+	b.seen[deliveryID] = now
+	if len(b.seen) > maxRememberedDelivery {
+		b.pruneOldest()
+	}
 }
 
 func (b *Broker) remove(c *client) {

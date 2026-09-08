@@ -91,6 +91,34 @@ func TestBrokerPublishesAndReplaysLatest(t *testing.T) {
 	}
 }
 
+func TestBrokerRejectsOlderRelease(t *testing.T) {
+	broker := NewBroker()
+	subscription, _, err := broker.Subscribe("203.0.113.30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+
+	if !broker.Publish("beta-12", ReleaseEvent{Tag: "v2.0.5-beta-12", Prerelease: true}) {
+		t.Fatal("beta-12 foi recusada")
+	}
+	if broker.Publish("beta-9", ReleaseEvent{Tag: "v2.0.5-beta-9", Prerelease: true}) {
+		t.Fatal("beta-9 rebaixou o broker")
+	}
+	if got := <-subscription.Events(); got.Tag != "v2.0.5-beta-12" {
+		t.Fatalf("evento recebido = %+v", got)
+	}
+
+	second, replay, err := broker.Subscribe("203.0.113.31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if replay == nil || replay.Tag != "v2.0.5-beta-12" {
+		t.Fatalf("replay = %+v, want beta-12", replay)
+	}
+}
+
 func TestBrokerLimitsConnectionsPerIP(t *testing.T) {
 	broker := NewBroker()
 	first, _, err := broker.Subscribe("203.0.113.12")
