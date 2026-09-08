@@ -86,7 +86,9 @@ No repositório `bezumiya/GoLiveBypass`, em *Settings → Webhooks → Add webho
 
 O endpoint valida a assinatura, o repositório, `action=published` e `draft=false`.
 O polling de releases a cada 30 segundos funciona como fallback caso o webhook
-não esteja disponível. Não é necessário embutir `API_TOKEN` na conexão SSE dos clientes.
+não esteja disponível, escolhendo a maior tag SemVer válida. O broker também
+rejeita eventos iguais ou inferiores à última tag aceita, protegendo o replay
+contra webhook atrasado. Não é necessário embutir `API_TOKEN` na conexão SSE dos clientes.
 
 ## Verificação end-to-end
 
@@ -147,3 +149,5 @@ Remove apenas a API; o vhost volta a servir a página padrão. Nenhum outro site
 - Healthcheck interno não existe na imagem (final é `FROM scratch`, sem shell); a checagem fica no `deploy.sh` e em monitor externo apontando para `https://api.skyplaceia.com/bugs/healthz`.
 - O broker de SSE é em memória. Uma reinicialização derruba os streams, mas as GUIs
   reconectam com backoff e continuam com consulta direta ao GitHub no boot e a cada hora.
+  Enquanto estiver ativo, o broker só aceita tags SemVer estritamente maiores e o
+  poller não depende da ordem de publicação da API do GitHub.

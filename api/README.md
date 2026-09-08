@@ -55,8 +55,10 @@ Entrega repetida é ignorada pelo `X-GitHub-Delivery`; falhas de assinatura
 respondem `401`.
 
 O webhook é o caminho imediato. Como redundância, a API consulta as releases
-publicadas a cada 30 segundos e distribui uma release nova pelo mesmo broker
-SSE se o webhook estiver ausente ou atrasado.
+publicadas a cada 30 segundos e distribui a maior tag SemVer válida pelo mesmo
+broker SSE se o webhook estiver ausente ou atrasado. O broker rejeita eventos
+iguais ou inferiores à última tag aceita, portanto um webhook atrasado não pode
+rebaixar o replay para uma beta antiga.
 
 ## Rodando
 

@@ -6,6 +6,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Proteção contra downgrade no SSE e no updater Windows
+
+- O broker SSE agora rejeita releases antigas ou iguais, evitando que um
+  webhook atrasado de beta-9 substitua o replay de beta-12.
+- O polling escolhe a maior tag SemVer válida, sem depender da ordem ou apenas
+  da data de publicação retornada pelo GitHub.
+- O updater Windows valida o nome completo do portable e o nome do arquivo na
+  URL; o helper Proton de aproximadamente 14,6 MB nunca é candidato ao update.
+- O incidente foi confirmado nos artefatos: o portable publicado mede cerca de
+  101 MB e o helper separado cerca de 14,6 MB; o digest SHA-256 continua sendo
+  conferido antes da aplicação.
+
 ## [2.0.5-beta-12] - 2026-09-07
 
 ### Correção do asset Windows no updater
