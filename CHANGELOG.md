@@ -6,6 +6,12 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-14] - 2026-09-08
+
+### Teste de entrega do update beta
+
+- Publicação de validação do fluxo SSE e do card de atualização para instalações na beta-13.
+
 ## [2.0.5-beta-13] - 2026-09-08
 
 ### Proteção contra downgrade no SSE e no updater Windows
