@@ -9,7 +9,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ### Correções de ativação Windows e runtime Proton
 
 - O helper Proton agora é validado por SHA-256, copiado atomicamente para a pasta de dados e reparado automaticamente a partir de assets autenticados da mesma release quando a extração da GUI estiver incompleta.
-- A ativação WireSock aguarda a parada real do serviço, reaplica a configuração de forma idempotente, tenta uma recuperação limitada e registra códigos do SCM/UAC/driver sem deixar estado parcial.
+- A ativação WireSock aguarda a parada real do serviço, reaplica a configuração de forma idempotente e confirma o processo antes de considerar a rota ativa. Se o serviço global falhar, a GUI usa automaticamente o modo oficial por aplicativo do WireSock para o usuário logado.
+- A rotina elevada devolve um resultado próprio em arquivo temporário; mensagens CLIXML do PowerShell não são mais confundidas com falhas do serviço nem provocam rollback de uma rota que já iniciou.
 - Falhas comuns do Windows passaram a orientar o usuário sobre permissão, reinicialização, timeout do serviço ou perfil WireGuard, enquanto o rollback da rota continua obrigatório.
 
 ### Atualizações do plugin Vencord/Equicord
@@ -33,6 +34,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - A operação roda no processo principal, mantém o isolamento por aplicativo e evita uma
   segunda otimização quando a janela é aberta durante o boot. Standalone e plugin legado
   não participam desse fluxo.
+
+## [2.0.6-beta-3] - 2026-09-08
+
+- Corrige definitivamente a ativação Windows que terminava em `WIRESOCK_SERVICE`: a GUI preserva um serviço já confirmado e usa o modo `run` oficial por aplicativo quando o serviço global não pode ser reconfigurado.
+- Scripts temporários elevados agora usam explicitamente `ExecutionPolicy Bypass`; políticas locais que bloqueavam o `.ps1` antes da primeira linha não impedem mais a ativação. O erro real também é transportado fora do stderr CLIXML, evitando classificação por nomes como `activate-service.ps1` e removendo a orientação incorreta de reinstalar o GoLiveBypass.
 
 ## [2.0.6-beta-2] - 2026-09-08
 

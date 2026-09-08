@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elevatedPowerShellFileArgs, wireSockServiceScript } from "../electron/wiresock-service";
+import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockServiceScript } from "../electron/wiresock-service";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -30,6 +30,10 @@ describe("WireSock no Windows", () => {
       kind: "profile",
       code: "WIRESOCK_PROFILE",
     });
+    expect(classifyWireSockActivationFailure({ stderr: "Command failed: activate-service.ps1" })).toMatchObject({
+      kind: "unknown",
+      code: "WIRESOCK_UNKNOWN",
+    });
   });
 
   it("reconhece drivers WireSock atual e legado sem confundir servico comum", () => {
@@ -49,11 +53,34 @@ describe("WireSock no Windows", () => {
   });
 
   it("torna a configuração do serviço idempotente e preserva detalhes do SCM no log", () => {
-    const script = wireSockServiceScript("C:\\WireSock\\client.exe", "C:\\GoLive\\wg.conf");
+    const script = wireSockServiceScript("C:\\WireSock\\client.exe", "C:\\GoLive\\wg.conf", "C:\\Temp\\result.txt");
     expect(script).toContain("Wait-WireSockState 'Stopped' 45");
     expect(script).toContain("for ($attempt = 1; $attempt -le 2; $attempt++)");
     expect(script).toContain("GOLIVE_WIRESOCK_ERROR");
     expect(script).toContain("ServiceSpecificExitCode");
+    expect(script).toContain("SERVICE_RUNNING");
+    expect(script).toContain("[IO.File]::WriteAllText");
+  });
+
+  it("gera fallback direto elevado sem depender do serviço global", () => {
+    const script = wireSockDirectScript(
+      "C:\\WireSock\\client.exe",
+      "C:\\GoLive\\wg.conf",
+      "C:\\Temp\\direct-result.txt",
+    );
+    expect(script).toContain("@('run', '-config'");
+    expect(script).toContain("DIRECT_RUNNING: pid=");
+    expect(script).toContain("wiresock-pro-client-service");
+    expect(script).toContain("Stop-Process -Force");
+    expect(script).toContain("-network-lock', 'disabled'");
+  });
+
+  it("usa o modo direto quando o wrapper do serviço não confirma a rota", () => {
+    const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
+    expect(src).toContain("servico indisponivel; tentando modo direto oficial");
+    expect(src).toContain("wireSockDirectScript(wsExe, targetConf, directResultPath)");
+    expect(src).toContain("await esperarTunel(12, 250)");
+    expect(src).toContain('activationMode = "direct"');
   });
 
   it("eleva um arquivo temporário para não estourar o limite de argumentos do Windows", () => {
@@ -62,6 +89,8 @@ describe("WireSock no Windows", () => {
     expect(args[2]).toBe("-EncodedCommand");
     const decoded = Buffer.from(args[3], "base64").toString("utf16le");
     expect(decoded).toContain("-File $scriptPath");
+    expect(decoded).toContain("-ExecutionPolicy Bypass -File $scriptPath");
+    expect(decoded).toContain("'-ExecutionPolicy','Bypass','-File'");
     expect(decoded).toContain("Start-Process powershell.exe -Verb RunAs");
     expect(decoded).not.toContain("GOLIVE_WIRESOCK_ERROR");
   });

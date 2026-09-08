@@ -6,7 +6,7 @@ import { execFile, execFileSync, execSync } from "child_process";
 import dns from "dns/promises";
 import https from "https";
 import * as logger from "./logger";
-import { elevatedPowerShellFileArgs, wireSockServiceScript } from "./wiresock-service";
+import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockServiceScript } from "./wiresock-service";
 import { enumerateWireSockCandidatesAsync, selectSupportedWireSock } from "./wiresock-preflight";
 
 const EMBEDDED_WG_CONF = `[Interface]
@@ -123,7 +123,7 @@ export function classifyWireSockActivationFailure(error: unknown): WireSockActiv
       message: "O perfil WireGuard selecionado não pôde ser aplicado. Selecione ou gere o perfil novamente e tente ativar.",
     };
   }
-  if (/install_failed|service_missing|servi[cç]o|service|install|start_failed|1058|1060/.test(raw)) {
+  if (/install_failed|service_missing|start_failed|openservice failed|servi[cç]o (?:ausente|desabilitado|n[aã]o encontrado)|1058|1060/.test(raw)) {
     return {
       kind: "service",
       code: "WIRESOCK_SERVICE",
@@ -652,30 +652,88 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
   fs.writeFileSync(targetConf, newLines.join("\r\n"), "utf8");
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wiresock-"));
-  const scriptPath = path.join(tempDir, "activate-service.ps1");
+  const serviceScriptPath = path.join(tempDir, "activate-service.ps1");
+  const serviceResultPath = path.join(tempDir, "service-result.txt");
+  const directScriptPath = path.join(tempDir, "activate-direct.ps1");
+  const directResultPath = path.join(tempDir, "direct-result.txt");
+  const readResult = (resultPath: string): string => {
+    try {
+      return fs.readFileSync(resultPath, "utf8").replace(/^\d+\s*/, "").trim();
+    } catch {
+      return "";
+    }
+  };
+  let activationMode: "service" | "direct" = "service";
   try {
     // Keep the detailed service orchestration on disk. Nesting the whole
     // script in an encoded UAC wrapper caused ENAMETOOLONG on Windows before
     // PowerShell could execute any of it.
-    fs.writeFileSync(scriptPath, wireSockServiceScript(wsExe, targetConf), { encoding: "utf8", mode: 0o600 });
-    execFileSync("powershell.exe", elevatedPowerShellFileArgs(scriptPath), {
-      windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
-    });
-  } catch (error) {
-    const failure = classifyWireSockActivationFailure(error);
-    logger.error("wiresock", "falha ao configurar ou iniciar servico", {
-      codigo: failure.code,
-      tipo: failure.kind,
-      erro: detalheErro(error),
-    });
-    throw new Error(`${failure.message} [${failure.code}]`);
+    fs.writeFileSync(
+      serviceScriptPath,
+      wireSockServiceScript(wsExe, targetConf, serviceResultPath),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    let serviceError: unknown = null;
+    try {
+      execFileSync("powershell.exe", elevatedPowerShellFileArgs(serviceScriptPath), {
+        windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
+      });
+    } catch (error) {
+      serviceError = error;
+    }
+
+    // PowerShell can return a non-zero wrapper status while the elevated child
+    // already left the service running. Never tear down a working route solely
+    // because CLIXML/progress output confused the wrapper.
+    if (serviceError && !(await esperarTunel(6, 250))) {
+      const serviceDetail = readResult(serviceResultPath) || detalheErro(serviceError);
+      logger.warn("wiresock", "servico indisponivel; tentando modo direto oficial", {
+        erro: serviceDetail,
+      });
+      fs.writeFileSync(
+        directScriptPath,
+        wireSockDirectScript(wsExe, targetConf, directResultPath),
+        { encoding: "utf8", mode: 0o600 },
+      );
+      try {
+        execFileSync("powershell.exe", elevatedPowerShellFileArgs(directScriptPath), {
+          windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
+        });
+      } catch (directError) {
+        const directDetail = readResult(directResultPath) || detalheErro(directError);
+        const failure = classifyWireSockActivationFailure(`${serviceDetail} ${directDetail}`);
+        logger.error("wiresock", "servico e modo direto falharam", {
+          codigo: failure.code,
+          tipo: failure.kind,
+          servico: serviceDetail,
+          direto: directDetail,
+        });
+        throw new Error(`${failure.message} [${failure.code}]`);
+      }
+      if (!(await esperarTunel(12, 250))) {
+        const directDetail = readResult(directResultPath) || "processo direto não permaneceu ativo";
+        const failure = classifyWireSockActivationFailure(`${serviceDetail} ${directDetail}`);
+        logger.error("wiresock", "modo direto nao confirmou processo ativo", {
+          codigo: failure.code,
+          tipo: failure.kind,
+          servico: serviceDetail,
+          direto: directDetail,
+        });
+        throw new Error(`${failure.message} [${failure.code}]`);
+      }
+      activationMode = "direct";
+    } else if (serviceError) {
+      logger.warn("wiresock", "wrapper retornou erro, mas o servico foi confirmado ativo", {
+        erro: readResult(serviceResultPath) || detalheErro(serviceError),
+      });
+    }
   } finally {
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (error) {
       logger.warn("wiresock", "nao consegui remover script temporario de ativacao", { erro: detalheErro(error) });
     }
   }
   limparDnsDoAdaptadorWireSock();
-  logger.info("wiresock", "servico ativo com perfil selecionado", { config: targetConf });
+  logger.info("wiresock", "WireSock ativo com perfil selecionado", { config: targetConf, mode: activationMode });
 }
 
 export async function startWireSockService(installDir: string, customConf?: string, allowedAppPaths: string[] = []): Promise<void> {

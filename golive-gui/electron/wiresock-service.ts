@@ -1,12 +1,20 @@
 // Encode PowerShell instead of interpolating paths into cmd.exe. The service
 // must use the selected profile even when another application installed it.
-export function wireSockServiceScript(executable: string, config: string): string {
-  for (const value of [executable, config]) {
+export function wireSockServiceScript(executable: string, config: string, resultPath?: string): string {
+  for (const value of [executable, config, resultPath].filter((value): value is string => Boolean(value))) {
     if (!value || /["\r\n\0]/.test(value)) throw new Error("Caminho WireSock inválido");
   }
   const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
   const command = `"${executable}" service -config "${config}" -log-level info -network-lock disabled`;
+  const result = resultPath ? literal(resultPath) : "$null";
   return `$ErrorActionPreference = 'Stop'
+$resultPath = ${result}
+function Complete-WireSock([int]$code, [string]$detail) {
+  if ($resultPath) {
+    try { [IO.File]::WriteAllText($resultPath, "$code\n$detail", [Text.UTF8Encoding]::new($false)) } catch {}
+  }
+  exit $code
+}
 try {
   $name = 'wiresock-client-service'
   $expected = ${literal(command)}
@@ -55,7 +63,7 @@ try {
   for ($attempt = 1; $attempt -le 2; $attempt++) {
     try {
       Start-Service -Name $name -ErrorAction Stop
-      if (Wait-WireSockState 'Running' 45) { exit 0 }
+      if (Wait-WireSockState 'Running' 45) { Complete-WireSock 0 'SERVICE_RUNNING' }
       $info = Get-WireSockInfo
       $lastStartError = "estado=$($info.State) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
     } catch {
@@ -65,8 +73,58 @@ try {
   }
   throw "START_FAILED: $lastStartError"
 } catch {
-  [Console]::Error.WriteLine("GOLIVE_WIRESOCK_ERROR: $($_.Exception.Message)")
-  exit 1
+  $detail = "GOLIVE_WIRESOCK_ERROR: $($_.Exception.Message)"
+  [Console]::Error.WriteLine($detail)
+  Complete-WireSock 1 $detail
+}`;
+}
+
+/**
+ * Starts WireSock in its official application mode. This is the fallback for
+ * machines where the global Windows service is stale, locked by another VPN,
+ * or cannot be reconfigured. The process still runs elevated, but only routes
+ * applications from the logged-in user.
+ */
+export function wireSockDirectScript(executable: string, config: string, resultPath: string): string {
+  for (const value of [executable, config, resultPath]) {
+    if (!value || /["\r\n\0]/.test(value)) throw new Error("Caminho WireSock inválido");
+  }
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return `$ErrorActionPreference = 'Stop'
+$resultPath = ${literal(resultPath)}
+function Complete-WireSock([int]$code, [string]$detail) {
+  try { [IO.File]::WriteAllText($resultPath, "$code\n$detail", [Text.UTF8Encoding]::new($false)) } catch {}
+  exit $code
+}
+function Wait-ServiceStopped([string]$name, [int]$seconds) {
+  $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+  if (-not $service -or $service.Status -eq 'Stopped') { return }
+  try { Stop-Service -Name $name -Force -ErrorAction Stop } catch {}
+  $deadline = (Get-Date).AddSeconds($seconds)
+  do {
+    $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -eq 'Stopped') { return }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+  throw "DIRECT_STOP_TIMEOUT: servico=$name estado=$($service.Status)"
+}
+try {
+  foreach ($name in @('wiresock-client-service', 'wiresock-pro-client-service')) {
+    Wait-ServiceStopped $name 45
+  }
+  Get-Process -Name 'wiresock-client' -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 500
+  $arguments = @('run', '-config', ('"' + ${literal(config)} + '"'), '-log-level', 'info', '-network-lock', 'disabled')
+  $child = Start-Process -FilePath ${literal(executable)} -ArgumentList $arguments -WindowStyle Hidden -PassThru -ErrorAction Stop
+  Start-Sleep -Seconds 3
+  $child.Refresh()
+  if ($child.HasExited) { throw "DIRECT_EXITED: codigo=$($child.ExitCode)" }
+  Complete-WireSock 0 "DIRECT_RUNNING: pid=$($child.Id)"
+} catch {
+  $detail = "GOLIVE_WIRESOCK_DIRECT_ERROR: $($_.Exception.Message)"
+  [Console]::Error.WriteLine($detail)
+  Complete-WireSock 1 $detail
 }`;
 }
 
@@ -84,10 +142,10 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 $scriptPath = ${literal(scriptPath)}
 if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  & powershell.exe -NoProfile -NonInteractive -File $scriptPath
+  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptPath
   exit $LASTEXITCODE
 }
-$child = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-File', ('"' + $scriptPath + '"'))
+$child = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + $scriptPath + '"'))
 exit $child.ExitCode`;
   return ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(wrapper, "utf16le").toString("base64")];
 }
