@@ -2,7 +2,7 @@
 # O electron-updater le este arquivo quando forceDevUpdateConfig = true.
 # Aponta para o fork de teste; em producao quem vale e o app-update.yml gerado
 # no build (owner bezumiya).
-owner: pdl-clay
+owner: bezumiya
 repo: GoLiveBypass
 provider: github
 releaseType: release

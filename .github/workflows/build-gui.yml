@@ -56,7 +56,9 @@ jobs:
         working-directory: golive-gui
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: npm run publish:win
+      # O nome beta do metadata depende do channel explicito. releaseType sozinho
+      # marca a release, mas deixa o electron-builder escrever latest.yml.
+      - run: npm run publish:win -- --config.publish.channel=beta --config.publish.releaseType=prerelease
         if: ${{ inputs.canal == 'beta' }}
         working-directory: golive-gui
         env:
@@ -77,15 +79,15 @@ jobs:
           cache-dependency-path: tools/proton-confgen/go.sum
       - run: npm ci
         working-directory: golive-gui
-      # No canal beta publica AppImage + beta.yml (electron-updater com
-      # allowPrerelease consome o canal beta.yml que o electron-builder gera
-      # sozinho para versao com sufixo de prerelease).
+      # No canal beta publica AppImage + beta.yml. O channel precisa ser explicito:
+      # uma versao com sufixo beta e releaseType prerelease, sozinha, ainda gera
+      # latest.yml e deixa o canal estavel enxergar metadata de teste.
       - run: npm run publish:linux
         if: ${{ inputs.canal != 'beta' }}
         working-directory: golive-gui
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: npm run publish:linux
+      - run: npm run publish:linux -- --config.publish.channel=beta --config.publish.releaseType=prerelease
         if: ${{ inputs.canal == 'beta' }}
         working-directory: golive-gui
         env:
@@ -201,7 +203,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "${{ inputs.tag }}" \
-            --repo pdl-clay/GoLiveBypass \
+            --repo bezumiya/GoLiveBypass \
             --prerelease \
             --draft=false \
             --title "GoLiveBypass ${{ inputs.tag }}" \

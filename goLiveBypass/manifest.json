@@ -10,7 +10,7 @@
   "version": "2.0.0-beta.1",
   "updater": {
     "type": "github",
-    "id": "pdl-clay/GoLiveBypass",
+    "id": "bezumiya/GoLiveBypass",
     "assetName": "goLiveBypass-vencord.zip"
   }
 }

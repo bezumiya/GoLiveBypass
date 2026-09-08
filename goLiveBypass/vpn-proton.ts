@@ -21,6 +21,16 @@ export type ProtonLoginErrorCode =
     | "CONFIGURATION_ERROR"
     | "UNKNOWN";
 
+export type ProtonSessionCheckCode = "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "UNKNOWN";
+
+export interface ProtonSessionCheckResult {
+    valid: boolean;
+    username?: string;
+    expiresIn?: string;
+    code?: ProtonSessionCheckCode;
+    error?: string;
+}
+
 export interface ProtonLoginResult {
     success: boolean;
     username?: string;
@@ -261,6 +271,15 @@ export function savedSessionUsername(dataDir: string): string {
     } catch { return ""; }
 }
 
+function sessionCheckFailure(rawValue: unknown): { code: ProtonSessionCheckCode; error: string } {
+    const raw = safeDiagnosticDetail(rawValue, 600).toLowerCase();
+    if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", error: "A verificação da sessão Proton demorou demais." };
+    if (/not found|enoent|spawn|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", error: "O componente ProtonVPN não foi encontrado nesta instalação." };
+    if (/network|connection|dns|tls|temporary|unreachable|reset/.test(raw)) return { code: "NETWORK_ERROR", error: "Não foi possível verificar a sessão Proton por causa da rede." };
+    if (/invalid|expired|session|token|unauthori[sz]ed|authentication/.test(raw)) return { code: "INVALID_SESSION", error: "A sessão Proton está inválida ou expirada." };
+    return { code: "UNKNOWN", error: "Não foi possível verificar a sessão Proton." };
+}
+
 export function parseCaptchaUrl(rawUrl: string): { url: string; challenge: string; origin: string } | null {
     try {
         const parsed = new URL(rawUrl);
@@ -284,12 +303,17 @@ function ensureDataDir(dataDir: string): void {
     fs.mkdirSync(dataDir, { recursive: true });
 }
 
-export async function checkProtonSession(dataDir: string, username: string): Promise<{ valid: boolean; username?: string; expiresIn?: string; error?: string }> {
+export async function checkProtonSession(dataDir: string, username: string): Promise<ProtonSessionCheckResult> {
     if (!username.trim()) return { valid: false, error: "Usuário Proton não especificado." };
     ensureDataDir(dataDir);
-    const result = await runConfgen({ args: ["-username", username.trim(), "-session-file", protonSessionFile(dataDir), "-check-session", "-json"] });
-    if (result.json?.valid === true) return { valid: true, username: typeof result.json.username === "string" ? result.json.username : username.trim(), expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
-    return { valid: false, error: safeDiagnosticDetail(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.") };
+    try {
+        const result = await runConfgen({ args: ["-username", username.trim(), "-session-file", protonSessionFile(dataDir), "-check-session", "-json"] });
+        if (result.json?.valid === true) return { valid: true, username: typeof result.json.username === "string" ? result.json.username : username.trim(), expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
+        const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.");
+        return { valid: false, ...failure };
+    } catch (error) {
+        return { valid: false, ...sessionCheckFailure(error) };
+    }
 }
 
 export function normalizeProtonPlan(value: unknown): ProtonPlanResult {

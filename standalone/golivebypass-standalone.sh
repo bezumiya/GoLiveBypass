@@ -861,6 +861,40 @@ confirm() {
     esac
 }
 
+# Emite uma instalação uma única vez. Pacotes Linux podem expor o mesmo diretório por
+# /usr/lib e /usr/lib64 (ou por symlinks); sem esta guarda o preflight contava duas vezes o
+# mesmo cliente e a ativação podia tentar o mesmo processo em duplicidade.
+discord_emit_dir() {
+    local resources="$1" flav="$2" detect="$3" flatpak_id="${4:-}"
+    local target target_key
+
+    if [ -e "$resources/app.asar" ]; then
+        target="$resources/app.asar"
+    elif [ -e "$resources/_app.asar" ]; then
+        target="$resources/_app.asar"
+    else
+        return 1
+    fi
+
+    # inode/device deduplica symlinks e hardlinks sem depender do texto do caminho. `stat`
+    # existe nas distribuições Linux suportadas; se faltar, o caminho ainda é uma chave segura.
+    target_key="$target"
+    if command -v stat >/dev/null 2>&1; then
+        target_key="$(stat -Lc '%d:%i' "$target" 2>/dev/null || printf '%s' "$target")"
+    fi
+    case "$DISCORD_SEEN_TARGETS" in
+        *"|$target_key|"*) return 1 ;;
+    esac
+    DISCORD_SEEN_TARGETS="${DISCORD_SEEN_TARGETS}|${target_key}|"
+
+    if [ -n "$flatpak_id" ]; then
+        printf '%s|%s|%s|%s\n' "$resources" "$flav" "$detect" "$flatpak_id"
+    else
+        printf '%s|%s|%s\n' "$resources" "$flav" "$detect"
+    fi
+    return 0
+}
+
 # Procura o app.asar de verdade em vez de confiar numa lista de caminhos.
 #
 # O ponto que quebra qualquer lista feita de memoria: desde a versao 1.0.136, de maio de 2026,
@@ -869,6 +903,7 @@ confirm() {
 # so olha /usr/share e /opt nao acha Discord nenhum numa instalacao atual.
 discord_dirs() {
     local raiz sub base id flav detect count=0
+    DISCORD_SEEN_TARGETS=""
 
     base="${XDG_CONFIG_HOME:-$HOME/.config}"
     detect="bootstrap"
@@ -879,8 +914,9 @@ discord_dirs() {
     do
         [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ] || continue
         flav="discord"; case "$sub" in *ptb*) flav="discordptb" ;; *canary*) flav="discordcanary" ;; esac
-        printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
-        count=$((count + 1))
+        if discord_emit_dir "$sub" "$flav" "$detect"; then
+            count=$((count + 1))
+        fi
     done
     warn "trace: bootstrap config varrido (achou $count)"
 
@@ -899,8 +935,9 @@ discord_dirs() {
         for sub in "$raiz/resources" "$raiz"; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 flav="discord"; case "$raiz" in *ptb*) flav="discordptb" ;; *canary*) flav="discordcanary" ;; esac
-                printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
-                count=$((count + 1))
+                if discord_emit_dir "$sub" "$flav" "$detect"; then
+                    count=$((count + 1))
+                fi
                 break
             fi
         done
@@ -925,9 +962,10 @@ discord_dirs() {
         for sub in "$raiz/resources" "$raiz"; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 flav="vesktop"; case "$raiz" in *equibop*|*Equibop*) flav="equibop" ;; *legcord*|*Legcord*) flav="legcord" ;; esac
-                printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
-                count=$((count + 1))
-                break
+                if discord_emit_dir "$sub" "$flav" "$detect"; then
+                    count=$((count + 1))
+                    break
+                fi
             fi
         done
     done
@@ -946,8 +984,9 @@ discord_dirs() {
         for sub in "$raiz/resources" "$raiz"; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 flav="discord"; case "$raiz" in *PTB*|*ptb*) flav="discordptb" ;; *Canary*|*canary*) flav="discordcanary" ;; esac
-                printf '%s|%s|%s\n' "$sub" "$flav" "$detect"
-                count=$((count + 1))
+                if discord_emit_dir "$sub" "$flav" "$detect"; then
+                    count=$((count + 1))
+                fi
                 break
             fi
         done
@@ -969,8 +1008,9 @@ discord_dirs() {
                     *legcord*) flav="legcord" ;;
                     *) flav="vesktop" ;;
                 esac
-                printf '%s|%s|%s\n' "$sub" "$flav" "paralelo"
-                count=$((count + 1))
+                if discord_emit_dir "$sub" "$flav" "paralelo"; then
+                    count=$((count + 1))
+                fi
             fi
         done
     done
@@ -989,8 +1029,9 @@ discord_dirs() {
                        "$raiz/$id"/current/active/files/bin/*/resources; do
                 if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                     flav="discord"; case "$id" in *Vesktop*) flav="vesktop" ;; *Legcord*) flav="legcord" ;; *equibop*) flav="equibop" ;; *PTB*) flav="discordptb" ;; *Canary*) flav="discordcanary" ;; esac
-                    printf '%s|%s|%s|%s\n' "$sub" "$flav" "$detect" "$id"
-                    count=$((count + 1))
+                    if discord_emit_dir "$sub" "$flav" "$detect" "$id"; then
+                        count=$((count + 1))
+                    fi
                 fi
             done
         done
@@ -1003,8 +1044,9 @@ discord_dirs() {
         for sub in "$HOME/.var/app/$id"/config/discord*/app-*/resources; do
             if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                 flav="discord"; case "$id" in *Vesktop*) flav="vesktop" ;; *Legcord*) flav="legcord" ;; *equibop*) flav="equibop" ;; *PTB*) flav="discordptb" ;; *Canary*) flav="discordcanary" ;; esac
-                printf '%s|%s|%s|%s\n' "$sub" "$flav" "$detect" "$id"
-                count=$((count + 1))
+                if discord_emit_dir "$sub" "$flav" "$detect" "$id"; then
+                    count=$((count + 1))
+                fi
             fi
         done
     done
@@ -1450,7 +1492,7 @@ discord_running() {
     # instalada — o running_flav casa pelo nome do flav do install.
     if [ -n "${FOUND:-}" ]; then
         if [ -n "$(printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav rest; do
-            case "$flav" in vesktop|equibop|legcord) running_flav "$flav" && printf 'achou\n' ;; esac
+            case "$flav" in vesktop|equibop|legcord) running_flav "$flav" "" "$resources" && printf 'achou\n' ;; esac
         done)" ]; then
             return 0
         fi
@@ -1466,12 +1508,28 @@ discord_running() {
 }
 
 # O cliente deste flav esta vivo? Oficiais ("discord*"): pelo NOME do processo. Paralelos
-# (vesktop|equibop|legcord): o processo costuma ser o binario generico do Electron, entao o
-# nome nao identifica nada — mas o cmdline de todos carrega o caminho do app.asar na pasta
-# do cliente (ex.: /usr/lib/equibop/app.asar). O padrao casa "/flav/app.asar" (o main) e
-# "/flav/arrpc" (o helper): nao casa o proprio script nem o shell que o invocou.
+# (vesktop|equibop|legcord): o caminho exato do app.asar da instalação é a fonte de verdade.
+parallel_pid_for_resources() {
+    local resources="$1" proc pid cmdline
+    [ -n "$resources" ] || return 1
+    for proc in /proc/[0-9]*/cmdline; do
+        [ -r "$proc" ] || continue
+        pid="${proc#/proc/}"
+        pid="${pid%/cmdline}"
+        [ "$pid" = "$$" ] && continue
+        cmdline="$(tr '\0' ' ' < "$proc" 2>/dev/null || true)"
+        case "$cmdline" in
+            *"$resources/app.asar"*|*"$resources/_app.asar"*|*"$resources/arrpc"*)
+                printf '%s\n' "$pid"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 running_flav() {
-    local flav="$1" flatpak_id="${2:-}"
+    local flav="$1" flatpak_id="${2:-}" resources="${3:-}"
     # No Bazzite/Fedora Atomic o portal pode manter o processo Electron dentro do
     # sandbox mesmo quando o nome dele não aparece no namespace de PID do host.
     # Consultar o ID exato também evita aceitar outro Discord aberto fora do túnel.
@@ -1480,7 +1538,11 @@ running_flav() {
     fi
     case "$flav" in
         vesktop|equibop|legcord)
-            pgrep -f "/$flav/app.asar" >/dev/null 2>&1 || pgrep -f "/$flav/arrpc" >/dev/null 2>&1
+            if [ -n "$resources" ]; then
+                parallel_pid_for_resources "$resources" >/dev/null
+            else
+                pgrep -f "/$flav/(app\\.asar|resources/app\\.asar|arrpc)" >/dev/null 2>&1
+            fi
             ;;
         discord|discordptb|discordcanary)
             pgrep -x Discord >/dev/null 2>&1 || pgrep -x discord >/dev/null 2>&1 \
@@ -1493,13 +1555,17 @@ running_flav() {
 # Retorna o PID do cliente deste flavour. Usado pelo status para nao confundir um
 # Discord normal (fora do namespace) com a sessao protegida pelo WireGuard.
 discord_pid_flav() {
-    local flav="$1" flatpak_id="${2:-}" pid pattern
+    local flav="$1" flatpak_id="${2:-}" resources="${3:-}" pid pattern
     if [ -n "$flatpak_id" ] && pid="$(flatpak_pid_for_id "$flatpak_id" 2>/dev/null || true)"; then
         [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
     fi
     case "$flav" in
         vesktop|equibop|legcord)
-            for pattern in "/$flav/app.asar" "/$flav/arrpc"; do
+            if [ -n "$resources" ]; then
+                parallel_pid_for_resources "$resources"
+                return $?
+            fi
+            for pattern in "/$flav/(app\\.asar|resources/app\\.asar|arrpc)"; do
                 pid="$(pgrep -f "$pattern" 2>/dev/null | head -n1 || true)"
                 [ -n "$pid" ] && { printf '%s\n' "$pid"; return 0; }
             done
@@ -2191,11 +2257,12 @@ start_discord() {
 # logo depois (DISPLAY/Wayland, atualização em andamento, bwrap ou Flatpak sem
 # override). Aguarde o processo real antes de declarar a ativação concluída.
 wait_discord_started() {
-    local linha="${1:-}" flav="" flatpak_id="" tentativas=40
+    local linha="${1:-}" flav="" flatpak_id="" resources="" tentativas=40
+    resources="$(printf '%s' "$linha" | cut -d'|' -f1)"
     flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
     flatpak_id="$(printf '%s' "$linha" | cut -d'|' -f4)"
     while [ "$tentativas" -gt 0 ]; do
-        if running_flav "$flav" "$flatpak_id"; then return 0; fi
+        if running_flav "$flav" "$flatpak_id" "$resources"; then return 0; fi
         tentativas=$((tentativas - 1))
         [ "$tentativas" -gt 0 ] && sleep 0.5
     done
@@ -2398,7 +2465,7 @@ if [ "$MODE" = "status" ]; then
             running="nao"
             in_namespace="nao"
             discord_pid=""
-            if discord_pid="$(discord_pid_flav "$flav" "$id" 2>/dev/null)"; then
+            if discord_pid="$(discord_pid_flav "$flav" "$id" "$resources" 2>/dev/null)"; then
                 running="sim"
                 if discord_pid_in_netns "$discord_pid"; then in_namespace="sim"; fi
             fi

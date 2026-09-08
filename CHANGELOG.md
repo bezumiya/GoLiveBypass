@@ -11,6 +11,30 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - O plugin agora documenta o canal estável padrão, o beta opt-in e a atualização automática
   com validação SHA-256; a troca preparada exige reload manual e permanece separada da GUI e
   do standalone.
+- O plugin agora inclui um assistente sequencial dentro do Discord para validar a sessão
+  Proton e preparar a rota WireGuard, com estados reais de progresso, cancelamento e
+  conclusão sem ativação ou reinício automático.
+- O status do updater passou a aparecer em um cartão contextual dentro do Discord, com
+  estados de download/preparação e reload manual, sem roubar foco nem reiniciar o cliente.
+
+### Restauração do bypass no autostart do Windows
+
+- A GUI agora persiste se o bypass estava ativo. No boot oculto iniciado pelo Windows,
+  a rota Proton é otimizada antes de ativar WireSock e iniciar o Discord; se a medição
+  falhar, a última rota salva ou a seleção rápida existente é usada como fallback.
+- Desativação explícita e “Restaurar internet” desligam a preferência persistida; o
+  encerramento normal apenas desmonta o túnel e preserva a intenção para o próximo login.
+- A operação roda no processo principal, mantém o isolamento por aplicativo e evita uma
+  segunda otimização quando a janela é aberta durante o boot. Standalone e plugin legado
+  não participam desse fluxo.
+
+## [2.0.6-beta-1] - 2026-09-08
+
+- Beta de produção com o assistente Proton e o cartão de atualização do plugin dentro do Discord.
+- A GUI mantém a restauração do bypass no autostart do Windows e o updater portable aguarda o
+  encerramento do executável antigo antes da troca.
+- A detecção Linux cobre Discord, Vesktop, Equibop e Legcord em instalações nativas e Flatpak,
+  deduplicando o mesmo `app.asar` e associando o processo ao caminho exato instalado.
 
 ## [2.0.6-beta.2] - 2026-09-07
 

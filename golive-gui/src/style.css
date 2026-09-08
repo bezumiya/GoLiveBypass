@@ -168,7 +168,8 @@ html[data-theme='dark'] .page-ambient::before {
 
 .container {
   position: relative;
-  z-index: 1;
+  /* Sem contexto de empilhamento: controles fixos e dialogs precisam ficar
+     acima da .drag-region, que e irma deste container. */
   width: 100%;
   max-width: 380px;
   padding: 68px 30px 26px;
@@ -283,8 +284,9 @@ html[data-theme='dark'] .page-ambient::before {
 /* .corner.corner: especificidade 0,2,0 — vence o position:relative do .icon-btn */
 .corner.corner {
   position: fixed;
-  z-index: 60;
-  /* 14px de respiro das bordas; nao sobrepoe a area de arrasto (32px) */
+  z-index: 110;
+  -webkit-app-region: no-drag;
+  /* O botao superior cruza a faixa de arrasto; toda sua area deve receber cliques. */
 }
 
 .corner--tr {

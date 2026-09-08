@@ -14,6 +14,21 @@ function makeInstall(root: string, version: string, options: { exe?: boolean; as
 }
 
 describe("descoberta do Discord Windows", () => {
+  it("detecta a instalação direta dos clientes paralelos atuais", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "parallel-install-"));
+    try {
+      fs.mkdirSync(path.join(root, "resources"));
+      fs.writeFileSync(path.join(root, "equibop.exe"), "");
+      expect(findWindowsDiscordInstall(root, "Equibop")).toEqual({
+        appDir: root,
+        resources: path.join(root, "resources"),
+        exePath: path.join(root, "equibop.exe"),
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("seleciona o executavel mais novo e ignora pasta Squirrel sem executavel", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "discord-install-"));
     try {

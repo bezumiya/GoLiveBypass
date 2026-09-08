@@ -11,12 +11,29 @@ type ExistsSync = (target: string) => boolean;
 
 // WireSock classifica pacotes pelo executavel, nao pelo carregador Electron. Nao ler app.asar
 // evita acoplamento com BetterDiscord, Vencord e qualquer outro mod que troque resources/.
+// Os clientes paralelos instalados pelos instaladores atuais usam a pasta raiz diretamente
+// (ex.: %LOCALAPPDATA%\\equibop\\equibop.exe), enquanto o Discord oficial continua usando
+// subpastas Squirrel app-<versao>. Os dois formatos precisam ser aceitos.
 export function findWindowsDiscordInstall(
   rootPath: string,
   flavour: string,
   existsSync: ExistsSync = fs.existsSync,
   readdirSync: (target: string) => string[] = (target) => fs.readdirSync(target),
 ): WindowsDiscordInstall | null {
+  const directExeNames = [`${flavour}.exe`, `${flavour.toLowerCase()}.exe`];
+  const directExePath = directExeNames
+    .map((name) => path.join(rootPath, name))
+    .find((candidate, index, candidates) =>
+      candidates.indexOf(candidate) === index && existsSync(candidate),
+    );
+  if (directExePath) {
+    return {
+      appDir: rootPath,
+      resources: path.join(rootPath, "resources"),
+      exePath: directExePath,
+    };
+  }
+
   let dirs: string[];
   try {
     dirs = readdirSync(rootPath).filter((dir) => dir.startsWith("app-"));

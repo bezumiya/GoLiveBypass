@@ -21,4 +21,12 @@ describe("fronteira do transporte do plugin", () => {
     expect(index).toContain("Native.enable");
     expect(index).toContain("Native.restoreNetwork");
   });
+
+  it("mantém a classificação da sessão e não devolve erro bruto pelo IPC", () => {
+    const native = read("native.ts");
+    const check = native.slice(native.indexOf("export function checkProtonSession"), native.indexOf("export function getProtonPlan"));
+    expect(check).toContain('code: "UNKNOWN"');
+    expect(check).toContain("Não foi possível verificar a sessão Proton.");
+    expect(check).not.toContain("safeDiagnosticDetail(error, 500)");
+  });
 });

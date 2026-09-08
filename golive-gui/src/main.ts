@@ -106,6 +106,7 @@ declare global {
         error?: string;
         cancelled?: boolean;
         deferred?: boolean;
+        startup?: boolean;
       }>;
       onProtonOptimizationProgress: (callback: (event: ProtonOptimizationProgress) => void) => (() => void) | void;
       cancelProtonOptimization: (requestId: string) => Promise<boolean>;
@@ -1068,7 +1069,12 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
 
     if (res.deferred) {
       closeProtonMeasurementDialog(!onStartup);
-      setProtonFeedback('A medição será feita quando o bypass estiver desativado.', 'busy');
+      setProtonFeedback(
+        res.startup
+          ? 'A rota está sendo otimizada automaticamente e será ativada antes do Discord.'
+          : 'A medição será feita quando o bypass estiver desativado.',
+        'busy',
+      );
     } else if (res.success) {
       const pingStr = protonMeasurementText(res);
       await refreshProtonState();

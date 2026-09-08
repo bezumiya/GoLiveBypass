@@ -48,6 +48,21 @@ compartilhadas com a GUI Electron ou com o standalone. Atualizar o plugin não a
 GUI, não altera o `app.asar` e não assume nem controla um WireSock iniciado por outro
 componente.
 
+## Assistente dentro do Discord
+
+Na primeira ativação do plugin, o assistente abre dentro do Discord e conduz duas etapas
+sequenciais: validar a sessão da conta Proton e preparar/otimizar a rota WireGuard. Uma
+sessão salva pode seguir sem redigitar a senha; sessão inválida, erro de rede, timeout,
+CAPTCHA e 2FA aparecem como estados distintos, sem colocar senha ou token no diagnóstico.
+Trocar o usuário inicia uma nova sessão e o botão para sair remove a sessão privada.
+
+Na etapa da rota, o progresso exibido vem dos eventos reais do controlador: fase atual,
+servidores testados/aprovados, servidor escolhido e latência/velocidades quando medidas.
+Cancelar interrompe a otimização sem ativar ou reiniciar o Discord. A conclusão apenas
+salva a preparação; a ativação do túnel continua sendo uma ação separada no painel. O
+assistente pode ser adiado e reaberto pelo botão **Abrir guia de configuração** ou pela
+ação do Toolbox do Vencord/Equicord.
+
 ## Instalação resumida
 
 1. Tenha o **Git**, **Node.js 22+** e **pnpm** instalados.

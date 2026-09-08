@@ -6,13 +6,15 @@
 
 import { sendBotMessage } from "@api/Commands";
 import { definePluginSettings } from "@api/Settings";
+import { Card } from "@components/Card";
 import { Paragraph } from "@components/Paragraph";
 import { copyWithToast } from "@utils/discord";
 import { Logger } from "@utils/Logger";
 import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
+import type { RenderModalProps } from "@vencord/discord-types";
 import { findStoreLazy } from "@webpack";
-import { Button, Constants, MaskedLink, React, RestAPI, SearchableSelect, TextInput, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
+import { Button, Constants, MaskedLink, Modal, React, RestAPI, SearchableSelect, TextInput, openModal, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
 
 import {
     evaluateStreamObservation,
@@ -31,8 +33,8 @@ interface PluginUpdateStatus {
     enabled: boolean;
     pending: boolean;
     pendingVersion?: string;
-    lastCheckedAt?: number;
-    lastError?: string;
+    lastCheckedAt: number | null;
+    lastError: string | null;
 }
 
 interface PluginUpdateCheckResult {
@@ -61,7 +63,7 @@ interface PluginUpdateNative {
     getPluginUpdateStatus?: () => Promise<PluginUpdateStatus>;
 }
 
-const Native = VencordNative?.pluginHelpers?.GoLiveBypass as (PluginNative<typeof import("./native")> & PluginUpdateNative) | undefined;
+const Native = VencordNative?.pluginHelpers?.GoLiveBypass as unknown as (PluginNative<typeof import("./native")> & PluginUpdateNative) | undefined;
 
 const logger = new Logger("GoLiveBypass");
 
@@ -123,6 +125,7 @@ let lastStreamObservation: {
     nativeStreamCount: number | null;
 } | null = null;
 let lastSelectedStreamRegion: string | null = null;
+let onboardingTimer: ReturnType<typeof setTimeout> | null = null;
 
 function normalizedUpdateChannel(value: unknown): PluginUpdateChannel {
     return value === "beta" ? "beta" : "stable";
@@ -196,9 +199,332 @@ function StreamRegionPicker() {
     );
 }
 
+interface ProtonSessionCheck {
+    valid: boolean;
+    username?: string;
+    expiresIn?: string;
+    code?: "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "UNKNOWN";
+    error?: string;
+}
+
+interface PluginOptimizationStatus {
+    active: boolean;
+    requestId: string | null;
+    phase: "ping" | "preparing" | "testing" | "finalizing" | "completed" | "failed" | "cancelled" | null;
+    total: number;
+    tested: number;
+    succeeded: number;
+    server?: string;
+    pingMs?: number;
+    downloadMbps?: number;
+    uploadMbps?: number;
+    error?: string;
+    updatedAt: number | null;
+}
+
+type OnboardingPage = "account" | "route" | "ready";
+
+const onboardingBoxStyle = {
+    background: "var(--background-secondary-alt)",
+    border: "1px solid var(--background-modifier-accent)",
+    borderRadius: "8px",
+    padding: "16px",
+};
+
+function OnboardingSteps({ page }: { page: OnboardingPage }) {
+    const active = page === "account" ? 0 : 1;
+    return (
+        <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }} aria-label="Etapas da configuração">
+            {["1  Conta Proton", "2  Rota WireGuard"].map((label, index) => (
+                <div
+                    key={label}
+                    style={{
+                        flex: 1,
+                        padding: "8px 10px",
+                        borderRadius: "6px",
+                        background: index <= active ? "var(--brand-experiment-560)" : "var(--background-tertiary)",
+                        color: index <= active ? "var(--white-500)" : "var(--text-muted)",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        textAlign: "center",
+                    }}
+                >
+                    {label}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps }) {
+    const [page, setPage] = useState<OnboardingPage>("account");
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+    const [twoFactorCode, setTwoFactorCode] = useState("");
+    const [session, setSession] = useState<ProtonSessionCheck | null>(null);
+    const [sessionLoading, setSessionLoading] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [optimization, setOptimization] = useState<PluginOptimizationStatus | null>(null);
+    const [requestId, setRequestId] = useState<string | null>(null);
+
+    const complete = () => {
+        settings.store.onboardingCompleted = true;
+        modalProps.onClose();
+    };
+
+    const checkSession = async (value: string) => {
+        if (!Native || !value.trim()) {
+            setSession({ valid: false, code: "INVALID_SESSION", error: "Informe o usuário Proton." });
+            return null;
+        }
+        setSessionLoading(true);
+        try {
+            const result = await Native.checkProtonSession(value.trim()) as ProtonSessionCheck;
+            setSession(result);
+            return result;
+        } catch (checkError) {
+            const result: ProtonSessionCheck = {
+                valid: false,
+                code: "NETWORK_ERROR",
+                error: checkError instanceof Error ? checkError.message : "Não foi possível verificar a sessão Proton.",
+            };
+            setSession(result);
+            return result;
+        } finally {
+            setSessionLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        let disposed = false;
+        const load = async () => {
+            if (!Native) {
+                if (!disposed) setSessionLoading(false);
+                return;
+            }
+            try {
+                const saved = await Native.getProtonSettings();
+                const record = saved as { protonUsername?: unknown; sessionUsername?: unknown };
+                const savedUsername = typeof record.sessionUsername === "string" && record.sessionUsername.trim()
+                    ? record.sessionUsername.trim()
+                    : typeof record.protonUsername === "string" ? record.protonUsername.trim() : "";
+                if (disposed) return;
+                if (savedUsername) {
+                    setUsername(savedUsername);
+                    const result = await checkSession(savedUsername);
+                    if (!disposed && result?.valid) setError(null);
+                } else {
+                    setSessionLoading(false);
+                }
+            } catch (loadError) {
+                if (!disposed) {
+                    setSessionLoading(false);
+                    setError(loadError instanceof Error ? loadError.message : "Não foi possível ler a sessão Proton.");
+                }
+            }
+        };
+        void load();
+        return () => { disposed = true; };
+    }, []);
+
+    useEffect(() => {
+        if (page !== "route" || !Native) return;
+        let disposed = false;
+        const refresh = async () => {
+            try {
+                const next = await Native.getProtonOptimizationStatus() as PluginOptimizationStatus;
+                if (!disposed) setOptimization(next);
+            } catch (statusError) {
+                if (!disposed) logger.error("Falha ao ler progresso da otimização Proton", statusError);
+            }
+        };
+        void refresh();
+        const timer = setInterval(() => void refresh(), 750);
+        return () => {
+            disposed = true;
+            clearInterval(timer);
+        };
+    }, [page]);
+
+    const continueToRoute = async () => {
+        if (!Native || busy || sessionLoading || !username.trim()) return;
+        setError(null);
+        setBusy(true);
+        try {
+            let verified = session?.valid && session.username?.toLowerCase() === username.trim().toLowerCase() ? session : null;
+            if (!verified) {
+                if (!password) {
+                    setError("Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
+                    return;
+                }
+                const loginResult = await Native.loginProton({ username: username.trim(), password, twoFactorCode });
+                if (!loginResult.success) {
+                    const code = loginResult.code;
+                    if (code === "TWO_FACTOR_REQUIRED") setError("Esta conta exige o código 2FA.");
+                    else if (code === "NETWORK_ERROR" || code === "TIMEOUT") setError("O login não conseguiu alcançar o Proton. Verifique a rede e tente novamente.");
+                    else setError(loginResult.error || loginResult.message || "Não foi possível entrar no Proton.");
+                    return;
+                }
+                setPassword("");
+                setTwoFactorCode("");
+                const checked = await checkSession(username);
+                if (!checked) {
+                    setError("Não foi possível validar a sessão Proton.");
+                    return;
+                }
+                if (!checked.valid) {
+                    if (checked.code === "NETWORK_ERROR" || checked.code === "TIMEOUT") {
+                        setError("Login concluído, mas a validação da sessão está temporariamente indisponível pela rede. Tente novamente antes de otimizar.");
+                    } else {
+                        setError(checked.error || "A sessão salva não passou na validação.");
+                    }
+                    return;
+                }
+                verified = checked;
+            }
+            if (!verified) return;
+            setSession(verified);
+            setPage("route");
+        } catch (continueError) {
+            setError(continueError instanceof Error ? continueError.message : "Não foi possível concluir a etapa da conta Proton.");
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const optimizeRoute = async () => {
+        if (!Native || busy) return;
+        const nextRequestId = `plugin-onboarding-${Date.now()}`;
+        setRequestId(nextRequestId);
+        setBusy(true);
+        setError(null);
+        try {
+            const result = await Native.optimizeProtonRoute({
+                requestId: nextRequestId,
+                speedTest: true,
+                country: settings.store.protonCountry,
+                freeOnly: settings.store.protonFreeOnly,
+                autoPing: settings.store.protonAutoPing,
+            });
+            if (!result.success) throw new Error(result.error || "Não foi possível otimizar a rota Proton.");
+            setOptimization({
+                active: false,
+                requestId: nextRequestId,
+                phase: "completed",
+                total: result.speedTested || 0,
+                tested: result.speedTested || 0,
+                succeeded: result.speedSucceeded || 0,
+                server: result.server,
+                pingMs: result.pingMs,
+                downloadMbps: result.downloadMbps,
+                uploadMbps: result.uploadMbps,
+                updatedAt: Date.now(),
+            });
+            setPage("ready");
+        } catch (optimizeError) {
+            setError(optimizeError instanceof Error ? optimizeError.message : "A otimização Proton falhou.");
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const cancelOptimization = async () => {
+        if (!Native || !requestId || !busy) return;
+        try {
+            await Native.cancelProtonOptimization(requestId);
+        } catch (cancelError) {
+            setError(cancelError instanceof Error ? cancelError.message : "Não foi possível cancelar a otimização.");
+        }
+    };
+
+    const progress = optimization;
+    const progressPercent = progress && progress.total > 0
+        ? Math.min(100, Math.round((progress.tested / progress.total) * 100))
+        : null;
+    const phaseLabel = progress?.phase === "ping" ? "medindo latência"
+        : progress?.phase === "testing" ? "testando servidores"
+            : progress?.phase === "finalizing" ? "finalizando a configuração"
+                : progress?.phase === "completed" ? "rota preparada"
+                    : progress?.phase === "failed" ? "otimização falhou"
+                        : progress?.phase === "cancelled" ? "otimização cancelada"
+                            : "preparando a seleção";
+
+    const actions = page === "account" ? [
+        { text: "Fazer depois", variant: "secondary" as const, onClick: complete },
+        { text: busy ? "Entrando…" : "Continuar para rota", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || !username.trim() },
+    ] : page === "route" ? [
+        { text: "Voltar", variant: "secondary" as const, onClick: () => { if (!busy) setPage("account"); }, disabled: busy },
+        busy
+            ? { text: "Cancelar otimização", variant: "danger" as const, onClick: () => void cancelOptimization() }
+            : { text: progress?.phase === "completed" ? "Continuar" : "Otimizar rota", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
+    ] : [
+        { text: "Concluir configuração", variant: "primary" as const, onClick: complete },
+    ];
+
+    if (!Native) {
+        return <Modal {...modalProps} title="Configuração do GoLiveBypass" size="md" actions={[{ text: "Fechar", variant: "secondary", onClick: modalProps.onClose }]}>
+            <Paragraph>O transporte WireGuard do plugin está disponível somente no Discord desktop Windows x64 nesta versão.</Paragraph>
+        </Modal>;
+    }
+
+    return (
+        <Modal {...modalProps} title="Configurar o GoLiveBypass" size="md" actions={actions}>
+            <OnboardingSteps page={page} />
+            {page === "account" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                    <Paragraph><strong>Conecte sua conta ProtonVPN</strong></Paragraph>
+                    <Paragraph>A sessão é validada e fica somente na pasta privada do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
+                    <TextInput value={username} onChange={value => { setUsername(value); if (session?.username && session.username !== value.trim()) setSession(null); }} placeholder="Usuário ProtonVPN" disabled={busy} />
+                    <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" type="password" disabled={busy} />
+                    <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" disabled={busy} />
+                    {sessionLoading && <Paragraph>Verificando a sessão salva…</Paragraph>}
+                    {!sessionLoading && session?.valid && <Paragraph><strong>Sessão válida</strong>{session.expiresIn ? ` · expira ${session.expiresIn}` : ""}. Você pode continuar sem digitar a senha.</Paragraph>}
+                    {!sessionLoading && session && !session.valid && <Paragraph><strong>{session.code === "NETWORK_ERROR" || session.code === "TIMEOUT" ? "Rede indisponível para verificar a sessão" : "Sessão precisa ser renovada"}</strong>{session.error ? ` · ${session.error}` : ""}</Paragraph>}
+                    {error && <Paragraph><strong>{error}</strong></Paragraph>}
+                    {!!username.trim() && !sessionLoading && <Button onClick={() => void checkSession(username)} disabled={busy}>Verificar sessão novamente</Button>}
+                </div>
+            )}
+            {page === "route" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                    <Paragraph><strong>Prepare e otimize sua rota</strong></Paragraph>
+                    <Paragraph>O plugin vai selecionar uma configuração WireGuard e testar os servidores Proton elegíveis. O túnel continua isolado aos executáveis do Discord.</Paragraph>
+                    <div style={onboardingBoxStyle} role="status" aria-live="polite">
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><strong>Estado da rota</strong><span>{phaseLabel}</span></div>
+                        {progressPercent !== null && <progress value={progressPercent} max={100} style={{ width: "100%", marginTop: "12px" }} />}
+                        {progress && progress.total > 0 && <Paragraph>{progress.tested} de {progress.total} servidores testados · {progress.succeeded} aprovados</Paragraph>}
+                        {progress?.server && <Paragraph>Servidor selecionado: {progress.server}</Paragraph>}
+                        {typeof progress?.pingMs === "number" && <Paragraph>Latência medida: {progress.pingMs} ms</Paragraph>}
+                        {progress?.phase === "completed" && <Paragraph>A configuração foi salva; a ativação da VPN continua sendo uma ação separada.</Paragraph>}
+                    </div>
+                    {error && <Paragraph><strong>{error}</strong></Paragraph>}
+                </div>
+            )}
+            {page === "ready" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                    <Paragraph><strong>Configuração concluída</strong></Paragraph>
+                    <div style={onboardingBoxStyle} role="status" aria-live="polite">
+                        <Paragraph>A rota Proton foi preparada com sucesso. Ative o túnel quando quiser pelo painel do plugin; o Discord não será reiniciado automaticamente.</Paragraph>
+                        {progress?.server && <Paragraph>Servidor escolhido: {progress.server}</Paragraph>}
+                        {typeof progress?.downloadMbps === "number" && typeof progress.uploadMbps === "number" && <Paragraph>Teste medido: {progress.downloadMbps} Mbps down · {progress.uploadMbps} Mbps up</Paragraph>}
+                    </div>
+                </div>
+            )}
+        </Modal>
+    );
+}
+
+function openPluginOnboarding() {
+    openModal(props => <PluginOnboardingModal modalProps={props} />);
+}
+
 function AboutPlugin() {
     return (
         <>
+            <section>
+                <Paragraph><strong>Assistente de configuração</strong> — configure sua conta Proton e prepare a rota WireGuard dentro do Discord.</Paragraph>
+                <Button onClick={openPluginOnboarding}>Abrir guia de configuração</Button>
+            </section>
             <VpnPanel />
             <PluginUpdateSettings />
             <Paragraph>
@@ -215,6 +541,7 @@ function PluginUpdateSettings() {
     });
     const [status, setStatus] = useState<PluginUpdateStatus | null>(null);
     const [busy, setBusy] = useState(false);
+    const [operation, setOperation] = useState<"checking" | "updating" | null>(null);
 
     const refreshStatus = async () => {
         const getStatus = Native?.getPluginUpdateStatus;
@@ -237,6 +564,7 @@ function PluginUpdateSettings() {
     const check = async () => {
         if (!Native || busy) return;
         setBusy(true);
+        setOperation("checking");
         try {
             const result = await Native.checkPluginUpdate() as PluginUpdateCheckResult;
             const current = result.current || PLUGIN_VERSION;
@@ -264,6 +592,7 @@ function PluginUpdateSettings() {
             setState({ label: `v${PLUGIN_VERSION} · verificação falhou${detail}`, tone: "neutral" });
         } finally {
             setBusy(false);
+            setOperation(null);
         }
     };
 
@@ -297,6 +626,7 @@ function PluginUpdateSettings() {
     const update = async () => {
         if (!Native || busy) return;
         setBusy(true);
+        setOperation("updating");
         try {
             const result = await Native.updatePlugin() as PluginUpdateResult;
             if (!result.ok) throw new Error(result.error || "O updater recusou a atualização.");
@@ -316,6 +646,7 @@ function PluginUpdateSettings() {
             showToast(`GoLiveBypass não conseguiu atualizar: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
         } finally {
             setBusy(false);
+            setOperation(null);
         }
     };
 
@@ -323,20 +654,28 @@ function PluginUpdateSettings() {
     const checkedLabel = typeof status?.lastCheckedAt === "number"
         ? ` · última consulta ${new Date(status.lastCheckedAt).toLocaleTimeString()}`
         : "";
+    const cardVariant = busy ? "brand" : state.tone === "warning" ? "warning" : state.tone === "success" ? "success" : "primary";
+    const operationLabel = operation === "checking"
+        ? "Verificando atualizações…"
+        : operation === "updating"
+            ? "Baixando e preparando a atualização…"
+            : state.label;
 
     return (
-        <section>
-            <Paragraph>
-                <strong>Atualizações</strong> — canal {channelLabel}; automática {autoUpdate ? "ligada" : "desligada"}{checkedLabel}
-            </Paragraph>
-            <Paragraph>
-                <strong>{state.label}</strong>{" "}
-                <Button onClick={() => void check()} disabled={busy}>{busy ? "Verificando…" : "Verificar"}</Button>{" "}
-                {state.available && <Button onClick={() => void update()} disabled={busy}>Atualizar</Button>}
-            </Paragraph>
-            {status?.pending && <Paragraph>Atualização {status.pendingVersion ? `v${status.pendingVersion}` : "preparada"} pronta; recarregue o Discord para aplicar.</Paragraph>}
-            {status?.lastError && <Paragraph>Último erro do updater: {status.lastError.slice(0, 240)}</Paragraph>}
-        </section>
+        <Card variant={cardVariant} defaultPadding>
+            <section aria-label="Estado das atualizações do GoLiveBypass">
+                <Paragraph>
+                    <strong>Atualizações do GoLiveBypass</strong> — canal {channelLabel}; automática {autoUpdate ? "ligada" : "desligada"}{checkedLabel}
+                </Paragraph>
+                <Paragraph>
+                    <strong>{operationLabel}</strong>{" "}
+                    <Button onClick={() => void check()} disabled={busy}>{busy ? "Em andamento…" : "Verificar"}</Button>{" "}
+                    {state.available && <Button onClick={() => void update()} disabled={busy}>Atualizar</Button>}
+                </Paragraph>
+                {status?.pending && <Paragraph>Atualização {status.pendingVersion ? `v${status.pendingVersion}` : "preparada"} pronta; recarregue o Discord manualmente para aplicar.</Paragraph>}
+                {status?.lastError && <Paragraph>Último erro do updater: {status.lastError.slice(0, 240)}</Paragraph>}
+            </section>
+        </Card>
     );
 }
 
@@ -363,6 +702,12 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Verificar, baixar e preparar atualizações em segundo plano. O Discord nunca é reiniciado automaticamente.",
         default: true
+    },
+    onboardingCompleted: {
+        type: OptionType.BOOLEAN,
+        description: "Indica se o assistente inicial já foi concluído.",
+        default: false,
+        hidden: true,
     },
     vpnMode: {
         type: OptionType.SELECT,
@@ -841,6 +1186,9 @@ export default definePlugin({
     tags: ["Voice", "Privacy"],
     settings,
     settingsAboutComponent: AboutPlugin,
+    toolboxActions: {
+        "Abrir assistente do GoLiveBypass": openPluginOnboarding,
+    },
 
     patches: [
         {
@@ -892,6 +1240,14 @@ export default definePlugin({
         forceRegion();
         startStreamClaimWatch();
 
+        if (onboardingTimer !== null) clearTimeout(onboardingTimer);
+        if (Native && settings.store.onboardingCompleted !== true) {
+            onboardingTimer = setTimeout(() => {
+                onboardingTimer = null;
+                if (settings.store.onboardingCompleted !== true) openPluginOnboarding();
+            }, 2_500);
+        }
+
         const configure = Native?.configurePluginUpdates;
         if (typeof configure === "function") {
             void configure({
@@ -919,6 +1275,10 @@ export default definePlugin({
     },
 
     stop() {
+        if (onboardingTimer !== null) {
+            clearTimeout(onboardingTimer);
+            onboardingTimer = null;
+        }
         if (updateCheckTimer !== null) {
             clearTimeout(updateCheckTimer);
             updateCheckTimer = null;

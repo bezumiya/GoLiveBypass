@@ -32,11 +32,10 @@ import {
   type UpdatePulseEvent,
 } from "./update-pulse";
 
-// O fork pdl-clay e o canal de distribuicao desta linha de testes/releases.
-// O updater e o publisher precisam apontar para o mesmo repositorio: consultar o
-// upstream aqui faria o app detectar uma versao que nunca conseguiria baixar do
-// fork (ou ignorar completamente a release beta criada para os testadores).
-const REPO = "pdl-clay/GoLiveBypass";
+// O updater e o publisher precisam apontar para o mesmo repositorio de producao.
+// Releases de teste usam uma build/configuracao separada e nunca devem chegar ao
+// executavel distribuido neste canal.
+const REPO = "bezumiya/GoLiveBypass";
 const EXE_PREFIX = "GoLiveBypass-";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // fallback de seguranca: uma vez por hora
 const CHECK_MIN_INTERVAL_MS = 60_000;
@@ -481,7 +480,7 @@ async function showUpdateFailure(getMainWindow: () => BrowserWindow | null, vers
     title: "Falha na atualização",
     message: `Não foi possível preparar o GoLiveBypass ${version}.`,
     detail:
-      "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/pdl-clay/GoLiveBypass/releases.",
+      "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
     buttons: ["OK"],
   };
   const win = getMainWindow();

@@ -34,6 +34,7 @@ import { classifyFailoverHealth, FailoverHealthTracker, FAILOVER_ROUTE_TIMEOUT_M
 import { validateWgConfContent } from "./wg-validator";
 import * as proton from "./proton";
 import { ProtonOptimizationCoordinator } from "./proton-optimization";
+import { restoreBypassOnStartup, type StartupOptimizationResult } from "./startup-restore";
 import { findWindowsDiscordInstall } from "./windows-discord-install";
 import { waitForProcessRunning, waitForProcessStopped, type ProcessProbeState } from "./wait-condition";
 import { TUNNEL_STARTUP_SETTLE_MS, waitForTunnelStartupSettle } from "./tunnel-startup";
@@ -57,6 +58,9 @@ const MAIN_WINDOW_WIDTH = 720;
 // instancias ou que uma validacao aprove a rede enquanto outra ainda a desmonta.
 let wireSockLifecycleQueue: Promise<void> = Promise.resolve();
 const protonOptimizations = new ProtonOptimizationCoordinator();
+let startupRestoreInFlight = false;
+let startupRestoreController: AbortController | null = null;
+let startupRestorePromise: Promise<void> | null = null;
 const PROTON_PLAN_CACHE_TTL_MS = 15 * 60 * 1000;
 type ProtonPlanCacheEntry = {
   username: string;
@@ -209,9 +213,10 @@ const diskFs: typeof fs = (() => {
 const FLAVOURS = ["Discord", "DiscordPTB", "DiscordCanary"];
 
 // Clientes paralelos do Discord (mods standalone) com a MESMA estrutura Electron: pasta
-// <LOCALAPPDATA>/<Nome>/app-<versao>/resources com app.asar. O bypass injeta igual — o
-// que diferencia e o nome da pasta/do executavel. O "Vencord" citado pelos usuarios e o
-// Vesktop (o desktop do Vencord); Vencord/Equicord em si sao builds que usam o plugin.
+// <LOCALAPPDATA>/<Nome>/app-<versao>/resources ou diretamente em
+// <LOCALAPPDATA>/<Nome>/resources. O bypass injeta igual — o que diferencia e o nome da
+// pasta/do executavel. O "Vencord" citado pelos usuarios e o Vesktop (o desktop do Vencord);
+// Vencord/Equicord em si sao builds que usam o plugin.
 const PARALLEL_APPS = ["Vesktop", "Equibop", "Legcord"];
 const ALL_APPS = [...FLAVOURS, ...PARALLEL_APPS];
 
@@ -620,12 +625,18 @@ async function toggleFromTray() {
 
     if (IS_LINUX) {
       const status = await linuxStatus();
-      if (status === "ACTIVE") await withWireSockLifecycle("desativar-linux-bandeja", () => linuxDeactivate(() => {}));
+      if (status === "ACTIVE") {
+        cancelStartupBypassRestore();
+        await withWireSockLifecycle("desativar-linux-bandeja", () => linuxDeactivate(() => {}));
+        persistBypassEnabled(false);
+      }
       else await withWireSockLifecycle("ativar-linux-bandeja", async () => {
         return linuxActivate(() => {});
       });
     } else if (getStatus() === "ACTIVE") {
+      cancelStartupBypassRestore();
       await deactivateAll();
+      persistBypassEnabled(false);
     } else {
       await activateBypass(null, "");
     }
@@ -759,6 +770,10 @@ if (!gotLock) {
     // movido = boot falha em silencio com o checkbox marcado. Reescrever a cada
     // abertura cura (reg add idempotente). (issue: "nao abre mesmo ativando")
     syncStartupEntry();
+    // No boot oculto do Windows, restaura somente a intenção persistida do
+    // usuário. A otimização Proton acontece antes da ativação WireSock; o
+    // Discord não é iniciado até a ativação terminar.
+    void restoreBypassFromWindowsStartup();
     // Boot: se o usuario deixou o bypass ativo na sessao passada (flag gravada na
     // ativacao, zerada so no deactivate explicito) e a injecao nao esta no disco
     // (o quit limpo restaura), reativa sozinho — sem esperar o clique no botao
@@ -834,6 +849,7 @@ app.on("before-quit", (event) => {
   protonOptimizations.invalidate();
   invalidateProtonPlanCache();
   stopProtonFailoverMonitor();
+  cancelStartupBypassRestore();
   if (isQuittingForUpdate()) return;
   updaterController?.setEnabled(false);
   // A segunda instancia so acorda a primeira e morre: sem esta guarda ela restauraria o
@@ -893,22 +909,35 @@ function getWinDiscordInstalls(): DiscordInstall[] {
   if (!localAppData) return [];
 
   const installs: DiscordInstall[] = [];
+  const seen = new Set<string>();
   for (const flavour of ALL_APPS) {
-    const rootPath = path.join(localAppData, flavour);
-    const existe = diskFs.existsSync(rootPath);
-    discordscan.scanRaiz(rootPath, existe, flavour);
-    if (!existe) continue;
+    // Os instaladores por usuário não são uniformes: Discord/Vesktop/Equibop
+    // costumam usar %LOCALAPPDATA%\<cliente>, enquanto o Legcord atual usa
+    // %LOCALAPPDATA%\Programs\Legcord. Conferir os dois formatos evita
+    // depender do instalador ou da edição que o usuário escolheu.
+    const roots = [
+      path.join(localAppData, flavour),
+      path.join(localAppData, "Programs", flavour),
+    ];
+    for (const rootPath of roots) {
+      const existe = diskFs.existsSync(rootPath);
+      discordscan.scanRaiz(rootPath, existe, flavour);
+      if (!existe) continue;
 
-    const candidate = findWindowsDiscordInstall(
-      rootPath,
-      flavour,
-      diskFs.existsSync,
-      (target) => diskFs.readdirSync(target) as string[],
-    );
-    if (!candidate) continue;
+      const candidate = findWindowsDiscordInstall(
+        rootPath,
+        flavour,
+        diskFs.existsSync,
+        (target) => diskFs.readdirSync(target) as string[],
+      );
+      if (!candidate) continue;
 
-    discordscan.scanInstall(candidate.resources, flavour);
-    installs.push({ flavour, ...candidate });
+      const key = candidate.exePath.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      discordscan.scanInstall(candidate.resources, flavour);
+      installs.push({ flavour, ...candidate });
+    }
   }
   discordscan.scanResultado(installs.length);
   return installs;
@@ -1520,6 +1549,7 @@ async function executarAtivacao(event: any) {
     getStatus() === "ACTIVE"
   ) {
     logger.info("ativacao", "bypass ja ativo com a mesma proxy/modo; re-injecao ignorada");
+    persistBypassEnabled(true);
     return;
   }
 
@@ -1665,10 +1695,8 @@ async function executarAtivacao(event: any) {
   // Registra a sessao: o bypass so se desfaz no quit limpo; se o PC desligar no meio, o
   // boot seguinte encontra este marcador e reverte a injecao orfa.
   writeSessionMarker(installs);
-  // Flag de "estava ativo": o boot seguinte re-injeta sozinho se a injecao nao
-  // estiver no disco (quit limpo restaura, e o usuario nao precisa apertar o
-  // botao de novo — relato do beta 1.1.11-beta.2). Zerada so no deactivate
-  // explicito do usuario.
+  // A chave autoInject pertence ao fluxo legado e nao decide mais o boot
+  // WireGuard. A intencao atual e persistida em bypassEnabled logo abaixo.
   updateSharedSettings({ autoInject: false });
   // Ativacao concluiu de verdade: guarda a assinatura para a guarda de duplicada
   // (ver topo da funcao).
@@ -1677,6 +1705,7 @@ async function executarAtivacao(event: any) {
   // legado de PAC/Tor, sem interface wg nenhuma para vigiar.
   if (IS_WINDOWS) iniciarWgStatsWatchdog(wgStatsProvider);
   startProtonFailoverMonitor();
+  persistBypassEnabled(true);
 }
 
 async function deactivateAll() {
@@ -2581,6 +2610,86 @@ async function ensureProtonActivationProfile() {
   updateSharedSettings({ protonLastServer: { ...gen, measurementUsername: username.trim().toLowerCase() } });
 }
 
+// No autostart do Windows nao existe renderer para conduzir a selecao Proton. A
+// medicao roda aqui, antes de activateBypass(), e grava o perfil somente depois
+// de o confgen entregar uma configuracao valida. Se falhar, o arquivo anterior
+// continua no lugar e a ativacao abaixo faz o fallback normal.
+async function optimizeProtonRouteAtStartup(
+  signal?: AbortSignal,
+): Promise<StartupOptimizationResult & { server?: string; skipped?: boolean }> {
+  const settings = readSharedSettings() as any;
+  if ((settings.vpnMode || "proton") !== "proton") {
+    logger.info("proton", "otimizacao de boot ignorada para configuracao customizada", {});
+    return { success: true, skipped: true };
+  }
+
+  const username = recoverProtonUsername() || (settings.protonUsername as string) || "";
+  if (!username) {
+    return { success: false, error: "Nenhuma conta ProtonVPN conectada." };
+  }
+  if (signal?.aborted || quitting) {
+    return { success: false, error: "Otimização de boot cancelada." };
+  }
+
+  const country = (settings.protonCountry as string) || "";
+  const plan = await resolveProtonPlan(username);
+  const freeOnly = plan.status !== "premium";
+  const autoPing = settings.protonAutoPing !== false;
+  let generated: Awaited<ReturnType<typeof proton.generateOptimalProtonConfig>>;
+  try {
+    generated = await withWireSockLifecycle("otimizacao-boot", () =>
+      proton.generateOptimalProtonConfig(settingsDir(), {
+        username,
+        countries: country || undefined,
+        freeOnly,
+        autoPing,
+        speedTest: true,
+        signal,
+        onProgress: (progress) => {
+          logger.info("proton", "otimizacao.boot.progresso", {
+            phase: progress.phase,
+            total: progress.total,
+            tested: progress.tested,
+            succeeded: progress.succeeded,
+            server: progress.server || "",
+          });
+        },
+      }),
+    );
+  } catch (error) {
+    return {
+      success: false,
+      error: String((error as Error)?.message ?? error),
+    };
+  }
+
+  if (signal?.aborted || quitting) {
+    return { success: false, error: "Otimização de boot cancelada." };
+  }
+  if (!generated.success) {
+    return { success: false, error: generated.error || "Falha ao otimizar a rota ProtonVPN." };
+  }
+
+  const saved = {
+    ...generated,
+    measurementUsername: username.trim().toLowerCase(),
+    measurementVersion: proton.MEASUREMENT_CRITERION_VERSION,
+    measuredAt: new Date().toISOString(),
+    measurementCountry: country,
+    measurementFreeOnly: freeOnly,
+    measurementAutoPing: autoPing,
+  };
+  if (!updateSharedSettings({
+    protonCountry: country,
+    protonFreeOnly: freeOnly,
+    protonAutoPing: autoPing,
+    protonLastServer: saved,
+  })) {
+    return { success: false, error: "A rota foi preparada, mas não foi possível salvar suas preferências." };
+  }
+  return { success: true, server: generated.server };
+}
+
 async function linuxActivate(onChunk: (c: string) => void) {
   let preflight = await linuxPreflight();
   if (!preflight.ok && linuxPreflightRepairable(preflight)) {
@@ -2599,6 +2708,7 @@ async function linuxActivate(onChunk: (c: string) => void) {
   // instância sobre um namespace já ativo.
   if (await linuxStatus() === "ACTIVE") {
     logger.info("linux", "ativacao duplicada ignorada; tunel ja ativo");
+    persistBypassEnabled(true);
     return;
   }
   await ensureProtonActivationProfile();
@@ -2636,13 +2746,14 @@ async function linuxActivate(onChunk: (c: string) => void) {
   } catch {
     // sem marcador o boot seguinte nao consegue reverter; a injecao orfa fica para a mao
   }
-  // Flag de "estava ativo" (o quit limpo do Linux restaura a injecao; o boot
-  // seguinte re-injeta pela flag). Zerada so no deactivate explicito.
+  // autoInject e legado; bypassEnabled e a preferencia atual da GUI e so e
+  // gravada depois que o namespace WireGuard terminou de subir.
   updateSharedSettings({ autoInject: false });
   iniciarWgStatsWatchdog(linuxWgStats);
   startLinuxHealthWatchdog();
   linuxStatusCache = null;
   startProtonFailoverMonitor();
+  persistBypassEnabled(true);
 }
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
@@ -2681,18 +2792,21 @@ ipcMain.handle("activate", async (event) => {
 });
 ipcMain.handle("deactivate", async (event) => {
   // Deactivate EXPLICITO (botao/bandeja): o usuario nao quer mais — zera a flag de
-  // auto-injecao do boot. O quit limpo NAO passa aqui (la a injecao e removida mas o
-  // usuario so fechou o app; o boot seguinte re-injeta pela flag).
+  // auto-injecao do boot. O quit limpo NAO passa aqui: ele desmonta a sessao, mas
+  // preserva a intencao para o proximo login do Windows.
+  cancelStartupBypassRestore();
   updateSharedSettings({ autoInject: false });
   if (IS_LINUX) {
     await withWireSockLifecycle("desativar-linux", () => linuxDeactivate((c) => event.sender.send("bypass-log", c)));
   } else {
     await deactivateAll();
   }
+  persistBypassEnabled(false);
   refreshTray().catch(() => {});
 });
 ipcMain.handle("restore-internet", async () => {
   if (!IS_WINDOWS) return { ok: false, error: "Esta recuperação só está disponível no Windows." };
+  cancelStartupBypassRestore();
   return withWireSockLifecycle("restaurar-internet", async () => {
     windowsRouteGeneration += 1;
     windowsRouteStarted = false;
@@ -2712,6 +2826,7 @@ ipcMain.handle("restore-internet", async () => {
     }
     const recovery = await recoverWireSockNetwork();
     windowsRouteState = recovery.ok ? "inactive" : "recovery_required";
+    if (recovery.ok) persistBypassEnabled(false);
     // Nao relancar o Discord enquanto o WFP ainda pode estar instalado ou a
     // resolucao/HTTPS nao foi comprovada saudavel.
     if (hadWireSock && recovery.ok) {
@@ -3567,6 +3682,82 @@ function updateSharedSettings(patch: Record<string, unknown>): boolean {
   }
 }
 
+function readBypassEnabled(): boolean {
+  return readSharedSettings().bypassEnabled === true;
+}
+
+function persistBypassEnabled(enabled: boolean): boolean {
+  const ok = updateSharedSettings({ bypassEnabled: enabled });
+  if (!ok) {
+    logger.warn("bypass", "preferencia de ativação não foi persistida", { enabled });
+  }
+  return ok;
+}
+
+function cancelStartupBypassRestore(): void {
+  if (!startupRestoreController) return;
+  logger.info("bypass", "restauração automática de boot cancelada por ação do usuário", {});
+  startupRestoreController.abort();
+}
+
+function restoreBypassFromWindowsStartup(): Promise<void> {
+  if (!IS_WINDOWS || !launchedHidden() || !readBypassEnabled()) return Promise.resolve();
+  if (startupRestorePromise) return startupRestorePromise;
+
+  const controller = new AbortController();
+  startupRestoreController = controller;
+  startupRestoreInFlight = true;
+
+  const operation = restoreBypassOnStartup({
+    enabled: true,
+    signal: controller.signal,
+    isActive: () => getStatus() === "ACTIVE" || isWireSockActive(),
+    optimize: (signal) => optimizeProtonRouteAtStartup(signal),
+    activate: () => activateBypass({}),
+    onOptimizationFailure: (error) => {
+      logger.warn("proton", "otimizacao de boot falhou; tentando rota salva ou selecao rapida", {
+        erro: error || "motivo não informado",
+      });
+    },
+  }).then((result) => {
+    if (result.status === "activated") {
+      logger.info("bypass", "restauração automática concluída", {
+        otimizada: result.optimized,
+        fallback: result.usedFallback,
+        erroOtimizacao: result.optimized ? "" : result.error || "",
+      });
+    } else if (result.status === "already-active") {
+      logger.info("bypass", "restauração automática ignorada; túnel já ativo", {});
+    } else if (result.status === "cancelled") {
+      logger.info("bypass", "restauração automática cancelada", { erro: result.error || "" });
+    } else if (result.status === "failed") {
+      // A preferência permanece verdadeira: a próxima abertura terá outra
+      // oportunidade de usar a rota salva ou de otimizar novamente.
+      logger.error("bypass", "restauração automática falhou; preferência preservada", {
+        erro: result.error || "motivo não informado",
+        bypassEnabled: true,
+      });
+    }
+  }).catch((error) => {
+    logger.error("bypass", "erro inesperado na restauração automática", {
+      erro: String((error as Error)?.message ?? error),
+      bypassEnabled: true,
+    });
+  });
+
+  const tracked = operation.finally(() => {
+    if (startupRestorePromise === tracked) {
+      startupRestorePromise = null;
+      startupRestoreController = null;
+      startupRestoreInFlight = false;
+    }
+    refreshWindowStatus();
+    refreshTray().catch(() => {});
+  });
+  startupRestorePromise = tracked;
+  return tracked;
+}
+
 function recoverProtonUsername(): string {
   const saved = proton.getSavedSessionUsername(settingsDir());
   if (!saved) return "";
@@ -3984,7 +4175,7 @@ ipcMain.handle("test-proxy", async (_event, proxyRaw: unknown) => {
 });
 
 // ------------------------------------------------------------------ diagnostico / modo dev
-const ISSUE_REPO = "pdl-clay/GoLiveBypass";
+const ISSUE_REPO = "bezumiya/GoLiveBypass";
 // A label "gui" precisa existir no repo (criar uma vez no GitHub). Sem ela o form ainda abre;
 // a API de reports usa ISSUE_LABELS no servidor.
 const ISSUE_LABELS = ["bug", "gui"];
@@ -4794,6 +4985,12 @@ ipcMain.handle("cancel-proton-optimization", (event, requestId: string) =>
 
 ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizationOptions) => {
   if (isMac) return { success: false, error: "O bypass por WireGuard ainda não está disponível no macOS." };
+  if (startupRestoreInFlight) {
+    // O boot oculto é a autoridade enquanto mede e ativa a rota. Uma janela
+    // aberta nesse intervalo deve aguardar o resultado, não iniciar outra
+    // seleção concorrente no mesmo perfil WireGuard.
+    return { success: true, deferred: true, startup: true };
+  }
   const requestId = typeof options?.requestId === "string" && options.requestId.length <= 128
     ? options.requestId : `proton-${Date.now()}`;
   const operation = protonOptimizations.start(requestId, event.sender.id);

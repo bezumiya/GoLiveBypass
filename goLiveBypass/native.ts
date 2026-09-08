@@ -39,7 +39,7 @@ import { safeDiagnosticDetail } from "./vpn-types";
 const PLUGIN_VERSION = "2.0.0-beta.1";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
 const PLUGIN_CHECKSUM_ASSET = `${PLUGIN_ASSET}.sha256`;
-const GITHUB_RELEASES_URL = "https://api.github.com/repos/pdl-clay/GoLiveBypass/releases?per_page=20";
+const GITHUB_RELEASES_URL = "https://api.github.com/repos/bezumiya/GoLiveBypass/releases?per_page=20";
 const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
 const PLUGIN_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 const PLUGIN_UPDATE_INITIAL_DELAY_MS = 8_000;
@@ -116,6 +116,31 @@ let pluginUpdateLastCheckedAt: number | null = null;
 let pluginUpdateLastError: string | null = null;
 
 type PluginSettingsRecord = Record<string, unknown>;
+
+type PluginOptimizationStatus = {
+    active: boolean;
+    requestId: string | null;
+    phase: proton.ProtonOptimizationProgress["phase"] | null;
+    total: number;
+    tested: number;
+    succeeded: number;
+    server?: string;
+    pingMs?: number;
+    downloadMbps?: number;
+    uploadMbps?: number;
+    error?: string;
+    updatedAt: number | null;
+};
+
+let pluginOptimizationStatus: PluginOptimizationStatus = {
+    active: false,
+    requestId: null,
+    phase: null,
+    total: 0,
+    tested: 0,
+    succeeded: 0,
+    updatedAt: null,
+};
 
 function pluginSettings(): PluginSettingsRecord {
     const root = RendererSettings.plain as { plugins?: unknown };
@@ -350,6 +375,10 @@ export function getVpnStatus(_: IpcMainInvokeEvent) {
     return controller.getStatus();
 }
 
+export function getProtonOptimizationStatus(_: IpcMainInvokeEvent): PluginOptimizationStatus {
+    return { ...pluginOptimizationStatus };
+}
+
 export function getLog(_: IpcMainInvokeEvent): string {
     return history.join("\n");
 }
@@ -395,7 +424,11 @@ export async function loginProton(event: IpcMainInvokeEvent, value: unknown) {
 
 export function checkProtonSession(_: IpcMainInvokeEvent, username?: unknown) {
     const value = typeof username === "string" && username.trim() ? username : String(controllerSettings().protonUsername || "");
-    return controller.checkProtonSession(value).catch(error => ({ valid: false, error: safeDiagnosticDetail(error, 500) }));
+    return controller.checkProtonSession(value).catch(() => ({
+        valid: false,
+        code: "UNKNOWN" as const,
+        error: "Não foi possível verificar a sessão Proton.",
+    }));
 }
 
 export function getProtonPlan(_: IpcMainInvokeEvent, username?: unknown) {
@@ -411,10 +444,60 @@ export function logoutProton(_: IpcMainInvokeEvent) {
 
 export function optimizeProtonRoute(event: IpcMainInvokeEvent, value: unknown) {
     const options = cleanOptimizationOptions(value);
+    const requestId = options.requestId || `plugin-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    options.requestId = requestId;
+    pluginOptimizationStatus = {
+        active: true,
+        requestId,
+        phase: "preparing",
+        total: 0,
+        tested: 0,
+        succeeded: 0,
+        updatedAt: Date.now(),
+    };
     options.onProgress = progress => {
+        pluginOptimizationStatus = {
+            ...pluginOptimizationStatus,
+            active: true,
+            requestId: progress.requestId,
+            phase: progress.phase,
+            total: progress.total,
+            tested: progress.tested,
+            succeeded: progress.succeeded,
+            server: progress.server,
+            pingMs: progress.pingMs,
+            downloadMbps: progress.downloadMbps,
+            uploadMbps: progress.uploadMbps,
+            error: undefined,
+            updatedAt: Date.now(),
+        };
         if (!event.sender.isDestroyed()) event.sender.send("golive-vpn-proton-progress", progress);
     };
-    return controller.optimizeProton(options);
+    return controller.optimizeProton(options).then(result => {
+        pluginOptimizationStatus = {
+            ...pluginOptimizationStatus,
+            active: false,
+            requestId,
+            phase: result.success ? "completed" : result.cancelled ? "cancelled" : "failed",
+            server: result.server,
+            pingMs: result.pingMs,
+            downloadMbps: result.downloadMbps,
+            uploadMbps: result.uploadMbps,
+            error: result.error,
+            updatedAt: Date.now(),
+        };
+        return result;
+    }, error => {
+        pluginOptimizationStatus = {
+            ...pluginOptimizationStatus,
+            active: false,
+            requestId,
+            phase: "failed",
+            error: safeDiagnosticDetail(error, 500),
+            updatedAt: Date.now(),
+        };
+        throw error;
+    });
 }
 
 export function cancelProtonOptimization(_: IpcMainInvokeEvent, requestId: unknown) {

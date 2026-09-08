@@ -107,7 +107,7 @@ describe("guarda de ativacao duplicada", () => {
   it("nao relanca o Discord enquanto a restauracao do WireSock ou da rede falhou", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
     const fnStart = src.indexOf('ipcMain.handle("restore-internet"');
-    const fnBody = src.slice(fnStart, fnStart + 1100);
+    const fnBody = src.slice(fnStart, src.indexOf('ipcMain.handle("get-platform"', fnStart));
     expect(fnBody).toContain('withWireSockLifecycle("restaurar-internet"');
     expect(fnBody).toContain("const recovery = await recoverWireSockNetwork();");
     expect(fnBody).toContain("if (hadWireSock && recovery.ok)");
