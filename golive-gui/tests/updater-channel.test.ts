@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import fs from "fs";
 import path from "path";
-import { compararVersoes, escolherRelease, type ReleaseCandidata } from "../electron/updater-channel";
+import {
+  compararVersoes,
+  escolherAssetWindows,
+  escolherRelease,
+  type ReleaseCandidata,
+} from "../electron/updater-channel";
 
 // O canal beta e o opt-in dos testadores (regra §9): prereleases nunca viram
 // "latest", o canal estavel nunca as ve, e NENHUM canal faz downgrade — pelo
@@ -89,6 +94,26 @@ describe("escolherRelease (candidata de update por canal)", () => {
   });
 });
 
+describe("escolherAssetWindows (portable da release)", () => {
+  it("escolhe o portable exato mesmo quando o helper Proton vem primeiro", () => {
+    const assets = [
+      { name: "GoLiveBypass-2.0.5-beta-11-proton-confgen-win-x64.exe" },
+      { name: "GoLiveBypass-2.0.5-beta-11.exe" },
+    ];
+    expect(escolherAssetWindows("v2.0.5-beta-11", assets)?.name).toBe(
+      "GoLiveBypass-2.0.5-beta-11.exe",
+    );
+  });
+
+  it("não trata o helper Proton como executável atualizável", () => {
+    expect(
+      escolherAssetWindows("v2.0.5-beta-11", [
+        { name: "GoLiveBypass-2.0.5-beta-11-proton-confgen-win-x64.exe" },
+      ]),
+    ).toBeNull();
+  });
+});
+
 describe("wiring do canal no updater e no workflow", () => {
   it("o updater liga allowPrerelease no Linux e usa escolherRelease no Windows", () => {
     const updater = fs.readFileSync(path.resolve(process.cwd(), "electron/updater.ts"), "utf8");
@@ -96,6 +121,8 @@ describe("wiring do canal no updater e no workflow", () => {
     expect(updater).toContain('autoUpdater.allowPrerelease = canalAtual() === "beta"');
     expect(updater).toContain("autoUpdater.autoInstallOnAppQuit = false");
     expect(updater).toContain("escolherRelease(releases, app.getVersion(), canal)");
+    expect(updater).toContain("escolherAssetWindows(String(item.tag_name), assets)");
+    expect(updater).not.toContain("a.name.startsWith(EXE_PREFIX)");
     expect(updater).toContain("CHECK_INTERVAL_MS = 60 * 60 * 1000");
     expect(updater).toContain("createUpdatePulseClient");
     expect(updater).toContain("UPDATE_STREAM_URL");

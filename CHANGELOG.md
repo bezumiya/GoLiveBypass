@@ -6,6 +6,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-12] - 2026-09-07
+
+### Correção do asset Windows no updater
+
+- O updater agora seleciona somente o portable `GoLiveBypass-<versão>.exe` da release.
+- O `proton-confgen` não pode mais ser baixado como se fosse o executável principal.
+- Adicionados testes para a ordem real dos assets e para a ausência do helper como candidato.
+
 ## [2.0.5-beta-11] - 2026-09-07
 
 ### Paridade dos helpers Proton no empacotamento
