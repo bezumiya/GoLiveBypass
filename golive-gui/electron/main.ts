@@ -263,7 +263,7 @@ let updaterController: UpdaterController | null = null;
 // derrubaria o app e a pessoa nem notaria que a janela foi parar junto do relogio.
 let quitting = false;
 let cleaningUp = false;
-let pendingUpdateToast: UpdateReadyInfo | null = null;
+let pendingUpdateCard: UpdateReadyInfo | null = null;
 
 // Os icones moram em assets/ e seguem no pacote pelo "files" do electron-builder. O icone do
 // exe vem de build/icon.ico; no Mac o .icns e gerado a partir do mesmo desenho.
@@ -501,9 +501,9 @@ function showWindow() {
     // A bandeja pode ter mudado o startup ou o status com a janela escondida; ao reaparecer, sincroniza.
     mainWindow.webContents.send("refresh-startup");
     mainWindow.webContents.send("refresh-auto-update");
-    if (pendingUpdateToast) {
-      mainWindow.webContents.send("update-available", pendingUpdateToast);
-      pendingUpdateToast = null;
+    if (pendingUpdateCard) {
+      mainWindow.webContents.send("update-available", pendingUpdateCard);
+      pendingUpdateCard = null;
     }
     refreshWindowStatus();
   } else {
@@ -557,13 +557,9 @@ async function refreshTray() {
           click: () => {
             void applyPendingUpdate().then((ok) => {
               if (!ok) {
-                void dialog.showMessageBox({
-                  type: "warning",
-                  title: "Atualização pendente",
-                  message: "Não foi possível reiniciar para aplicar a atualização.",
-                  detail: "A versão atual continua funcionando. Tente novamente mais tarde.",
-                  buttons: ["OK"],
-                });
+                // Falhas de aplicação ficam no log e o card continua visível na GUI;
+                // não interromper a sessão com popup nativo é parte do fluxo do update.
+                console.warn("[updater] não foi possível aplicar a atualização pela bandeja.");
               } else {
                 refreshTray().catch(() => {});
               }
@@ -829,7 +825,7 @@ if (!gotLock) {
         void refreshTray();
         if (!info) return;
         if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
-          pendingUpdateToast = info;
+          pendingUpdateCard = info;
           return;
         }
         mainWindow.webContents.send("update-available", info);

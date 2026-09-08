@@ -8,7 +8,7 @@
 // Linux: o autoUpdater do electron-updater cuida do AppImage. O pulso tambem so acorda a
 // consulta nativa; o download continua sujeito ao canal e a verificacao do updater.
 
-import { app, dialog, BrowserWindow } from "electron";
+import { app, BrowserWindow } from "electron";
 import {
   createWriteStream,
   existsSync,
@@ -390,22 +390,36 @@ async function downloadWindowsPortable(
     return null;
   }
 
-  // Um nome por processo evita reaproveitar um parcial deixado por outra copia
-  // portable ou por uma tentativa interrompida.
-  const downloaded = join(tmpdir(), `GoLiveBypass-update-${process.pid}.exe`);
+  // O arquivo pendente nunca e o destino direto do stream: uma interrupcao de rede ou
+  // encerramento do processo deixa somente o .part. O rename final no mesmo diretorio e
+  // atomico, entao o marcador jamais aponta para um executavel parcialmente escrito.
+  const downloaded = join(tmpdir(), `GoLiveBypass-update-${process.pid}-${Date.now()}.exe`);
+  const partial = `${downloaded}.part`;
   try {
-    await downloadFile(candidate.url, downloaded);
+    await rm(downloaded, { force: true });
+    await rm(partial, { force: true });
+    await downloadFile(candidate.url, partial);
   } catch (error) {
     await rm(downloaded, { force: true }).catch(() => {});
+    await rm(partial, { force: true }).catch(() => {});
     console.error("[updater] download falhou:", error);
     return null;
   }
 
   // Conferido antes de encostar no exe em uso: o helper so recebe um arquivo que bate
   // com o digest publicado; um arquivo invalido e apagado e a versao atual continua.
-  if (!digestMatches(downloaded, candidate.digest)) {
+  if (!digestMatches(partial, candidate.digest)) {
     console.error("[updater] digest do executavel baixado nao confere");
     await rm(downloaded, { force: true }).catch(() => {});
+    await rm(partial, { force: true }).catch(() => {});
+    return null;
+  }
+
+  try {
+    renameSync(partial, downloaded);
+  } catch (error) {
+    await rm(partial, { force: true }).catch(() => {});
+    console.error("[updater] nao consegui tornar o download pendente:", error);
     return null;
   }
 
@@ -484,47 +498,6 @@ async function installPendingLinuxUpdate(): Promise<boolean> {
   }
 }
 
-async function showUpdateFailure(getMainWindow: () => BrowserWindow | null, version: string): Promise<void> {
-  const aviso = {
-    type: "warning" as const,
-    title: "Falha na atualização",
-    message: `Não foi possível preparar o GoLiveBypass ${version}.`,
-    detail:
-      "A versão atual continua funcionando. Tente de novo mais tarde, ou baixe a versão nova manualmente em github.com/bezumiya/GoLiveBypass/releases.",
-    buttons: ["OK"],
-  };
-  const win = getMainWindow();
-  if (win) await dialog.showMessageBox(win, aviso);
-  else await dialog.showMessageBox(aviso);
-}
-
-async function askToInstallWindowsUpdate(
-  getMainWindow: () => BrowserWindow | null,
-  pending: PendingWindowsUpdate,
-): Promise<void> {
-  const win = getMainWindow();
-  // Sem janela (app minimizado para a bandeja), o update fica pendente e aparece
-  // na propria bandeja. Assim o pulso nunca derruba uma sessao em andamento.
-  if (!win) return;
-
-  const choice = (await dialog.showMessageBox(win, {
-    type: "info",
-    title: "Atualização disponível",
-    message: `GoLiveBypass ${pending.version}${pending.prerelease ? " (beta)" : ""} foi baixado.`,
-    detail: pending.prerelease
-      ? "A versão de teste está pronta. Reiniciar agora para aplicar? O app reabre sozinho."
-      : "A atualização está pronta. Reiniciar agora para aplicar? O app reabre sozinho.",
-    buttons: ["Reiniciar agora", "Depois"],
-    defaultId: 0,
-    cancelId: 1,
-  })).response;
-
-  if (choice === 0) {
-    const ok = await installPendingWindowsUpdate();
-    if (!ok) await showUpdateFailure(getMainWindow, pending.version);
-  }
-}
-
 // ------------------------------------------------------------------ pulso + consultas
 
 function handleUpdatePulse(
@@ -585,7 +558,10 @@ async function checkLinuxUpdate(
   try {
     autoUpdater.allowPrerelease = canalAtual() === "beta";
     console.log(`[updater] verificando canal Linux (${reason})`);
-    await autoUpdater.checkForUpdatesAndNotify();
+    // A versão "AndNotify" do electron-updater cria uma Notification nativa quando
+    // termina o download. O card da GUI é o único canal de atualização, então a consulta
+    // precisa ser silenciosa e o evento update-downloaded alimenta apenas o estado do card.
+    await autoUpdater.checkForUpdates();
   } catch (error) {
     console.warn("[updater] consulta Linux falhou:", error);
   } finally {
@@ -673,25 +649,7 @@ export function setupUpdater(
     autoUpdater.on("update-downloaded", async (info) => {
       if (!isAutoUpdateEnabled() || updateReady) return;
       setUpdateReady(true, { version: info.version, prerelease: info.version.includes("-") });
-      const win = getMainWindow();
-      // showMessageBox assincrono: o sincrono bloquearia a thread JS do processo principal
-      // ate a pessoa clicar — inclusive watchdogs e timers de rede.
-      const choice = win
-        ? (await dialog.showMessageBox(win, {
-            type: "info",
-            title: "Atualização disponível",
-            message: `GoLiveBypass ${info.version} foi baixada.`,
-            detail: "Reiniciar agora para aplicar a atualização? O app fecha e reabre sozinho.",
-            buttons: ["Reiniciar agora", "Depois"],
-            defaultId: 0,
-            cancelId: 1,
-          })).response
-        : 1;
-
-      if (choice === 0 && !isDev) {
-        const ok = await installPendingLinuxUpdate();
-        if (!ok) await showUpdateFailure(getMainWindow, info.version);
-      }
+      console.log(`[updater] atualização Linux ${info.version} pronta; aguardando ação no card.`);
     });
 
     updatePulse = createUpdatePulseClient({
@@ -773,7 +731,7 @@ export async function checkWindowsUpdate(
     console.log(`[updater] candidata ${latest} encontrada (beta=${ehBeta} digest=${escolhida.digest !== null})`);
 
     // O pulso torna possivel baixar logo, mas nao instala nada sem digest nem troca
-    // de processo sem a confirmacao do usuario. A escolha fica retida na bandeja.
+    // de processo sem a confirmacao do usuario. A escolha fica retida no card da GUI.
     const atual = portableExePath();
     if (!atual) {
       console.warn("[updater] PORTABLE_EXECUTABLE_FILE nao definido; pulando update.");
@@ -781,7 +739,7 @@ export async function checkWindowsUpdate(
     }
     const pending = await downloadWindowsPortable(escolhida, atual);
     if (!pending) {
-      await showUpdateFailure(getMainWindow, latest);
+      console.warn(`[updater] não foi possível preparar ${latest}; a versão atual foi preservada.`);
       return;
     }
 
@@ -795,7 +753,7 @@ export async function checkWindowsUpdate(
 
     pendingWindowsUpdate = pending;
     setUpdateReady(true, { version: pending.version, prerelease: pending.prerelease });
-    await askToInstallWindowsUpdate(getMainWindow, pending);
+    console.log(`[updater] atualização Windows ${pending.version} pronta; aguardando ação no card.`);
   } finally {
     checking = false;
     const queued = queuedWindowsCheck;

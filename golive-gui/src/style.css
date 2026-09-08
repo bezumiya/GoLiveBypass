@@ -182,8 +182,9 @@ html[data-theme='dark'] .page-ambient::before {
 .update-card {
   position: fixed;
   z-index: 120;
-  top: 42px;
-  right: 14px;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   width: min(340px, calc(100vw - 24px));
   align-items: flex-start;
@@ -267,8 +268,8 @@ html[data-theme='dark'] .page-ambient::before {
 }
 
 @keyframes update-card-in {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 @media (prefers-reduced-motion: reduce) {

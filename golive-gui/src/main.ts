@@ -1406,6 +1406,11 @@ updateChannelToggle?.addEventListener('change', async () => {
 
 window.api.onRefreshAutoUpdate?.(refreshAutoUpdate);
 window.api.onUpdateAvailable?.(showUpdateCard);
+if (import.meta.env.DEV) {
+  // Prévia visual exclusiva do npm run dev: o updater real fica desligado enquanto
+  // a GUI não está empacotada, mas o card precisa ser inspecionável antes do release.
+  showUpdateCard({ version: '2.0.5-beta-10', prerelease: true });
+}
 window.api.onProtonFailoverNotice?.((notice) => {
   if (notice?.message) setProtonFeedback(notice.message, 'err');
 });

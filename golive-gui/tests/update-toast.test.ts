@@ -24,6 +24,8 @@ describe("card de atualização na GUI", () => {
     expect(renderer).toContain("applyUpdateFromCard");
     expect(renderer).not.toContain("setTimeout(hideUpdateToast, 5000)");
     expect(renderer).toContain("hideUpdateCard();");
+    expect(renderer).toContain("import.meta.env.DEV");
+    expect(renderer).toContain("2.0.5-beta-10");
   });
 
   it("envia o aviso quando o updater termina de preparar o update", () => {
@@ -33,5 +35,12 @@ describe("card de atualização na GUI", () => {
     expect(main).toContain('ipcMain.handle("apply-pending-update"');
     expect(updater).toContain("UpdateReadyInfo");
     expect(updater).toContain("setUpdateReady(true, { version: pending.version");
+    expect(updater).not.toContain("dialog.showMessageBox");
+    expect(updater).not.toContain("checkForUpdatesAndNotify");
+    expect(updater).toContain("await autoUpdater.checkForUpdates()");
+    expect(updater).not.toContain("askToInstallWindowsUpdate");
+    expect(updater).not.toContain("showUpdateFailure");
+    expect(updater).toContain("const partial = `${downloaded}.part`");
+    expect(updater).toContain("renameSync(partial, downloaded)");
   });
 });

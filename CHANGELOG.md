@@ -6,6 +6,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.5-beta-10] - 2026-09-07
+
+### Fluxo de atualização na GUI
+
+- Removidos os popups nativos de atualização do Windows e Linux; o card persistente da interface agora concentra o aviso e a ação de reinício.
+- Falhas de preparação ou aplicação continuam preservando a versão atual e ficam registradas no log, sem interromper a sessão com uma janela do sistema.
+- O `npm run dev` exibe uma prévia visual do card para validação antes da publicação.
+
+### Ajuste visual
+
+- O card de atualização fica centralizado horizontalmente no topo da janela.
+
 ## [2.0.5-beta-9] - 2026-09-07
 
 ### Card persistente de atualização
