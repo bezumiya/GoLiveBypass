@@ -95,20 +95,32 @@ describe("escolherRelease (candidata de update por canal)", () => {
 });
 
 describe("escolherAssetWindows (portable da release)", () => {
-  it("escolhe o portable exato mesmo quando o helper Proton vem primeiro", () => {
+  it("escolhe o portable exato beta-12 mesmo quando o helper Proton vem primeiro", () => {
     const assets = [
-      { name: "GoLiveBypass-2.0.5-beta-11-proton-confgen-win-x64.exe" },
-      { name: "GoLiveBypass-2.0.5-beta-11.exe" },
+      { name: "GoLiveBypass-2.0.5-beta-12-proton-confgen-win-x64.exe" },
+      { name: "GoLiveBypass-2.0.5-beta-12.exe" },
     ];
-    expect(escolherAssetWindows("v2.0.5-beta-11", assets)?.name).toBe(
-      "GoLiveBypass-2.0.5-beta-11.exe",
+    expect(escolherAssetWindows("v2.0.5-beta-12", assets)?.name).toBe(
+      "GoLiveBypass-2.0.5-beta-12.exe",
     );
   });
 
   it("não trata o helper Proton como executável atualizável", () => {
     expect(
-      escolherAssetWindows("v2.0.5-beta-11", [
-        { name: "GoLiveBypass-2.0.5-beta-11-proton-confgen-win-x64.exe" },
+      escolherAssetWindows("v2.0.5-beta-12", [
+        { name: "GoLiveBypass-2.0.5-beta-12-proton-confgen-win-x64.exe" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("recusa metadado que aponta o nome portable para outro arquivo", () => {
+    expect(
+      escolherAssetWindows("v2.0.5-beta-12", [
+        {
+          name: "GoLiveBypass-2.0.5-beta-12.exe",
+          browser_download_url:
+            "https://github.com/bezumiya/GoLiveBypass/releases/download/v2.0.5-beta-12/GoLiveBypass-2.0.5-beta-12-proton-confgen-win-x64.exe",
+        },
       ]),
     ).toBeNull();
   });
