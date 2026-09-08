@@ -6,6 +6,12 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Atualizações do plugin Vencord/Equicord
+
+- O plugin agora documenta o canal estável padrão, o beta opt-in e a atualização automática
+  com validação SHA-256; a troca preparada exige reload manual e permanece separada da GUI e
+  do standalone.
+
 ## [2.0.6-beta.2] - 2026-09-07
 
 ### Correção do pipeline beta
