@@ -6,6 +6,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Card persistente de atualização
+
+- O aviso de atualização passou a ser um card fixo no canto superior direito, exibido somente quando há uma versão pronta.
+- O card oferece **Reiniciar e aplicar** e permanece visível até a aplicação ser iniciada com sucesso.
+
 ## [2.0.5-beta-8] - 2026-09-07
 
 ### Preparação automática da GUI

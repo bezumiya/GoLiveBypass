@@ -22,13 +22,14 @@
 
       <div class="drag-region"></div>
 
-      <div class="update-toast" id="updateToast" role="status" aria-live="polite" hidden>
-        <div class="update-toast__copy">
-          <strong>Atualização disponível</strong>
-          <span id="updateToastMessage"></span>
+      <section class="update-card" id="updateCard" role="status" aria-live="polite" aria-labelledby="updateCardTitle" hidden>
+        <div class="update-card__icon" aria-hidden="true">↻</div>
+        <div class="update-card__content">
+          <strong id="updateCardTitle">Atualização pronta</strong>
+          <span id="updateCardMessage"></span>
+          <button class="update-card__apply" id="updateCardApply" type="button">Reiniciar e aplicar</button>
         </div>
-        <button class="update-toast__close" id="updateToastClose" type="button" aria-label="Fechar aviso de atualização">×</button>
-      </div>
+      </section>
 
       <div class="container">
         <header class="header">

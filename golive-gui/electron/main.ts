@@ -3693,6 +3693,8 @@ ipcMain.handle("set-update-channel", async (_event, canal: unknown) => {
   await updaterController?.setChannel(readUpdateChannel());
 });
 
+ipcMain.handle("apply-pending-update", async () => applyPendingUpdate());
+
 // ------------------------------------------------------------------ teste de proxy (Personalizado / VPS)
 // A mesma pergunta do Tor: esta saida abre tunel ate o gateway? Sem isto a pessoa cola um
 // endereco errado, ativa o bypass e o Discord fica carregando sem saber por que.

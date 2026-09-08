@@ -60,6 +60,7 @@ import { ipcRenderer } from 'electron';
   setProtonSettings: (settings: any) => ipcRenderer.invoke('set-proton-settings', settings),
   onProtonFailoverNotice: (callback: (notice: { message: string }) => void) =>
     ipcRenderer.on('proton-failover-notice', (_event, notice: { message: string }) => callback(notice)),
-  onUpdateAvailable: (callback: (info: { version: string; prerelease: boolean }) => void) =>
-    ipcRenderer.on('update-available', (_event, info: { version: string; prerelease: boolean }) => callback(info)),
+  applyPendingUpdate: () => ipcRenderer.invoke('apply-pending-update') as Promise<boolean>,
+  onUpdateAvailable: (callback: (info: { version: string; prerelease: boolean } | null) => void) =>
+    ipcRenderer.on('update-available', (_event, info: { version: string; prerelease: boolean } | null) => callback(info)),
 };
