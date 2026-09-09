@@ -30,11 +30,11 @@
 
 **Interfaces:**
 - Produces `isManagedRouteProbePath(directory: string, candidate: string): boolean`.
-- Produces `removeRouteProbe(directory: string, target: string): "removed" | "missing" | "invalid" | "busy"`.
-- Produces `cleanupRouteProbes(directory: string, protectedPaths?: readonly string[], now?: number, graceMs?: number): RouteProbeCleanupResult`.
+- Produces `removeRouteProbe(directory: string, target: string): Promise<"removed" | "missing" | "invalid" | "busy">`.
+- Produces `cleanupRouteProbes(directory: string, protectedPaths?: readonly string[], now?: number, graceMs?: number): Promise<RouteProbeCleanupResult>`.
 - `RouteProbeCleanupResult` contém `scanned`, `removed`, `protected`, `recent`, `invalid` e `busy`.
 
-- [ ] **Step 1: Escrever os testes de contrato que devem falhar antes da implementação**
+- [x] **Step 1: Escrever os testes de contrato que devem falhar antes da implementação**
 
   Em `tests/test-plugin-route-probe.mjs`, crie uma raiz temporária e cubra:
 
@@ -52,7 +52,7 @@
   utimesSync(oldProbe, new Date(1_000_000), new Date(1_000_000));
   utimesSync(protectedProbe, new Date(1_000_000), new Date(1_000_000));
   utimesSync(recentProbe, new Date(now - 1_000), new Date(now - 1_000));
-  const result = cleanupRouteProbes(root, [protectedProbe], now, 60_000);
+  const result = await cleanupRouteProbes(root, [protectedProbe], now, 60_000);
   assert.equal(result.removed, 1);
   assert.equal(result.protected, 1);
   assert.equal(result.recent, 1);
@@ -67,15 +67,16 @@
   caminho fora da raiz. Use `node --experimental-strip-types` para executar o
   arquivo e confirme que ele falha por export ausente ou contrato ausente.
 
-- [ ] **Step 2: Implementar o reconhecimento seguro e a remoção limitada**
+- [x] **Step 2: Implementar o reconhecimento seguro e a remoção limitada**
 
   Em `vpn-windows.ts`, adicione um regex privado para o basename exato e use
   `path.resolve`, `path.relative` e `path.dirname` para exigir a raiz imediata.
-  Em `removeRouteProbe`, faça `lstatSync`, rejeite symlink/entrada não regular,
-  use `fs.rmSync(target, { force: true, maxRetries: 3, retryDelay: 200 })` e
-  converta ausência, caminho inválido e bloqueio em estados explícitos.
+  Em `removeRouteProbe`, faça `lstatSync`, rejeite symlink/entrada não regular
+  e use três tentativas assíncronas explícitas com 200 ms entre elas, sem
+  remoção recursiva. Converta ausência, caminho inválido e bloqueio em estados
+  explícitos.
 
-- [ ] **Step 3: Implementar a varredura com proteção de owner e janela de graça**
+- [x] **Step 3: Implementar a varredura com proteção de owner e janela de graça**
 
   Liste apenas a raiz fornecida, ignore nomes que não correspondam ao regex,
   proteja os caminhos normalizados em `protectedPaths`, ignore arquivos com
@@ -83,7 +84,7 @@
   `lstat`/remoção. Symlinks e diretórios contam como `invalid` e permanecem
   intactos.
 
-- [ ] **Step 4: Executar os testes de contrato**
+- [x] **Step 4: Executar os testes de contrato**
 
   ```bash
   node --experimental-strip-types tests/test-plugin-route-probe.mjs
@@ -103,8 +104,10 @@
   voo e expõe apenas os métodos existentes de ativação/parada.
 - `removeProbe()` torna-se assíncrono e aguarda esse conjunto antes de apagar
   os caminhos conhecidos; o resultado da varredura só é registrado no log.
+- O controlador mantém o token (`pid`, `generation`, `createdAt`) da sessão que
+  registrou o probe; uma instância antiga não remove o probe de uma sucessora.
 
-- [ ] **Step 1: Escrever as asserções de ordem/lifecycle**
+- [x] **Step 1: Escrever as asserções de ordem/lifecycle**
 
   No teste textual, recorte os blocos `startInternal`, `stopInternal`,
   `removeProbe`, `startDiagnostics`, `initialize` e `releaseOwnership` e exija:
@@ -113,8 +116,8 @@
   assert.match(source, /this\.probePath = target/);
   assert.match(source, /await this\.waitForRouteProbes\(\)/);
   assert.match(source, /windows\.cleanupRouteProbes\(this\.dataDir/);
-  assert.match(failureBlock, /await this\.removeProbe\(\)/);
-  assert.ok(failureBlock.indexOf("await this.removeProbe()") < failureBlock.indexOf("this.releaseOwnership(owner)"));
+  assert.match(failureBlock, /await this\.removeProbe\(/);
+  assert.ok(failureBlock.indexOf("await this.removeProbe(") < failureBlock.indexOf("this.releaseOwnership(owner)"));
   assert.match(source, /current\.pid !== owner\.pid/);
   assert.match(source, /current\.generation !== owner\.generation/);
   ```
@@ -122,20 +125,20 @@
   Exija ainda que o caminho vindo de `owner.lock` seja validado por
   `windows.isManagedRouteProbePath` antes de `runRouteProbe`/remoção.
 
-- [ ] **Step 2: Registrar cada probe no momento da cópia**
+- [x] **Step 2: Registrar cada probe no momento da cópia**
 
   Em `prepareRouteProbe`, atribua `this.probePath = target` imediatamente após
   `copyRouteProbe` retornar. Assim, um erro posterior em `writeOwner` ou no
   início do serviço ainda consegue encontrar a cópia criada.
 
-- [ ] **Step 3: Acompanhar e drenar diagnósticos assíncronos**
+- [x] **Step 3: Acompanhar e drenar diagnósticos assíncronos**
 
   Adicione `trackRouteProbe` e `waitForRouteProbes`. Envolva a promise de
   `windows.runRouteProbe` em `then/catch`, registre-a no `Set` e retire-a tanto
   em sucesso quanto em erro. Não mude o timeout, o parsing nem o modo
   `log-only` do diagnóstico.
 
-- [ ] **Step 4: Fazer cleanup em todos os caminhos seguros**
+- [x] **Step 4: Fazer cleanup em todos os caminhos seguros**
 
   Transforme `removeProbe` em `async`, capture `this.probePath` e o
   `owner.probePath` antes da remoção, aguarde as promises, remova caminhos
@@ -144,14 +147,14 @@
   faça uma varredura de resíduos antigos; durante adoção ativa, proteja o probe
   do owner atual.
 
-- [ ] **Step 5: Fechar as corridas de owner e validar paths lidos**
+- [x] **Step 5: Fechar as corridas de owner e validar paths lidos**
 
   Faça `releaseOwnership` comparar `pid`, `generation` e `createdAt` do registro
   atual com o registro que está sendo liberado. Em `readOwner`, preserve o
   owner, mas converta `probePath` inválido em `undefined`, impedindo execução ou
   remoção fora do diretório.
 
-- [ ] **Step 6: Executar o teste de lifecycle**
+- [x] **Step 6: Executar o teste de lifecycle**
 
   ```bash
   node --experimental-strip-types tests/test-plugin-route-probe-lifecycle.mjs
@@ -167,7 +170,7 @@
 - Read: `tools/proton-confgen/`
 - Read: `tests/test-userplugin-e2e.sh`
 
-- [ ] **Step 1: Rodar os testes focados**
+- [x] **Step 1: Rodar os testes focados**
 
   ```bash
   node --experimental-strip-types tests/test-plugin-route-probe.mjs
@@ -176,7 +179,7 @@
   node --experimental-strip-types tests/test-plugin-lifecycle.mjs
   ```
 
-- [ ] **Step 2: Rodar toda a suíte Node do plugin**
+- [x] **Step 2: Rodar toda a suíte Node do plugin**
 
   ```bash
   for file in tests/test-plugin-*.mjs; do node --experimental-strip-types "$file"; done
@@ -185,7 +188,7 @@
   Registrar cada módulo e contagem; nenhum teste deve ser removido, relaxado ou
   passado com timeout ampliado.
 
-- [ ] **Step 3: Verificar helper, empacotamento e diff**
+- [x] **Step 3: Verificar helper, empacotamento e diff**
 
   ```bash
   (cd tools/proton-confgen && go test ./...)
@@ -204,19 +207,19 @@
 - Create outside repository: `/tmp/golive-plugin-route-cleanup.zip` e scripts
   temporários de instalação/coleta.
 
-- [ ] **Step 1: Confirmar baseline e transporte**
+- [x] **Step 1: Confirmar baseline e transporte**
 
   Executar `vmctl.sh status`, `vmctl.sh disks` e screenshot. Construir o zip a
   partir do código atual e do helper Go atual, registrar SHA-256 e anexar um
   único compartilhamento FAT temporário como `sdc`.
 
-- [ ] **Step 2: Instalar e compilar somente o artefato atual**
+- [x] **Step 2: Instalar e compilar somente o artefato atual**
 
   Copiar o plugin para a pasta de userplugins da VM com backup recuperável,
   executar `pnpm.cmd testTsc`, `pnpm.cmd build` e `pnpm.cmd inject`, confirmar a
   assinatura/manifest do plugin e relançar o Discord oficial pelo `Update.exe`.
 
-- [ ] **Step 3: Reproduzir abertura e lifecycle do diagnóstico**
+- [x] **Step 3: Reproduzir abertura e lifecycle do diagnóstico**
 
   Confirmar por screenshot a interface normal do cliente oficial, registrar o
   boot do plugin, ativar a rota já configurada sem trocar conta/canal e deixar
@@ -224,7 +227,7 @@
   plugin/Discord, não por `taskkill`, e iniciar novamente para exercitar o
   cleanup de boot.
 
-- [ ] **Step 4: Coletar e sanitizar o resultado**
+- [x] **Step 4: Coletar e sanitizar o resultado**
 
   Recuperar `plugin-vpn.log`, `owner.lock`, metadata do diretório e processos
   por coletor sanitizado. Confirmar que o serviço/Discord continuam funcionais,
@@ -232,7 +235,7 @@
   desaparecem após a parada/reativação. Não registrar conteúdo de perfil,
   sessão, token ou IP.
 
-- [ ] **Step 5: Deixar a VM limpa**
+- [x] **Step 5: Deixar a VM limpa**
 
   Ejetar `E:` com `mountvol E: /p`, confirmar que a unidade desapareceu,
   executar `share-detach sdc`, recuperar os logs, destruir somente a imagem
@@ -244,12 +247,12 @@
 - Modify: `docs/superpowers/reports/2026-09-07-plugin-update-validation.md`
 - Read: `docs/superpowers/specs/2026-09-09-plugin-route-probe-cleanup-design.md`
 
-- [ ] **Step 1: Revisar a alteração contra invariantes**
+- [x] **Step 1: Revisar a alteração contra invariantes**
 
   Conferir que nenhum caminho do plugin legado, GUI ou standalone recebeu
   premissas do WireGuard atual e que cleanup não virou condição de ativação.
 
-- [ ] **Step 2: Registrar fatos e limitações**
+- [x] **Step 2: Registrar fatos e limitações**
 
   Adicionar uma seção com commit/artefato/hash, testes locais, screenshots/logs
   sanitizados, contagem de probes antes/depois e resultado de abertura do
@@ -257,7 +260,7 @@
   geográfica e updater remoto como não validados quando continuarem fora do
   ambiente.
 
-- [ ] **Step 3: Fazer revisão final do diff**
+- [x] **Step 3: Fazer revisão final do diff**
 
   ```bash
   git diff --check
@@ -266,3 +269,13 @@
 
   Confirmar que somente os arquivos desta mudança e o relatório foram tocados,
   preservando todas as alterações preexistentes do usuário e sem publicação.
+
+## Status
+
+Concluído em 2026-09-09. Os testes de contrato e lifecycle, a suíte local, o
+empacotamento e a compilação/injeção Windows foram validados. A VM confirmou o
+Discord oficial no segundo reboot, ativação com probe único e limpeza após
+restauração; o primeiro cold boot com clone foi descartado como evidência e o
+autostart foi corrigido. A falha pré-implementação dos testes não foi mantida
+como artefato; o worktree também contém alterações preexistentes do usuário,
+que foram preservadas e não são atribuídas a este plano.

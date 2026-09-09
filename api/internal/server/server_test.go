@@ -28,6 +28,17 @@ type fakeIssues struct {
 	err error
 }
 
+type fakeReleases struct {
+	release gh.Release
+	err     error
+	calls   int
+}
+
+func (f *fakeReleases) LatestStableRelease(context.Context) (gh.Release, error) {
+	f.calls++
+	return f.release, f.err
+}
+
 func (f *fakeIssues) CreateIssue(_ context.Context, iss gh.Issue) (gh.IssueResult, error) {
 	f.got = iss
 	return f.res, f.err
@@ -36,7 +47,15 @@ func (f *fakeIssues) CreateIssue(_ context.Context, iss gh.Issue) (gh.IssueResul
 func newTestApp(t *testing.T, cfg *config.Config, f *fakeIssues) *echo.Echo {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, f, logger)
+	return New(cfg, f, logger, &fakeReleases{release: releasesTestRelease()})
+}
+
+func releasesTestRelease() gh.Release {
+	return gh.Release{
+		TagName: "v2.0.4", Name: "GoLiveBypass 2.0.4", PublishedAt: "2026-09-05T12:00:00Z",
+		HTMLURL: "https://github.com/owner/repo/releases/tag/v2.0.4",
+		Assets:  []gh.ReleaseAsset{{Name: "GoLiveBypass-2.0.4.exe", BrowserDownloadURL: "https://github.com/owner/repo/releases/download/v2.0.4/GoLiveBypass-2.0.4.exe"}},
+	}
 }
 
 func testConfig() *config.Config {
@@ -45,6 +64,7 @@ func testConfig() *config.Config {
 		GitHubToken:         "gh",
 		GitHubWebhookSecret: "webhook-secret",
 		GitHubRepo:          "owner/repo",
+		WebsiteOrigins:      []string{"https://golivebypass.dev", "http://localhost:3000"},
 		Labels:              []string{"bug"},
 		Port:                "8080",
 		RateLimitPerMin:     1000,
@@ -75,6 +95,94 @@ func TestHealthz(t *testing.T) {
 	}
 	if got := strings.TrimSpace(rec.Body.String()); got != `{"status":"ok"}` {
 		t.Errorf("body = %s", got)
+	}
+}
+
+func TestLatestReleaseIsPublicAndUsesStableCatalog(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/releases/latest", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body = %s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Errorf("CORS origin = %q", got)
+	}
+	var out struct {
+		Version string `json:"version"`
+		Channel string `json:"channel"`
+		Stale   bool   `json:"stale"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decodificando catalogo: %v", err)
+	}
+	if out.Version != "2.0.4" || out.Channel != "stable" || out.Stale {
+		t.Errorf("catalogo = %+v", out)
+	}
+}
+
+func TestDownloadReleaseRedirectsKnownAsset(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{})
+	rec := do(t, e, http.MethodGet, "/v1/releases/latest/download/windows", "", "")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (body = %s)", rec.Code, rec.Body.String())
+	}
+	want := "https://github.com/owner/repo/releases/download/v2.0.4/GoLiveBypass-2.0.4.exe"
+	if got := rec.Header().Get("Location"); got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestStableWebhookInvalidatesReleaseCatalog(t *testing.T) {
+	source := &fakeReleases{release: releasesTestRelease()}
+	cfg := testConfig()
+	e := New(cfg, &fakeIssues{}, slog.New(slog.NewTextHandler(io.Discard, nil)), source)
+
+	first := do(t, e, http.MethodGet, "/v1/releases/latest", "", "")
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"version":"2.0.4"`) {
+		t.Fatalf("primeiro catalogo = %d %s", first.Code, first.Body.String())
+	}
+
+	source.release = releasesTestRelease()
+	source.release.TagName = "v2.0.5"
+	source.release.Name = "GoLiveBypass 2.0.5"
+	source.release.PublishedAt = "2026-09-07T12:00:00Z"
+	source.release.HTMLURL = "https://github.com/owner/repo/releases/tag/v2.0.5"
+	source.release.Assets = []gh.ReleaseAsset{{Name: "GoLiveBypass-2.0.5.exe", BrowserDownloadURL: "https://github.com/owner/repo/releases/download/v2.0.5/GoLiveBypass-2.0.5.exe"}}
+	body := webhookBody("published", "owner/repo", "v2.0.5", false, false)
+	req := httptest.NewRequest(http.MethodPost, "/v1/updates/github/webhook", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "release")
+	req.Header.Set("X-GitHub-Delivery", "delivery-invalidate")
+	req.Header.Set("X-Hub-Signature-256", signedWebhook(body, "webhook-secret"))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d", rec.Code)
+	}
+
+	second := do(t, e, http.MethodGet, "/v1/releases/latest", "", "")
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"version":"2.0.5"`) {
+		t.Fatalf("catalogo apos webhook = %d %s", second.Code, second.Body.String())
+	}
+	if source.calls != 2 {
+		t.Fatalf("source foi consultada %d vezes; webhook nao invalidou o cache", source.calls)
+	}
+}
+
+func TestReleaseCORSRejectsUnknownOrigin(t *testing.T) {
+	e := newTestApp(t, testConfig(), &fakeIssues{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/releases/latest", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("origem desconhecida recebeu CORS = %q", got)
 	}
 }
 

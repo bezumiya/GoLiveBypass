@@ -1,17 +1,23 @@
 # GoLiveBypass — API de Bug Reports
 
 API HTTP, em Go, que recebe relatos de bug dos apps do GoLiveBypass e abre
-issues no GitHub. Ela também recebe o webhook de publicação de releases e mantém
-um stream SSE leve para acordar o updater da GUI imediatamente; o cliente ainda
-consulta o GitHub diretamente antes de baixar qualquer artefato.
+issues no GitHub. Ela também mantém o catálogo público da última release estável,
+redireciona downloads por aliases seguros e recebe o webhook de publicação para
+invalidar o cache. O site não precisa ser editado a cada release.
 
-- **Stack**: Go 1.25+ · [Echo v5](https://github.com/labstack/echo/v5)
+- **Stack**: Go 1.26+ · [Echo v5](https://github.com/labstack/echo/v5)
 - **Dependência externa**: nenhuma além do Echo (o cliente do GitHub é stdlib)
 
 ## Como funciona
 
 ```
-app (GUI/standalone)                       API (este serviço)              GitHub
+site                                       API (este serviço)              GitHub
+      │  GET /v1/releases/latest                  │                              │
+      │  GET /v1/releases/latest/download/windows │  cache + valida stable        │
+      │◄─────────────────────────────────────────│  GET /repos/.../releases/latest►│
+      │  302 para browser_download_url           │                              │
+      │                                          │                              │
+app (GUI/standalone)                         │                              │
       │  POST /v1/reports                        │                              │
       │  Authorization: Bearer <API_TOKEN>       │                              │
       │  {title, description, log, meta} ───────►│  valida + monta markdown     │
@@ -36,7 +42,9 @@ app (GUI/standalone)                       API (este serviço)              GitH
    `openssl rand -hex 32`. Este token será embutido na GUI/standalone quando
    eles ganharem o botão de reportar bug — se vazar, troque o valor e o
    segredo embutido nos apps.
-4. **Gere o segredo do webhook** (`GITHUB_WEBHOOK_SECRET`), por exemplo:
+4. **Defina as origens do site** (`WEBSITE_ORIGINS`) com o domínio publicado e
+   os endereços locais usados no desenvolvimento. Não use `*`.
+5. **Gere o segredo do webhook** (`GITHUB_WEBHOOK_SECRET`), por exemplo:
    `openssl rand -hex 32`. Cadastre exatamente o mesmo valor no webhook do
    repositório GitHub. Ele nunca é enviado para a GUI.
 
@@ -69,6 +77,7 @@ Variáveis (todas em `.env.example`):
 | `GITHUB_TOKEN` | sim | — | PAT com permissão Issues: write no repo alvo |
 | `GITHUB_WEBHOOK_SECRET` | sim | — | segredo HMAC do webhook de Release |
 | `GITHUB_REPO` | não | `bezumiya/GoLiveBypass` | `owner/repo` da issue e do webhook |
+| `WEBSITE_ORIGINS` | não | `https://golivebypass.dev,http://localhost:3000,http://127.0.0.1:3000` | origens CORS do catálogo público, separadas por vírgula |
 | `ISSUE_LABELS` | não | `bug,gui` | labels separadas por vírgula (precisam existir no repo) |
 | `PORT` | não | `8080` | porta HTTP |
 | `RATE_LIMIT` | não | `10` | requisições por minuto por IP |
@@ -95,6 +104,10 @@ curl -s -X POST localhost:8080/v1/reports -H 'Authorization: Bearer dev' \
 
 # stream de releases; fica aberto e envia heartbeat a cada 20s
 curl -N localhost:8080/v1/updates/stream
+
+# catálogo público e alias de download; não exigem token
+curl -s localhost:8080/v1/releases/latest
+curl -i localhost:8080/v1/releases/latest/download/windows
 ```
 
 ### Docker
@@ -151,8 +164,24 @@ não relevantes e deliveries repetidas respondem `204`.
 Stream público `text/event-stream`, sem token embutido no cliente. Mantém até
 100 conexões, com no máximo 2 por IP, envia heartbeat a cada 20 segundos e
 reentrega o último release para uma conexão nova. O evento contém somente tag,
-status de prerelease e data; URL e digest continuam sendo consultados pela GUI
-diretamente no GitHub.
+status de prerelease e data; o site e os clientes consultam o catálogo HTTP da
+API para obter assets e URLs.
+
+### `GET /v1/releases/latest`
+
+Catálogo público da última release estável válida do `GITHUB_REPO`. A API chama
+`/releases/latest` no GitHub, rejeita draft/prerelease e tags que não sejam
+semver, e mantém o resultado em cache por cinco minutos. Se a atualização falhar
+depois de existir uma resposta válida, responde `200` com `"stale": true`.
+
+O campo `assets` contém somente aliases conhecidos: `windows`, `linux`,
+`mac-dmg`, `mac-zip`, `plugin`, `plugin-sha`, `standalone` e `standalone-sha`.
+
+### `GET /v1/releases/latest/download/:asset`
+
+Redireciona (`302`) apenas aliases conhecidos para o `browser_download_url`
+HTTPS do asset da stable atual. Não aceita URL arbitrária nem exige
+autenticação. Um asset ausente responde `404`.
 
 ## Erros
 
@@ -164,6 +193,7 @@ diretamente no GitHub.
 | `429` | rate limit por IP excedido (header `Retry-After`) | `{"error": "..."}` |
 | `404` / `405` | rota/método inexistente | `{"error": "..."}` |
 | `502` | o GitHub recusou (auth, label inexistente, etc.) | detalhe só no log do servidor |
+| `503` | catálogo sem fonte configurada no processo | `{"error": "..."}` |
 
 ## Operação
 
@@ -175,8 +205,8 @@ diretamente no GitHub.
   instâncias atrás de um load balancer, cada uma tem a própria contagem e o
   Redis seria o próximo passo (fora de escopo por enquanto).
 - **Pulso de update em memória**: se a API reiniciar, clientes reconectam e a
-  GUI consulta o GitHub no boot e no fallback horário; nenhum update depende
-  exclusivamente do webhook.
+  GUI e o site consultam o catálogo no carregamento; nenhum update depende
+  exclusivamente do webhook. O webhook apenas acelera a invalidação do cache.
 - Desligamento gracioso em `SIGINT`/`SIGTERM` (até 10 s para requisições em
   andamento). Streams SSE são encerrados nessa janela e reconectam sozinhos.
 

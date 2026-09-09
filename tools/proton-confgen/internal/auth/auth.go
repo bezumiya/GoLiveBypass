@@ -3,14 +3,18 @@ package auth
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"protonvpn-wg-confgen/internal/api"
@@ -24,9 +28,13 @@ import (
 
 // Client handles ProtonVPN authentication
 type Client struct {
-	config       *config.Config
-	httpClient   *http.Client
-	sessionStore *SessionStore
+	config              *config.Config
+	httpClient          *http.Client
+	sessionStore        *SessionStore
+	operationMu         sync.Mutex
+	commitMu            sync.Mutex
+	operationGeneration uint64
+	activeCancel        context.CancelFunc
 }
 
 // HumanVerificationError is intentionally safe to serialize: it never carries
@@ -39,6 +47,174 @@ type HumanVerificationError struct {
 }
 
 func (e HumanVerificationError) Error() string { return e.Message }
+
+// TemporarySessionError keeps transport/server failures separate from an
+// invalid credential. Callers can show a retryable state without deleting the
+// cached session or misleading the user into logging in again.
+type TemporarySessionError struct {
+	Err       error
+	Operation string
+}
+
+func (e *TemporarySessionError) Error() string {
+	if e == nil {
+		return "temporary Proton session operation failure"
+	}
+	if strings.TrimSpace(e.Operation) != "" {
+		return fmt.Sprintf("Proton %s temporarily unavailable", e.Operation)
+	}
+	return "temporary Proton session operation failure"
+}
+
+func (e *TemporarySessionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// IsTemporarySessionError reports whether a session check failed because the
+// verification request could not be completed reliably.
+func IsTemporarySessionError(err error) bool {
+	var temporaryErr *TemporarySessionError
+	return errors.As(err, &temporaryErr)
+}
+
+const maxAuthResponseBytes int64 = 1 << 20
+
+func normalizeAuthContext(ctx context.Context) (context.Context, error) {
+	if ctx == nil {
+		return nil, errors.New("authentication context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return ctx, nil
+}
+
+func classifyAuthTransportError(ctx context.Context, err error) error {
+	// A caller deadline/cancellation is a control-flow result, not evidence
+	// that Proton rejected the credential. A deadline created internally by
+	// http.Client.Timeout has not canceled ctx and remains retryable instead.
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	return &TemporarySessionError{Err: err}
+}
+
+func isTemporaryHTTPStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
+}
+
+// doAuthJSON is deliberately local to auth. api.Do is used by older
+// non-authentication clients and includes a response-body snippet in errors;
+// authentication responses can contain challenge material or server-provided
+// details, so they must be bounded and never echoed.
+func doAuthJSON(ctx context.Context, client *http.Client, req *http.Request, operation string, out any) (int, error) {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return 0, err
+	}
+	req = req.WithContext(ctx)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, classifyAuthTransportError(ctx, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBytes+1))
+	if err != nil {
+		clear(body)
+		return resp.StatusCode, classifyAuthTransportError(ctx, err)
+	}
+	defer clear(body)
+	if int64(len(body)) > maxAuthResponseBytes {
+		return resp.StatusCode, &ProtocolError{Operation: operation, StatusCode: resp.StatusCode}
+	}
+	if err := ctx.Err(); err != nil {
+		return resp.StatusCode, err
+	}
+	if isTemporaryHTTPStatus(resp.StatusCode) {
+		return resp.StatusCode, &TemporarySessionError{Err: fmt.Errorf("HTTP %d", resp.StatusCode), Operation: operation}
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return resp.StatusCode, &ProtocolError{Operation: operation, StatusCode: resp.StatusCode}
+	}
+	return resp.StatusCode, nil
+}
+
+func (c *Client) beginAuthentication(ctx context.Context) (context.Context, uint64, func(), error) {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	c.commitMu.Lock()
+	c.operationMu.Lock()
+	if c.activeCancel != nil {
+		c.activeCancel()
+	}
+	opCtx, cancel := context.WithCancel(ctx)
+	c.operationGeneration++
+	generation := c.operationGeneration
+	c.activeCancel = cancel
+	c.operationMu.Unlock()
+	c.commitMu.Unlock()
+
+	finish := func() {
+		c.operationMu.Lock()
+		if c.operationGeneration == generation {
+			c.activeCancel = nil
+		}
+		c.operationMu.Unlock()
+		cancel()
+	}
+	return opCtx, generation, finish, nil
+}
+
+func (c *Client) operationIsCurrent(generation uint64) bool {
+	if generation == 0 {
+		return true
+	}
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	return c.operationGeneration == generation && c.activeCancel != nil
+}
+
+func (c *Client) requireCurrentOperation(ctx context.Context, generation uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.operationIsCurrent(generation) {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *Client) cancelActiveAuthentication() {
+	c.commitMu.Lock()
+	cancel := c.cancelActiveAuthenticationLocked()
+	c.commitMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *Client) cancelActiveAuthenticationLocked() context.CancelFunc {
+	c.operationMu.Lock()
+	c.operationGeneration++
+	cancel := c.activeCancel
+	c.activeCancel = nil
+	c.operationMu.Unlock()
+	return cancel
+}
 
 // NewClient creates a new authentication client
 func NewClient(cfg *config.Config) *Client {
@@ -57,31 +233,92 @@ func NewClient(cfg *config.Config) *Client {
 	}
 }
 
+// SessionUsername returns only the cached account identity. The session store
+// decrypts/migrates the file before parsing it, so callers never need to know
+// the on-disk protection format.
+func (c *Client) SessionUsername() (string, error) {
+	return c.sessionStore.Username()
+}
+
+// Logout cancels an in-flight authentication operation and removes the local
+// session under the same commit lock used by authentication. Proton logout is
+// represented locally here because the helper has no long-lived API session to
+// invalidate remotely.
+func (c *Client) Logout() error {
+	c.commitMu.Lock()
+	cancel := c.cancelActiveAuthenticationLocked()
+	err := c.sessionStore.Delete()
+	c.commitMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return err
+}
+
 // CheckSession checks if a saved session exists and is valid.
 func (c *Client) CheckSession() (*api.Session, time.Duration, error) {
-	savedSession, timeUntilExpiry, err := c.sessionStore.Load(c.config.Username)
+	return c.CheckSessionContext(context.Background())
+}
+
+// CheckSessionContext is the cancellable form used by integrations that keep
+// the helper process alive while the UI owns the operation.
+func (c *Client) CheckSessionContext(ctx context.Context) (*api.Session, time.Duration, error) {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	savedSession, timeUntilExpiry, err := c.sessionStore.LoadContext(ctx, c.config.Username)
 	if err != nil {
 		return nil, 0, err
 	}
 	if savedSession == nil {
 		return nil, 0, fmt.Errorf("no saved session found")
 	}
-	if !VerifySession(c.httpClient, c.config.APIURL, savedSession) {
-		return nil, 0, fmt.Errorf("saved session expired or invalid")
+	valid, verifyErr := VerifySessionStatusContext(ctx, c.httpClient, c.config.APIURL, savedSession)
+	if verifyErr != nil {
+		return nil, 0, verifyErr
+	}
+	if !valid {
+		return nil, 0, &SessionInvalidError{}
 	}
 	return savedSession, timeUntilExpiry, nil
 }
 
 // handleSessionRefresh attempts to refresh a session and save it if successful
 func (c *Client) handleSessionRefresh(savedSession *api.Session, reason string) (*api.Session, error) {
-	fmt.Println(reason)
-	refreshedSession, err := RefreshSession(c.httpClient, c.config.APIURL, savedSession)
+	return c.handleSessionRefreshContext(context.Background(), savedSession, reason)
+}
+
+func (c *Client) handleSessionRefreshContext(ctx context.Context, savedSession *api.Session, reason string) (*api.Session, error) {
+	return c.handleSessionRefreshWithGeneration(ctx, 0, savedSession, reason)
+}
+
+func (c *Client) handleSessionRefreshWithGeneration(ctx context.Context, generation uint64, savedSession *api.Session, reason string) (*api.Session, error) {
+	ctx, err := normalizeAuthContext(ctx)
 	if err != nil {
-		fmt.Printf("Token refresh failed: %v\n", err)
-		fmt.Println("Re-authenticating with password...")
-		fmt.Println("(Your trusted device status for MFA will be preserved)")
-		_ = c.sessionStore.Delete()
 		return nil, err
+	}
+	if err := c.requireCurrentOperation(ctx, generation); err != nil {
+		return nil, err
+	}
+	fmt.Println(reason)
+	refreshedSession, err := RefreshSessionContext(ctx, c.httpClient, c.config.APIURL, savedSession)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || IsTemporarySessionError(err) {
+			fmt.Println("Could not refresh the saved Proton session temporarily; keeping it for a later retry.")
+			return nil, err
+		}
+		if !IsSessionInvalid(err) {
+			// A malformed local cache or protocol response is not proof that the
+			// refresh token was revoked. Preserve the cache for diagnosis/retry.
+			return nil, err
+		}
+		fmt.Println("Saved Proton session was rejected; re-authenticating with password...")
+		fmt.Println("(Your trusted device status for MFA will be preserved)")
+		if deleteErr := c.deleteSessionIfCurrent(ctx, generation, savedSession); deleteErr != nil {
+			return nil, fmt.Errorf("failed to remove rejected saved session: %w", deleteErr)
+		}
+		return nil, nil
 	}
 
 	fmt.Println("Session refreshed successfully!")
@@ -91,11 +328,8 @@ func (c *Client) handleSessionRefresh(savedSession *api.Session, reason string) 
 	}
 
 	// Save the refreshed session
-	if !c.config.NoSession {
-		sessionDuration, _ := timeutil.ParseSessionDuration(c.config.SessionDuration)
-		if err := c.sessionStore.Save(refreshedSession, c.config.Username, sessionDuration); err != nil {
-			fmt.Printf("Warning: Failed to save refreshed session: %v\n", err)
-		}
+	if err := c.saveSessionIfCurrent(ctx, generation, refreshedSession); err != nil {
+		return nil, fmt.Errorf("failed to save refreshed session: %w", err)
 	}
 
 	return refreshedSession, nil
@@ -103,7 +337,22 @@ func (c *Client) handleSessionRefresh(savedSession *api.Session, reason string) 
 
 // tryExistingSession attempts to use an existing saved session
 func (c *Client) tryExistingSession() (*api.Session, error) {
-	savedSession, timeUntilExpiry, err := c.sessionStore.Load(c.config.Username)
+	return c.tryExistingSessionContext(context.Background())
+}
+
+func (c *Client) tryExistingSessionContext(ctx context.Context) (*api.Session, error) {
+	return c.tryExistingSessionWithGeneration(ctx, 0)
+}
+
+func (c *Client) tryExistingSessionWithGeneration(ctx context.Context, generation uint64) (*api.Session, error) {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.requireCurrentOperation(ctx, generation); err != nil {
+		return nil, err
+	}
+	savedSession, timeUntilExpiry, err := c.sessionStore.LoadContext(ctx, c.config.Username)
 	if err != nil {
 		fmt.Printf("Warning: Failed to load saved session: %v\n", err)
 		return nil, err
@@ -114,86 +363,166 @@ func (c *Client) tryExistingSession() (*api.Session, error) {
 	}
 
 	// Determine what to do with the saved session
-	switch {
-	case c.config.ForceRefresh:
+	if c.config.ForceRefresh {
 		reason := fmt.Sprintf("Forcing session refresh (current session expires in %s)", timeutil.HumanizeDuration(timeUntilExpiry))
-		return c.handleSessionRefresh(savedSession, reason)
-
-	case timeUntilExpiry < time.Duration(constants.SessionRefreshDays)*24*time.Hour && timeUntilExpiry > 0:
+		return c.handleSessionRefreshWithGeneration(ctx, generation, savedSession, reason)
+	}
+	if timeUntilExpiry < time.Duration(constants.SessionRefreshDays)*24*time.Hour && timeUntilExpiry > 0 {
 		reason := fmt.Sprintf("Session expires soon (in %s), attempting refresh...", timeutil.HumanizeDuration(timeUntilExpiry))
-		return c.handleSessionRefresh(savedSession, reason)
+		return c.handleSessionRefreshWithGeneration(ctx, generation, savedSession, reason)
+	}
 
-	case VerifySession(c.httpClient, c.config.APIURL, savedSession):
+	valid, verifyErr := VerifySessionStatusContext(ctx, c.httpClient, c.config.APIURL, savedSession)
+	if verifyErr != nil {
+		if IsSessionInvalid(verifyErr) {
+			fmt.Println("Saved session invalid, re-authenticating...")
+			if err := c.deleteSessionIfCurrent(ctx, generation, savedSession); err != nil {
+				return nil, fmt.Errorf("failed to remove invalid saved session: %w", err)
+			}
+			return nil, nil
+		}
+		if IsTemporarySessionError(verifyErr) {
+			fmt.Println("Could not verify the saved Proton session because the network is temporarily unavailable; keeping it for a later retry.")
+		}
+		return nil, verifyErr
+	}
+	if valid {
+		if err := c.requireCurrentOperation(ctx, generation); err != nil {
+			return nil, err
+		}
 		fmt.Printf("Using saved session (expires in %s)\n", timeutil.HumanizeDuration(timeUntilExpiry))
 		return savedSession, nil
-
-	default:
-		fmt.Println("Saved session invalid, re-authenticating...")
-		_ = c.sessionStore.Delete()
-		return nil, nil
 	}
+
+	return nil, &ProtocolError{Operation: "session verification"}
 }
 
 // Authenticate performs the full authentication flow
 func (c *Client) Authenticate() (*api.Session, error) {
+	return c.AuthenticateContext(context.Background())
+}
+
+// AuthenticateContext performs authentication while honoring cancellation for
+// all network requests. A canceled operation never falls through to a fresh
+// login and never removes the cached session as if it had been revoked.
+func (c *Client) AuthenticateContext(ctx context.Context) (*api.Session, error) {
+	ctx, generation, finish, err := c.beginAuthentication(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	if err := c.requireCurrentOperation(ctx, generation); err != nil {
+		return nil, err
+	}
 	if err := c.ensureUsername(); err != nil {
 		return nil, err
 	}
 
 	// Try existing session unless clearing or disabled
-	if session := c.handleExistingSession(); session != nil {
+	session, err := c.handleExistingSessionWithGeneration(ctx, generation)
+	if err != nil {
+		return nil, err
+	}
+	if session != nil {
+		if err := c.requireCurrentOperation(ctx, generation); err != nil {
+			return nil, err
+		}
+		// A cached session may be valid for the account API but still lack the
+		// VPN scope. Re-run the same 2FA upgrade used after fresh login before
+		// handing it to certificate/configuration operations.
+		hadVPNScope, _ := c.checkSessionScopes(session)
+		if err := c.upgradeSessionIfNeededContext(ctx, session); err != nil {
+			return nil, err
+		}
+		if !hadVPNScope {
+			if hasVPNScope, _ := c.checkSessionScopes(session); hasVPNScope {
+				if err := c.saveSessionIfCurrent(ctx, generation, session); err != nil {
+					return nil, fmt.Errorf("authenticated session could not be persisted: %w", err)
+				}
+			}
+		}
 		return session, nil
 	}
 
 	if err := c.ensurePassword(); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Perform fresh authentication
-	session, err := c.performFreshAuth()
+	freshSession, err := c.performFreshAuthContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	// Handle session scope upgrade if needed
-	if err := c.upgradeSessionIfNeeded(session); err != nil {
+	if err := c.upgradeSessionIfNeededContext(ctx, freshSession); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	if err := c.saveSessionIfEnabled(session); err != nil {
+	if err := c.saveSessionIfCurrent(ctx, generation, freshSession); err != nil {
 		return nil, fmt.Errorf("authentication succeeded but session persistence failed: %w", err)
 	}
-	return session, nil
+	return freshSession, nil
 }
 
 // handleExistingSession handles session clearing or reuse
-func (c *Client) handleExistingSession() *api.Session {
+func (c *Client) handleExistingSession() (*api.Session, error) {
+	return c.handleExistingSessionContext(context.Background())
+}
+
+func (c *Client) handleExistingSessionContext(ctx context.Context) (*api.Session, error) {
+	return c.handleExistingSessionWithGeneration(ctx, 0)
+}
+
+func (c *Client) handleExistingSessionWithGeneration(ctx context.Context, generation uint64) (*api.Session, error) {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if c.config.ClearSession {
 		fmt.Println("Clearing saved session...")
-		_ = c.sessionStore.Delete()
-		return nil
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := c.deleteSessionIfCurrent(ctx, generation, nil); err != nil {
+			return nil, fmt.Errorf("failed to clear saved session: %w", err)
+		}
+		return nil, nil
 	}
 
 	if c.config.NoSession {
-		return nil
+		return nil, nil
 	}
 
-	session, err := c.tryExistingSession()
-	if err == nil && session != nil {
-		return session
-	}
-	return nil
+	return c.tryExistingSessionWithGeneration(ctx, generation)
 }
 
 // performFreshAuth performs SRP authentication and returns a new session
 func (c *Client) performFreshAuth() (*api.Session, error) {
-	authInfo, err := c.getAuthInfo()
+	return c.performFreshAuthContext(context.Background())
+}
+
+func (c *Client) performFreshAuthContext(ctx context.Context) (*api.Session, error) {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	authInfo, err := c.getAuthInfoContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get auth info: %w", err)
 	}
 
 	clientProofs, err := c.generateSRPProofs(authInfo)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -204,10 +533,15 @@ func (c *Client) performFreshAuth() (*api.Session, error) {
 		code := c.config.TwoFactorCode
 		if code == "" {
 			if c.config.JSONOutput {
-				return nil, errors.New("2FA_REQUIRED")
+				return nil, ErrTwoFactorRequired
 			}
 			var err error
 			code, err = c.get2FACode()
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			code, err = validateTOTPCode(code)
 			if err != nil {
 				return nil, err
 			}
@@ -215,8 +549,11 @@ func (c *Client) performFreshAuth() (*api.Session, error) {
 		authReq["TwoFactorCode"] = code
 	}
 
-	session, err := c.sendAuthRequest(authReq)
+	session, err := c.sendAuthRequestContext(ctx, authReq)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -261,6 +598,14 @@ func (c *Client) buildAuthRequest(authInfo *api.AuthInfoResponse, proofs *srp.Pr
 
 // upgradeSessionIfNeeded upgrades session with 2FA if VPN scope is missing
 func (c *Client) upgradeSessionIfNeeded(session *api.Session) error {
+	return c.upgradeSessionIfNeededContext(context.Background(), session)
+}
+
+func (c *Client) upgradeSessionIfNeededContext(ctx context.Context, session *api.Session) error {
+	ctx, err := normalizeAuthContext(ctx)
+	if err != nil {
+		return err
+	}
 	hasVPNScope, hasTwoFactorScope := c.checkSessionScopes(session)
 
 	if hasVPNScope || !hasTwoFactorScope {
@@ -270,19 +615,26 @@ func (c *Client) upgradeSessionIfNeeded(session *api.Session) error {
 	code := c.config.TwoFactorCode
 	if code == "" {
 		if c.config.JSONOutput {
-			return errors.New("2FA_REQUIRED")
+			return ErrTwoFactorRequired
 		}
 		fmt.Println("Session lacks VPN scope - 2FA verification required to upgrade session...")
-		var err error
 		code, err = c.get2FACode()
 		if err != nil {
 			return fmt.Errorf("failed to get 2FA code: %w", err)
 		}
+	} else {
+		code, err = validateTOTPCode(code)
+		if err != nil {
+			return err
+		}
 	}
 
-	updatedScopes, err := c.submit2FA(session, code)
+	updatedScopes, err := c.submit2FAContext(ctx, session, code)
 	if err != nil {
-		return fmt.Errorf("2FA verification failed: %w", err)
+		return err
+	}
+	if !hasScope(updatedScopes, "vpn") {
+		return &ProtocolError{Operation: "2FA scope upgrade"}
 	}
 	session.Scopes = updatedScopes
 	fmt.Println("2FA verified - session upgraded with VPN scope")
@@ -291,6 +643,9 @@ func (c *Client) upgradeSessionIfNeeded(session *api.Session) error {
 
 // checkSessionScopes checks if session has VPN and twofactor scopes
 func (c *Client) checkSessionScopes(session *api.Session) (hasVPN, hasTwoFactor bool) {
+	if session == nil {
+		return false, false
+	}
 	for _, scope := range session.Scopes {
 		switch scope {
 		case "vpn":
@@ -302,8 +657,21 @@ func (c *Client) checkSessionScopes(session *api.Session) (hasVPN, hasTwoFactor 
 	return
 }
 
+func hasScope(scopes []string, wanted string) bool {
+	for _, scope := range scopes {
+		if scope == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 // saveSessionIfEnabled saves the session if persistence is enabled
 func (c *Client) saveSessionIfEnabled(session *api.Session) error {
+	return c.saveSessionIfEnabledContext(context.Background(), session)
+}
+
+func (c *Client) saveSessionIfEnabledContext(ctx context.Context, session *api.Session) error {
 	if c.config.NoSession {
 		return nil
 	}
@@ -314,10 +682,31 @@ func (c *Client) saveSessionIfEnabled(session *api.Session) error {
 		sessionDuration = 0
 	}
 
-	if err := c.sessionStore.Save(session, c.config.Username, sessionDuration); err != nil {
+	if err := c.sessionStore.SaveContext(ctx, session, c.config.Username, sessionDuration); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (c *Client) saveSessionIfCurrent(ctx context.Context, generation uint64, session *api.Session) error {
+	c.commitMu.Lock()
+	defer c.commitMu.Unlock()
+	if err := c.requireCurrentOperation(ctx, generation); err != nil {
+		return err
+	}
+	return c.saveSessionIfEnabledContext(ctx, session)
+}
+
+func (c *Client) deleteSessionIfCurrent(ctx context.Context, generation uint64, expected *api.Session) error {
+	c.commitMu.Lock()
+	defer c.commitMu.Unlock()
+	if err := c.requireCurrentOperation(ctx, generation); err != nil {
+		return err
+	}
+	if expected == nil {
+		return c.sessionStore.DeleteContext(ctx)
+	}
+	return c.sessionStore.DeleteIfMatchesContext(ctx, expected)
 }
 
 func (c *Client) ensureUsername() error {
@@ -357,25 +746,32 @@ func (c *Client) get2FACode() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error reading 2FA code: %w", err)
 	}
-	code = strings.TrimSpace(code)
+	return validateTOTPCode(code)
+}
 
-	// Validate that code is numeric (TOTP codes are 6 digits)
+func validateTOTPCode(code string) (string, error) {
+	code = strings.TrimSpace(code)
 	if code == "" {
 		return "", fmt.Errorf("2FA code cannot be empty")
 	}
-
-	for _, c := range code {
-		if c < '0' || c > '9' {
+	if len(code) != 6 {
+		return "", fmt.Errorf("2FA code must contain exactly 6 digits")
+	}
+	for _, digit := range code {
+		if digit < '0' || digit > '9' {
 			return "", fmt.Errorf("2FA code must be numeric (TOTP only).\n" +
 				"FIDO2/WebAuthn security keys are not supported.\n" +
 				"Please ensure you have TOTP (authenticator app) configured as your 2FA method")
 		}
 	}
-
 	return code, nil
 }
 
 func (c *Client) getAuthInfo() (*api.AuthInfoResponse, error) {
+	return c.getAuthInfoContext(context.Background())
+}
+
+func (c *Client) getAuthInfoContext(ctx context.Context) (*api.AuthInfoResponse, error) {
 	req, err := api.NewRequest(http.MethodPost, c.config.APIURL+constants.AuthInfoPath,
 		map[string]any{"Username": c.config.Username}, nil)
 	if err != nil {
@@ -383,26 +779,42 @@ func (c *Client) getAuthInfo() (*api.AuthInfoResponse, error) {
 	}
 
 	var authInfo api.AuthInfoResponse
-	if err := api.Do(c.httpClient, req, &authInfo); err != nil {
+	status, err := doAuthJSON(ctx, c.httpClient, req, "auth info", &authInfo)
+	if err != nil {
 		return nil, err
 	}
+	if isTemporaryHTTPStatus(status) {
+		return nil, &TemporarySessionError{Err: fmt.Errorf("HTTP %d", status), Operation: "auth info"}
+	}
+	if status < 200 || status >= 300 {
+		if authInfo.Code != 0 && !constants.IsSuccessCode(authInfo.Code) {
+			return nil, newAuthenticationError(authInfo.Code)
+		}
+		return nil, &ProtocolError{Operation: "auth info", StatusCode: status}
+	}
 
-	if authInfo.Code != CodeSuccess {
-		return nil, fmt.Errorf("failed to get auth info, code: %d", authInfo.Code)
+	if !constants.IsSuccessCode(authInfo.Code) {
+		if authInfo.Code == 0 {
+			return nil, &ProtocolError{Operation: "auth info", StatusCode: status}
+		}
+		return nil, newAuthenticationError(authInfo.Code)
 	}
 
 	// Validate required fields
-	if authInfo.Modulus == "" {
-		return nil, fmt.Errorf("received empty modulus from auth info")
-	}
-	if authInfo.ServerEphemeral == "" {
-		return nil, fmt.Errorf("received empty server ephemeral from auth info")
+	if authInfo.Version <= 0 || strings.TrimSpace(authInfo.Modulus) == "" ||
+		strings.TrimSpace(authInfo.ServerEphemeral) == "" ||
+		strings.TrimSpace(authInfo.Salt) == "" || strings.TrimSpace(authInfo.SRPSession) == "" {
+		return nil, &ProtocolError{Operation: "auth info", StatusCode: status}
 	}
 
 	return &authInfo, nil
 }
 
 func (c *Client) sendAuthRequest(authReq map[string]any) (*api.Session, error) {
+	return c.sendAuthRequestContext(context.Background(), authReq)
+}
+
+func (c *Client) sendAuthRequestContext(ctx context.Context, authReq map[string]any) (*api.Session, error) {
 	req, err := api.NewRequest(http.MethodPost, c.config.APIURL+constants.AuthPath, authReq, nil)
 	if err != nil {
 		return nil, err
@@ -410,8 +822,21 @@ func (c *Client) sendAuthRequest(authReq map[string]any) (*api.Session, error) {
 	api.SetHumanVerification(req, c.config.HVToken, constants.HVMethodCaptcha)
 
 	var session api.Session
-	if err := api.Do(c.httpClient, req, &session); err != nil {
+	status, err := doAuthJSON(ctx, c.httpClient, req, "authentication", &session)
+	if err != nil {
 		return nil, err
+	}
+	if isTemporaryHTTPStatus(status) {
+		return nil, &TemporarySessionError{Err: fmt.Errorf("HTTP %d", status), Operation: "authentication"}
+	}
+	if status < 200 || status >= 300 {
+		if session.Code != 0 && !constants.IsSuccessCode(session.Code) {
+			if session.Code == CodeCaptchaRequired {
+				return nil, captchaError(&session, c.config.APIURL, c.config.HVToken != "")
+			}
+			return nil, newAuthenticationError(session.Code)
+		}
+		return nil, &ProtocolError{Operation: "authentication", StatusCode: status}
 	}
 
 	// Handle mailbox password request (2-password mode)
@@ -430,11 +855,14 @@ func (c *Client) sendAuthRequest(authReq map[string]any) (*api.Session, error) {
 		return nil, captchaError(&session, c.config.APIURL, c.config.HVToken != "")
 	}
 
-	if session.Code != CodeSuccess {
-		if session.Error != "" {
-			return nil, fmt.Errorf("%s (code %d)", session.Error, session.Code)
+	if !constants.IsSuccessCode(session.Code) {
+		if session.Code == 0 {
+			return nil, &ProtocolError{Operation: "authentication", StatusCode: status}
 		}
-		return nil, NewError(session.Code)
+		return nil, newAuthenticationError(session.Code)
+	}
+	if !sessionHasCredentials(&session) || session.ExpiresIn <= 0 {
+		return nil, &ProtocolError{Operation: "authentication", StatusCode: status}
 	}
 
 	return &session, nil
@@ -469,8 +897,16 @@ func captchaError(session *api.Session, apiURL string, replayed bool) error {
 
 // submit2FA submits a 2FA code to upgrade the session with additional scopes (like VPN)
 func (c *Client) submit2FA(session *api.Session, code string) ([]string, error) {
+	return c.submit2FAContext(context.Background(), session, code)
+}
+
+func (c *Client) submit2FAContext(ctx context.Context, session *api.Session, code string) ([]string, error) {
+	normalizedCode, err := validateTOTPCode(code)
+	if err != nil {
+		return nil, err
+	}
 	req, err := api.NewRequest(http.MethodPost, c.config.APIURL+constants.TwoFAPath,
-		map[string]any{"TwoFactorCode": code}, session)
+		map[string]any{"TwoFactorCode": normalizedCode}, session)
 	if err != nil {
 		return nil, err
 	}
@@ -478,17 +914,29 @@ func (c *Client) submit2FA(session *api.Session, code string) ([]string, error) 
 	var twoFAResp struct {
 		Code   int      `json:"Code"`
 		Scopes []string `json:"Scopes"`
-		Error  string   `json:"Error,omitempty"`
 	}
-	if err := api.Do(c.httpClient, req, &twoFAResp); err != nil {
+	status, err := doAuthJSON(ctx, c.httpClient, req, "2FA", &twoFAResp)
+	if err != nil {
 		return nil, err
 	}
-
-	if twoFAResp.Code != CodeSuccess {
-		if twoFAResp.Error != "" {
-			return nil, fmt.Errorf("2FA failed (code %d): %s", twoFAResp.Code, twoFAResp.Error)
+	if isTemporaryHTTPStatus(status) {
+		return nil, &TemporarySessionError{Err: fmt.Errorf("HTTP %d", status), Operation: "2FA"}
+	}
+	if status < 200 || status >= 300 {
+		if twoFAResp.Code != 0 && !constants.IsSuccessCode(twoFAResp.Code) {
+			return nil, &TwoFactorError{Code: twoFAResp.Code}
 		}
-		return nil, NewError(twoFAResp.Code)
+		return nil, &ProtocolError{Operation: "2FA", StatusCode: status}
+	}
+
+	if !constants.IsSuccessCode(twoFAResp.Code) {
+		if twoFAResp.Code == 0 {
+			return nil, &ProtocolError{Operation: "2FA", StatusCode: status}
+		}
+		return nil, &TwoFactorError{Code: twoFAResp.Code}
+	}
+	if !hasScope(twoFAResp.Scopes, "vpn") {
+		return nil, &ProtocolError{Operation: "2FA scope upgrade", StatusCode: status}
 	}
 
 	return twoFAResp.Scopes, nil

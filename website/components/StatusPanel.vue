@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { release } from '~/data/release'
+const { catalog } = useRelease()
 </script>
 
 <template>
@@ -18,12 +18,12 @@ import { release } from '~/data/release'
             <span>GO LIVE · BRASIL</span>
           </div>
         </div>
-        <span class="status-panel__version">v{{ release.version }}</span>
+        <span class="status-panel__version">v{{ catalog.version }}</span>
       </div>
 
       <div class="status-line">
         <span class="status-dot" aria-hidden="true"></span>
-        <span>Pronto para instalar</span>
+        <span>Pronto para conectar</span>
         <span class="status-badge">STABLE</span>
       </div>
 
@@ -35,12 +35,12 @@ import { release } from '~/data/release'
 
       <div class="status-panel__details">
         <div>
-          <span class="detail-label">Sinalização</span>
-          <strong>Gateway seletivo</strong>
+          <span class="detail-label">Arquitetura</span>
+          <strong>WireGuard por app</strong>
         </div>
         <div>
-          <span class="detail-label">Mídia</span>
-          <strong>Conexão direta</strong>
+          <span class="detail-label">Escopo</span>
+          <strong>Só o Discord</strong>
         </div>
       </div>
     </div>

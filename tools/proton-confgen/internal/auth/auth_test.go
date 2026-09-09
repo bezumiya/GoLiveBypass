@@ -33,7 +33,7 @@ func TestSendAuthRequestHumanVerification(t *testing.T) {
 				gotToken = r.Header.Get("x-pm-human-verification-token")
 				gotType = r.Header.Get("x-pm-human-verification-token-type")
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"Code":1000}`))
+				_, _ = w.Write([]byte(`{"Code":1000,"AccessToken":"synthetic-access","UID":"synthetic-uid","ExpiresIn":3600}`))
 			}))
 			defer srv.Close()
 

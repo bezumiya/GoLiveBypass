@@ -22,6 +22,14 @@ export type VpnState =
     | "blocked_external"
     | "recovery_required";
 
+export function normalizeProtonUsername(value: string): string {
+    return value.trim().replace(/@(protonmail\.com|proton\.me|pm\.me)$/i, "");
+}
+
+export function protonUsernamesMatch(expected: string, actual: string): boolean {
+    return normalizeProtonUsername(expected).toLowerCase() === normalizeProtonUsername(actual).toLowerCase();
+}
+
 export interface VpnSettings {
     mode: VpnMode;
     customConfigPath: string;

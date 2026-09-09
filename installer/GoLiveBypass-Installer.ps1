@@ -36,11 +36,10 @@ param(
 )
 
 Write-Host ''
-Write-Host '  [AVISO] Plugin e standalone CLI estao temporariamente fora do ar.' -ForegroundColor Yellow
-Write-Host '          O novo sistema WireGuard ainda esta sendo portado para essas variantes.' -ForegroundColor DarkGray
-Write-Host '          Use a GUI 2.0.0 de teste enquanto isso. Nenhuma instalacao foi realizada.' -ForegroundColor DarkGray
+Write-Host '  [BETA] GoLiveBypass para Equicord/Vencord — canal beta WireGuard.' -ForegroundColor Yellow
+Write-Host '         Este instalador entrega a versao beta atual do plugin; resultados podem mudar.' -ForegroundColor DarkGray
+Write-Host '         O standalone continua separado e nao e alterado por este instalador.' -ForegroundColor DarkGray
 Write-Host ''
-exit 1
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -50,7 +49,19 @@ $ErrorActionPreference = 'Stop'
 try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
 
 $RepoRaw = 'https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main'
-$PluginFiles = @('goLiveBypass/index.tsx', 'goLiveBypass/native.ts', 'goLiveBypass/stability.ts', 'goLiveBypass/manifest.json')
+$PluginFiles = @(
+    'goLiveBypass/index.tsx',
+    'goLiveBypass/native.ts',
+    'goLiveBypass/update-channel.ts',
+    'goLiveBypass/update-security.ts',
+    'goLiveBypass/stability.ts',
+    'goLiveBypass/vpn-controller.ts',
+    'goLiveBypass/vpn-proton.ts',
+    'goLiveBypass/vpn-types.ts',
+    'goLiveBypass/vpn-windows.ts',
+    'goLiveBypass/manifest.json'
+)
+$PluginHelperRelative = 'bin\win32-x64\proton-confgen.exe'
 $PluginDirName = 'goLiveBypass'
 $DiscordNames = @('Discord', 'DiscordCanary', 'DiscordPTB')
 
@@ -1087,6 +1098,47 @@ function Stop-Discord {
     throw 'O Discord nao fechou. Feche pelo icone na bandeja e rode de novo.'
 }
 
+function Copy-PluginHelper($target) {
+    $destination = Join-Path $target $PluginHelperRelative
+    $destinationDir = Split-Path -Parent $destination
+    if (-not (Test-Path -LiteralPath $destinationDir)) {
+        New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+    }
+
+    # Um checkout local pode ja conter o helper produzido pelo workflow de release.
+    # Prefira-o para que -PluginSource continue sendo um teste fiel do pacote local.
+    if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
+        $local = Join-Path $PluginSource $PluginHelperRelative
+        if (Test-Path -LiteralPath $local) {
+            Copy-Item -LiteralPath $local -Destination $destination -Force
+            Write-Ok 'Helper Proton copiado do PluginSource'
+            return
+        }
+    }
+
+    # O helper e binario e nao pode ser obtido por raw.githubusercontent.com. Quando o
+    # instalador baixa as fontes da main, busca o helper x64 da beta mais recente e valida
+    # o SHA-256 publicado antes de grava-lo no userplugin.
+    $asset = Get-LatestBetaHelperAsset
+    if (-not $asset) {
+        throw 'Nao encontrei o helper proton-confgen da beta. Use um pacote de release ou -PluginSource com bin\win32-x64\proton-confgen.exe.'
+    }
+
+    $temporary = Join-Path $env:TEMP ("golivebypass-proton-confgen-{0}.exe" -f ([guid]::NewGuid().ToString('N')))
+    try {
+        Write-Step "Baixando helper Proton da beta $($asset.Tag)"
+        Invoke-WebRequest -Uri $asset.Url -OutFile $temporary -UseBasicParsing -TimeoutSec 60
+        $actual = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $asset.Sha256) {
+            throw "SHA-256 do helper nao confere: esperado $($asset.Sha256), obtido $actual."
+        }
+        Copy-Item -LiteralPath $temporary -Destination $destination -Force
+        Write-Ok 'Helper Proton instalado (SHA-256 confere)'
+    } finally {
+        Remove-CaminhoSilencioso $temporary
+    }
+}
+
 function Copy-Plugin($root) {
     if (-not $root) { throw 'Caminho do checkout invalido para copiar o plugin.' }
     $target = Join-Path $root "src\userplugins\$PluginDirName"
@@ -1109,6 +1161,8 @@ function Copy-Plugin($root) {
         if (-not (Test-Path -LiteralPath $local)) { throw "Nao achei $leaf em $PluginSource." }
         Copy-Item -LiteralPath $local -Destination (Join-Path $target $leaf) -Force
     }
+
+    Copy-PluginHelper $target
 
     if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
         Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub."
@@ -1797,6 +1851,43 @@ function Show-MainMenu {
 
 $GitHubRepo = 'bezumiya/GoLiveBypass'
 $GitHubApi  = "https://api.github.com/repos/$GitHubRepo"
+
+function Get-LatestBetaHelperAsset {
+    try {
+        $headers = @{ 'User-Agent' = 'GoLiveBypass-Installer'; 'Accept' = 'application/vnd.github+json' }
+        $releases = Invoke-RestMethod -Uri "$GitHubApi/releases?per_page=20" -Headers $headers -TimeoutSec 15
+        foreach ($release in @($releases)) {
+            if ($release.draft -or -not $release.prerelease) { continue }
+            $asset = @($release.assets) |
+                Where-Object { $_.name -match '(^|-)proton-confgen.*-win-x64\.exe$' } |
+                Select-Object -First 1
+            if (-not $asset) { continue }
+
+            $shaAsset = @($release.assets) |
+                Where-Object { $_.name -eq "$($asset.name).sha256" } |
+                Select-Object -First 1
+            if (-not $shaAsset) { continue }
+
+            $shaResponse = Invoke-WebRequest -Uri $shaAsset.browser_download_url -Headers $headers -UseBasicParsing -TimeoutSec 15
+            $shaContent = if ($shaResponse.Content -is [byte[]]) {
+                [Text.Encoding]::UTF8.GetString($shaResponse.Content).Trim()
+            } else {
+                ([string]$shaResponse.Content).Trim()
+            }
+            $sha256 = ($shaContent -split '\s+')[0].ToLowerInvariant()
+            if ($sha256 -notmatch '^[0-9a-f]{64}$') { continue }
+
+            return [PSCustomObject]@{
+                Tag = ($release.tag_name -replace '^v', '')
+                Url = $asset.browser_download_url
+                Sha256 = $sha256
+            }
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
 
 # Consulta a release mais recente. Devolve um objeto com .Tag e .AssetUrl
 # (pode ser $null para qualquer um). RC=0 mesmo se a consulta falhou: o

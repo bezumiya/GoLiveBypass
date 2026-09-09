@@ -154,3 +154,29 @@ func TestVerifyLabelsAuthError(t *testing.T) {
 		t.Fatalf("err = %v, queria erro de autenticacao", err)
 	}
 }
+
+func TestLatestStableReleaseOK(t *testing.T) {
+	c, getReq := newFake(t, http.StatusOK, `{"tag_name":"v2.0.4","name":"GoLiveBypass 2.0.4","draft":false,"prerelease":false,"published_at":"2026-09-05T12:00:00Z","html_url":"https://github.com/owner/repo/releases/tag/v2.0.4","assets":[{"name":"GoLiveBypass-2.0.4.exe","browser_download_url":"https://github.com/owner/repo/releases/download/v2.0.4/GoLiveBypass-2.0.4.exe"}]}`)
+
+	release, err := c.LatestStableRelease(context.Background())
+	if err != nil {
+		t.Fatalf("LatestStableRelease() error = %v", err)
+	}
+	if release.TagName != "v2.0.4" || release.Name != "GoLiveBypass 2.0.4" || len(release.Assets) != 1 {
+		t.Fatalf("release = %+v", release)
+	}
+	req, _ := getReq()
+	if req.Method != http.MethodGet || req.URL.Path != "/repos/owner/repo/releases/latest" {
+		t.Fatalf("request = %s %s", req.Method, req.URL.Path)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer tok-secreto" {
+		t.Errorf("Authorization = %q", got)
+	}
+}
+
+func TestLatestStableReleaseError(t *testing.T) {
+	c, _ := newFake(t, http.StatusForbidden, `{"message":"rate limit"}`)
+	if _, err := c.LatestStableRelease(context.Background()); err == nil || !strings.Contains(err.Error(), "GitHub respondeu") {
+		t.Fatalf("err = %v", err)
+	}
+}

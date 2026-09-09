@@ -2,15 +2,21 @@ package server
 
 import (
 	"log/slog"
+	"net/http"
 
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 
 	"github.com/bezumiya/GoLiveBypass/api/internal/config"
+	"github.com/bezumiya/GoLiveBypass/api/internal/releases"
 	"github.com/bezumiya/GoLiveBypass/api/internal/updates"
 )
 
-func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Echo {
+func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger, releaseSource releases.Source) *echo.Echo {
+	return NewWithBroker(cfg, issues, logger, updates.NewBroker(), releaseSource)
+}
+
+func NewWithBroker(cfg *config.Config, issues IssueCreator, logger *slog.Logger, broker *updates.Broker, releaseSources ...releases.Source) *echo.Echo {
 	e := echo.NewWithConfig(echo.Config{NoGroupAutoRegister404Routes: true})
 	e.Logger = logger
 	e.HTTPErrorHandler = echo.DefaultHTTPErrorHandler(false)
@@ -20,7 +26,11 @@ func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Ech
 	e.Use(middleware.RequestLogger())
 
 	store := newBlockStore(cfg)
-	h := &handler{cfg: cfg, issues: issues, store: store, updates: updates.NewBroker()}
+	var releaseCatalog *releases.CatalogCache
+	if len(releaseSources) > 0 && releaseSources[0] != nil {
+		releaseCatalog = releases.NewCatalogCache(releaseSources[0], releases.DefaultTTL)
+	}
+	h := &handler{cfg: cfg, issues: issues, store: store, updates: broker, releases: releaseCatalog}
 	e.GET(cfg.BasePath+"/healthz", h.health)
 
 	updateV1 := e.Group(cfg.BasePath + "/v1/updates")
@@ -39,6 +49,17 @@ func New(cfg *config.Config, issues IssueCreator, logger *slog.Logger) *echo.Ech
 	// quando o bloqueio termina). Fica autenticado, sem rate limit.
 	status := e.Group(cfg.BasePath+"/v1", authMiddleware(cfg.APIToken))
 	status.GET("/block-status", h.blockStatus)
+
+	releaseV1 := e.Group(cfg.BasePath+"/v1/releases",
+		middleware.CORSWithConfig(middleware.CORSConfig{
+			AllowOrigins: cfg.WebsiteOrigins,
+			AllowMethods: []string{http.MethodGet, http.MethodOptions},
+			AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderAccept, echo.HeaderContentType},
+			MaxAge:       300,
+		}),
+	)
+	releaseV1.GET("/latest", h.latestRelease)
+	releaseV1.GET("/latest/download/:asset", h.downloadRelease)
 
 	return e
 }

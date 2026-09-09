@@ -149,22 +149,52 @@ test("instalador Windows distribui stability.ts", () => {
     assert.match(windowsInstaller, /goLiveBypass\/stability\.ts/);
 });
 
+test("instalador Windows libera explicitamente a linha beta", () => {
+    const banner = windowsInstaller.slice(0, windowsInstaller.indexOf("$ErrorActionPreference"));
+    assert.match(banner, /\[BETA\]/);
+    assert.match(banner, /canal beta WireGuard/);
+    assert.doesNotMatch(banner, /temporariamente fora do ar/);
+    assert.doesNotMatch(banner, /Nenhuma instalacao foi realizada/);
+});
+
+test("instalador Windows distribui todas as fontes do plugin WireGuard", () => {
+    for (const file of [
+        "goLiveBypass/index.tsx",
+        "goLiveBypass/native.ts",
+        "goLiveBypass/update-channel.ts",
+        "goLiveBypass/update-security.ts",
+        "goLiveBypass/stability.ts",
+        "goLiveBypass/vpn-controller.ts",
+        "goLiveBypass/vpn-proton.ts",
+        "goLiveBypass/vpn-types.ts",
+        "goLiveBypass/vpn-windows.ts",
+        "goLiveBypass/manifest.json",
+    ]) {
+        assert.match(windowsInstaller, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+    assert.match(windowsInstaller, /PluginHelperRelative/);
+    assert.match(windowsInstaller, /Copy-PluginHelper/);
+    assert.match(windowsInstaller, /Get-LatestBetaHelperAsset/);
+    assert.match(windowsInstaller, /Get-FileHash.*SHA256/);
+});
+
 test("manifesto local e linha v2 beta", () => {
     assert.equal(manifest.version, "2.0.0-beta.1");
 });
 
 test("plugin mostra versao e oferece verificacao na configuracao", () => {
     assert.match(pluginRenderer, /PLUGIN_VERSION = "2\.0\.0-beta\.1"/);
-    assert.match(pluginRenderer, /checkPluginUpdate\(\)/);
+    assert.match(pluginRenderer, /checkPluginUpdate\(/);
     assert.match(pluginRenderer, /Atualizar/);
 });
 
 test("check() de update do plugin trata rejeicao igual a update() (nao deixa promise sem dono)", () => {
-    // Native.checkPluginUpdate() em si nunca rejeita, mas a chamada IPC por baixo pode --
-    // update(), a funcao irma, ja tratava; check() nao tratava ate esta correcao.
+    // Native.checkPluginUpdate() em si pode encapsular a rejeição da chamada
+    // IPC; o fluxo de configuração precisa encerrar o estado busy em qualquer
+    // caminho de erro.
     const checkBody = section(pluginRenderer, "const check = async () => {", "const update = async () => {");
     assert.match(checkBody, /\}\s*catch\s*\(error\)\s*\{/);
-    assert.match(checkBody, /finally\s*\{\s*setBusy\(false\);/);
+    assert.match(checkBody, /finally\s*\{[\s\S]*?setBusy\(false\);/);
 });
 
 test("plugin atualiza somente no processo nativo com checksum e backup", () => {
@@ -175,7 +205,7 @@ test("plugin atualiza somente no processo nativo com checksum e backup", () => {
 });
 
 test("updater do plugin nunca substitui o bundle dist do Vencord/Equicord", () => {
-    assert.match(pluginNative, /function userpluginSource\(\)/);
+    assert.match(pluginNative, /function userpluginSource\(allowMissingTarget = false\)/);
     assert.match(pluginNative, /src", "userplugins", USERPLUGIN_DIR/);
     assert.match(pluginNative, /rebuildUserplugin\(projectRoot\)/);
     assert.match(pluginNative, /\.golivebypass-update-backups/);
@@ -209,8 +239,8 @@ test("TUI standalone tem consulta e update separados", () => {
 });
 
 test("shutdown do plugin restaura a rede própria e não mata WireSock externo", () => {
-    assert.match(pluginNative, /controller\.shutdown\(true\)/);
     assert.match(pluginNative, /controller\.shutdown\(false\)/);
+    assert.match(pluginNative, /export function restartDiscord/);
     assert.match(pluginController, /stopOwnedWireSock/);
     assert.match(pluginController, /inspection\.active && !inspection\.owned/);
     assert.match(pluginController, /recovery_required/);

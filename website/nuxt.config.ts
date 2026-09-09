@@ -18,7 +18,7 @@ export default defineNuxtConfig({
         {
           name: 'description',
           content:
-            'Escolha como instalar o GoLiveBypass: GUI para Windows, macOS e Linux, CLI, standalone ou plugin.',
+            'GUI do GoLiveBypass com WireGuard por aplicativo: só o Discord usa o túnel, com downloads estáveis sempre atualizados.',
         },
       ],
       link: [
@@ -39,6 +39,11 @@ export default defineNuxtConfig({
           tagPosition: 'head',
         },
       ],
+    },
+  },
+  runtimeConfig: {
+    public: {
+      releaseApiBaseUrl: process.env.NUXT_PUBLIC_RELEASE_API_BASE_URL || 'https://api.skyplaceia.com/bugs',
     },
   },
 })

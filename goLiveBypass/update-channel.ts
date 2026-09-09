@@ -17,33 +17,71 @@ interface ParsedPluginVersion {
 }
 
 const VERSION_PATTERN =
-  /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:[.-][0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+  /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const NUMERIC_IDENTIFIER = /^\d+$/;
 const VALID_NUMERIC_VERSION_PART = /^(?:0|[1-9]\d*)$/;
+const LEGACY_PRERELEASE_LABEL = /^[0-9A-Za-z]+$/;
+const LEGACY_PRERELEASE_IDENTIFIER = /^([0-9A-Za-z]+)-([0-9]+)$/;
 
-function parsePluginVersion(value: string): ParsedPluginVersion | null {
-  const match = VERSION_PATTERN.exec(value.trim());
+function legacyPrereleaseIdentifiers(prerelease: readonly string[]): string[] {
+  if (
+    prerelease.length === 2 &&
+    prerelease[0] === "beta" &&
+    LEGACY_PRERELEASE_LABEL.test(prerelease[0]) &&
+    NUMERIC_IDENTIFIER.test(prerelease[1]) &&
+    VALID_NUMERIC_VERSION_PART.test(prerelease[1])
+  ) {
+    return [prerelease[0], prerelease[1]];
+  }
+
+  if (prerelease.length === 1) {
+    const match = LEGACY_PRERELEASE_IDENTIFIER.exec(prerelease[0]);
+    if (match && match[1] === "beta" && VALID_NUMERIC_VERSION_PART.test(match[2])) {
+      return [match[1], match[2]];
+    }
+  }
+
+  return [...prerelease];
+}
+
+function normalizePrerelease(prerelease: readonly string[]): string {
+  if (
+    prerelease.length === 2 &&
+    prerelease[0] === "beta" &&
+    LEGACY_PRERELEASE_LABEL.test(prerelease[0]) &&
+    NUMERIC_IDENTIFIER.test(prerelease[1]) &&
+    VALID_NUMERIC_VERSION_PART.test(prerelease[1])
+  ) {
+    // beta.1 and beta-1 are legacy spellings used by the plugin releases.
+    // Keep this narrow: arbitrary hyphens and additional dot identifiers must
+    // remain distinguishable under SemVer.
+    return `${prerelease[0]}-${prerelease[1]}`;
+  }
+
+  return prerelease.join(".");
+}
+
+function parsePluginVersion(value: unknown): ParsedPluginVersion | null {
+  if (typeof value !== "string") return null;
+
+  const match = VERSION_PATTERN.exec(value);
   if (!match || !VALID_NUMERIC_VERSION_PART.test(match[1]) || !VALID_NUMERIC_VERSION_PART.test(match[2]) || !VALID_NUMERIC_VERSION_PART.test(match[3])) {
     return null;
   }
 
-  const prerelease = match[4]?.split(/[.-]/) ?? [];
-  if (prerelease.length === 0 || prerelease.every((identifier) => identifier.length > 0)) {
-    if (prerelease.some((identifier) => NUMERIC_IDENTIFIER.test(identifier) && !VALID_NUMERIC_VERSION_PART.test(identifier))) {
-      return null;
-    }
-
-    const normalizedCore = `${match[1]}.${match[2]}.${match[3]}`;
-    return {
-      major: BigInt(match[1]),
-      minor: BigInt(match[2]),
-      patch: BigInt(match[3]),
-      prerelease,
-      normalized: prerelease.length > 0 ? `${normalizedCore}-${prerelease.join("-")}` : normalizedCore,
-    };
+  const prerelease = match[4]?.split(".") ?? [];
+  if (prerelease.some((identifier) => NUMERIC_IDENTIFIER.test(identifier) && !VALID_NUMERIC_VERSION_PART.test(identifier))) {
+    return null;
   }
 
-  return null;
+  const normalizedCore = `${match[1]}.${match[2]}.${match[3]}`;
+  return {
+    major: BigInt(match[1]),
+    minor: BigInt(match[2]),
+    patch: BigInt(match[3]),
+    prerelease,
+    normalized: prerelease.length > 0 ? `${normalizedCore}-${normalizePrerelease(prerelease)}` : normalizedCore,
+  };
 }
 
 export function normalizePluginVersion(value: string): string | null {
@@ -78,15 +116,18 @@ function compareParsedPluginVersions(left: ParsedPluginVersion, right: ParsedPlu
     }
   }
 
-  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
-    if (left.prerelease.length === right.prerelease.length) return 0;
-    return left.prerelease.length === 0 ? 1 : -1;
+  const leftPrerelease = legacyPrereleaseIdentifiers(left.prerelease);
+  const rightPrerelease = legacyPrereleaseIdentifiers(right.prerelease);
+
+  if (leftPrerelease.length === 0 || rightPrerelease.length === 0) {
+    if (leftPrerelease.length === rightPrerelease.length) return 0;
+    return leftPrerelease.length === 0 ? 1 : -1;
   }
 
-  const identifierCount = Math.max(left.prerelease.length, right.prerelease.length);
+  const identifierCount = Math.max(leftPrerelease.length, rightPrerelease.length);
   for (let index = 0; index < identifierCount; index += 1) {
-    const leftIdentifier = left.prerelease[index];
-    const rightIdentifier = right.prerelease[index];
+    const leftIdentifier = leftPrerelease[index];
+    const rightIdentifier = rightPrerelease[index];
     if (leftIdentifier === undefined || rightIdentifier === undefined) {
       return leftIdentifier === undefined ? -1 : 1;
     }

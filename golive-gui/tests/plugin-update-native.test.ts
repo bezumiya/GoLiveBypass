@@ -6,6 +6,10 @@ const native = fs.readFileSync(
   path.resolve(process.cwd(), "..", "goLiveBypass", "native.ts"),
   "utf8",
 );
+const updateSecurity = fs.readFileSync(
+  path.resolve(process.cwd(), "..", "goLiveBypass", "update-security.ts"),
+  "utf8",
+);
 
 function updateBlock(): string {
   const start = native.indexOf("async function performPluginUpdate");
@@ -18,7 +22,7 @@ describe("updater nativo do plugin", () => {
   it("consulta a coleção de releases e seleciona pelo canal", () => {
     expect(native).toContain("/repos/bezumiya/GoLiveBypass/releases?per_page=20");
     expect(native).not.toContain("/repos/pdl-clay/GoLiveBypass/releases/latest");
-    expect(native).toContain("choosePluginRelease(candidates, PLUGIN_VERSION, channel)");
+    expect(native).toContain("choosePluginRelease(candidates, currentVersion, channel)");
     expect(native).toContain("if (release.draft === true");
     expect(native).toContain("release.prerelease === true");
     expect(native).toContain('name === PLUGIN_ASSET');
@@ -26,7 +30,8 @@ describe("updater nativo do plugin", () => {
   });
 
   it("aplica limites e validações de transporte e artefato", () => {
-    expect(native).toContain('parsed.protocol !== "https:"');
+    expect(updateSecurity).toContain('parsed.protocol !== "https:"');
+    expect(native).toContain("securePluginUpdateUrl");
     expect(native).toContain("PLUGIN_MAX_REDIRECTS");
     expect(native).toContain("PLUGIN_UPDATE_TIMEOUT_MS");
     expect(native).toContain("PLUGIN_API_MAX_BYTES");
@@ -37,7 +42,7 @@ describe("updater nativo do plugin", () => {
     expect(native).toContain("validateArchiveEntries");
     expect(native).toContain("validateExtractedTree");
     expect(native).toContain('archive do plugin contém link simbólico');
-    expect(native).toContain("try {\n                    void downloadBytes(response.headers.location");
+    expect(native).toMatch(/try \{\s+void downloadBytes\(response\.headers\.location/);
   });
 
   it("persiste um marcador privado e informa que o reload ainda é necessário", () => {
@@ -48,6 +53,40 @@ describe("updater nativo do plugin", () => {
     expect(native).toContain("reloadRequired: true");
     expect(native).toContain("pending: true");
     expect(native).toContain("reconcileReachedPendingUpdate");
+    expect(native).toContain("sourceDigest");
+    expect(native).toContain("pendingChannel");
+  });
+
+  it("grava journal antes da troca e recupera um update interrompido", () => {
+    const start = native.indexOf("async function performPluginUpdateLocked");
+    const end = native.indexOf("function runPluginUpdate(policy", start);
+    const block = native.slice(start, end);
+    expect(block.indexOf('phase: "preparing"')).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("renameSync(target, backup)")).toBeGreaterThan(block.indexOf('phase: "preparing"'));
+    expect(block.indexOf('phase: "prepared"')).toBeGreaterThan(block.indexOf("renameSync(target, backup)"));
+    expect(native).toContain("function recoverInterruptedPluginUpdate()");
+    expect(native).toContain("update interrompido deixou a árvore nova sem backup");
+  });
+
+  it("serializa updates entre processos", () => {
+    expect(native).toContain('const UPDATE_LOCK_FILE = "plugin-update.lock"');
+    expect(native).toContain('openSync(path, "wx"');
+    expect(native).toContain("process.kill(pid, 0)");
+    expect(native).toContain("function releasePluginUpdateLock");
+    expect(native).toMatch(/async function performPluginUpdate\([\s\S]*?acquirePluginUpdateLock\(\)[\s\S]*?releasePluginUpdateLock/);
+  });
+
+  it("extrai no mesmo volume do checkout", () => {
+    expect(native).toContain('const UPDATE_STAGING_DIR = ".golivebypass-update-staging"');
+    expect(native).toContain("extractAndValidatePlugin(zip, release, sourceAtStart.projectRoot)");
+    expect(native).toContain("join(projectRoot, UPDATE_STAGING_DIR)");
+  });
+
+  it("jornaliza o rollback do beta", () => {
+    expect(native).toContain('const displacedName = `goLiveBypass-pending-${Date.now()}`');
+    expect(native).toContain('writePendingUpdate({ ...pending, phase: "rolling-back", displacedName })');
+    expect(native).toContain('if (pending.phase === "rolling-back")');
+    expect(native).toContain("function safeDisplacedPath");
   });
 
   it("trata concorrência, ciclo automático e rollback de beta ao voltar para stable", () => {
@@ -71,5 +110,20 @@ describe("updater nativo do plugin", () => {
     expect(native).toContain("export function getPluginUpdateStatus");
     expect(native).toMatch(/export (?:async )?function checkPluginUpdate/);
     expect(native).toMatch(/export (?:async )?function updatePlugin/);
+  });
+
+  it("preserva evidência quando o backup beta não está disponível", () => {
+    const start = native.indexOf("function discardPendingBetaForStable");
+    const end = native.indexOf("function releaseInfo", start);
+    const block = native.slice(start, end);
+    const missingBackup = block.slice(block.indexOf("if (!existsSync(backup))"), block.indexOf("const currentManifest"));
+    expect(missingBackup).toContain("backup do beta pendente não foi encontrado");
+    expect(missingBackup).not.toContain("clearPendingUpdate");
+  });
+
+  it("não usa fallback enganoso quando a fonte instalada é inválida", () => {
+    expect(native).toContain('const UNKNOWN_PLUGIN_VERSION = "unknown"');
+    expect(native).toContain("catch { return UNKNOWN_PLUGIN_VERSION; }");
+    expect(native).toContain("validatePluginSourceTree(target)");
   });
 });

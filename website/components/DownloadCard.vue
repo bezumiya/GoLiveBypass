@@ -8,7 +8,7 @@ defineProps<{
   description: string
   meta: string
   primaryLabel: string
-  primaryHref: string
+  primaryHref?: string
   secondaryLabel?: string
   secondaryHref?: string
   tone?: 'default' | 'success' | 'discord' | 'warning'
@@ -26,6 +26,7 @@ defineProps<{
     <div class="download-card__meta">{{ meta }}</div>
     <div class="download-card__actions">
       <a
+        v-if="primaryHref"
         class="button button--small button--primary"
         :href="primaryHref"
         target="_blank"
@@ -34,6 +35,9 @@ defineProps<{
         <BaseIcon name="download" :size="16" />
         {{ primaryLabel }}
       </a>
+      <span v-else class="button button--small button--secondary download-card__button-disabled" aria-disabled="true">
+        {{ primaryLabel }}
+      </span>
       <NuxtLink
         v-if="secondaryLabel && secondaryHref && secondaryHref.startsWith('/')"
         class="button button--small button--secondary"

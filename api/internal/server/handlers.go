@@ -15,6 +15,7 @@ import (
 	"github.com/bezumiya/GoLiveBypass/api/internal/bugreport"
 	"github.com/bezumiya/GoLiveBypass/api/internal/config"
 	"github.com/bezumiya/GoLiveBypass/api/internal/gh"
+	"github.com/bezumiya/GoLiveBypass/api/internal/releases"
 	"github.com/bezumiya/GoLiveBypass/api/internal/updates"
 )
 
@@ -23,10 +24,11 @@ type IssueCreator interface {
 }
 
 type handler struct {
-	cfg     *config.Config
-	issues  IssueCreator
-	store   *blockStore
-	updates *updates.Broker
+	cfg      *config.Config
+	issues   IssueCreator
+	store    *blockStore
+	updates  *updates.Broker
+	releases *releases.CatalogCache
 }
 
 func (h *handler) createReport(c *echo.Context) error {
@@ -69,6 +71,36 @@ func (h *handler) health(c *echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *handler) latestRelease(c *echo.Context) error {
+	if h.releases == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "catalogo de releases indisponivel")
+	}
+	catalog, err := h.releases.Latest(c.Request().Context())
+	if err != nil {
+		c.Logger().Error("falha ao atualizar catalogo de releases", "err", err, "repo", h.cfg.GitHubRepo)
+		return echo.NewHTTPError(http.StatusBadGateway, "nao foi possivel consultar a release estavel")
+	}
+	return c.JSON(http.StatusOK, catalog)
+}
+
+func (h *handler) downloadRelease(c *echo.Context) error {
+	if h.releases == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "catalogo de releases indisponivel")
+	}
+	asset := c.Param("asset")
+	downloadURL, err := h.releases.Download(c.Request().Context(), asset)
+	if err != nil {
+		switch {
+		case errors.Is(err, releases.ErrUnknownAsset), errors.Is(err, releases.ErrAssetUnavailable):
+			return echo.NewHTTPError(http.StatusNotFound, "download indisponivel")
+		default:
+			c.Logger().Error("falha ao consultar asset da release", "err", err, "asset", asset)
+			return echo.NewHTTPError(http.StatusBadGateway, "nao foi possivel consultar a release estavel")
+		}
+	}
+	return c.Redirect(http.StatusFound, downloadURL)
+}
+
 func (h *handler) githubWebhook(c *echo.Context) error {
 	body, err := io.ReadAll(io.LimitReader(c.Request().Body, 1024*1024+1))
 	if err != nil {
@@ -98,6 +130,9 @@ func (h *handler) githubWebhook(c *echo.Context) error {
 	}
 	if !h.updates.Publish(deliveryID, event) {
 		return c.NoContent(http.StatusNoContent)
+	}
+	if !event.Prerelease && h.releases != nil {
+		h.releases.Invalidate()
 	}
 	c.Logger().Info("release publicada, clientes de update acordados", "tag", event.Tag, "prerelease", event.Prerelease)
 	return c.NoContent(http.StatusAccepted)

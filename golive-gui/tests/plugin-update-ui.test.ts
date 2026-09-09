@@ -30,7 +30,9 @@ describe("preferências e painel do updater do plugin", () => {
     expect(start).toContain("settings.store.autoUpdate");
     expect(panel).toContain('settings.use(["updateChannel", "autoUpdate"])');
     expect(panel).toContain("configurePluginUpdates");
-    expect(panel).toContain("getPluginUpdateStatus");
+    expect(source).toContain("getPluginUpdateStatus");
+    expect(panel).toContain("readPluginUpdateStatus");
+    expect(panel).toContain("operationBusyRef");
   });
 
     it("faz polling limitado, notifica uma vez por versão pendente e pede reload manual", () => {
@@ -39,7 +41,7 @@ describe("preferências e painel do updater do plugin", () => {
     expect(source).toContain("clearInterval");
     expect(source).toContain("lastNotifiedPendingVersion");
     expect(source).toContain("pendingVersion");
-    expect(source).toContain("pronto; recarregue o Discord");
+    expect(source).toMatch(/pront[ao]; recarregue o Discord/);
     expect(source).toMatch(/recarregue o Discord/i);
     expect(source).not.toContain("app.relaunch");
         expect(source).not.toContain("app.quit");
@@ -52,6 +54,9 @@ describe("preferências e painel do updater do plugin", () => {
         expect(panel).toContain("Verificando atualizações");
         expect(panel).toContain("Baixando e preparando a atualização");
         expect(panel).toContain("recarregue o Discord manualmente");
+        expect(panel).toContain('role="status"');
+        expect(panel).toContain('aria-live="polite"');
+        expect(panel).toContain("aria-busy={busy}");
         expect(panel).not.toContain("app.relaunch");
         expect(panel).not.toContain("app.quit");
     });
@@ -61,9 +66,11 @@ describe("preferências e painel do updater do plugin", () => {
     const update = blockBetween("    const update = async () =>", "    return (");
 
     expect(start).toContain("startStreamClaimWatch()");
-    expect(start).toContain("Native?.enable()");
+    expect(start).toMatch(/typeof Native\?\.enable === "function"/);
+    expect(start).toContain("Native.enable()");
     expect(source).toContain("stopStreamClaimWatch()");
-    expect(source).toContain("Native?.shutdown()");
+    expect(source).toMatch(/typeof Native\?\.shutdown === "function"/);
+    expect(source).toContain("Native.shutdown()");
     expect(update).not.toContain("shutdown");
   });
 
@@ -86,6 +93,9 @@ describe("preferências e painel do updater do plugin", () => {
     expect(source).toContain("progress.tested");
     expect(source).toContain("progress.total");
     expect(source).toContain("progress.succeeded");
+    expect(source).toContain("CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS");
+    expect(source).toContain("progressIsIndeterminate");
+    expect(source).toContain("Cancelar validação");
     expect(source).toContain("A configuração foi salva; a ativação da VPN continua sendo uma ação separada.");
     expect(source).not.toContain("app.relaunch");
     expect(source).not.toContain("app.quit");

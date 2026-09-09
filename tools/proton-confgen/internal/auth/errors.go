@@ -1,10 +1,16 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 
 	"protonvpn-wg-confgen/internal/constants"
 )
+
+// ErrTwoFactorRequired is returned when the server requires a TOTP code but
+// the caller is running in a mode where it cannot prompt for one. Keep this
+// sentinel stable for JSON/non-interactive callers.
+var ErrTwoFactorRequired = errors.New("2FA_REQUIRED")
 
 // Error codes from ProtonVPN API
 // Official source: github.com/ProtonMail/protoncore_android/.../ResponseCodes.kt
@@ -37,6 +43,101 @@ func NewError(code int) error {
 	return Error{
 		Code:    code,
 		Message: message,
+	}
+}
+
+// InvalidCredentialsError identifies a rejected password/username without
+// retaining or echoing any server-provided detail.
+type InvalidCredentialsError struct {
+	Code int
+}
+
+func (e *InvalidCredentialsError) Error() string {
+	if e == nil {
+		return "incorrect username or password"
+	}
+	return getErrorMessage(e.Code)
+}
+
+// IsInvalidCredentials reports whether an authentication attempt was rejected
+// as an invalid credential rather than failing because of transport or MFA.
+func IsInvalidCredentials(err error) bool {
+	var target *InvalidCredentialsError
+	return errors.As(err, &target)
+}
+
+// TwoFactorError identifies a rejected TOTP submission. Its message contains
+// only the numeric API code; the submitted code is never retained.
+type TwoFactorError struct {
+	Code int
+}
+
+func (e *TwoFactorError) Error() string {
+	if e == nil {
+		return "2FA verification failed"
+	}
+	return fmt.Sprintf("2FA verification failed (code %d)", e.Code)
+}
+
+// IsTwoFactorError reports whether the failure came from the dedicated 2FA
+// endpoint or a 2FA validation step.
+func IsTwoFactorError(err error) bool {
+	var target *TwoFactorError
+	return errors.As(err, &target)
+}
+
+// SessionInvalidError identifies a cached session rejected by Proton. It is
+// deliberately separate from TemporarySessionError so callers can remove the
+// cache only when the server actually rejected it.
+type SessionInvalidError struct {
+	Code       int
+	StatusCode int
+}
+
+func (e *SessionInvalidError) Error() string {
+	if e == nil {
+		return "saved Proton session was rejected"
+	}
+	if e.Code != 0 {
+		return fmt.Sprintf("saved Proton session was rejected (code %d)", e.Code)
+	}
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("saved Proton session was rejected (HTTP %d)", e.StatusCode)
+	}
+	return fmt.Sprintf("saved Proton session was rejected (code %d)", e.Code)
+}
+
+// IsSessionInvalid reports whether a refresh response explicitly rejected the
+// cached session.
+func IsSessionInvalid(err error) bool {
+	var target *SessionInvalidError
+	return errors.As(err, &target)
+}
+
+// ProtocolError represents an unusable response shape/status. It never
+// includes the response body, which may contain credentials or challenge
+// material supplied by an intermediary.
+type ProtocolError struct {
+	Operation  string
+	StatusCode int
+}
+
+func (e *ProtocolError) Error() string {
+	if e == nil {
+		return "invalid Proton authentication response"
+	}
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("Proton %s returned an invalid HTTP status (%d)", e.Operation, e.StatusCode)
+	}
+	return fmt.Sprintf("Proton %s returned an invalid response", e.Operation)
+}
+
+func newAuthenticationError(code int) error {
+	switch code {
+	case CodeWrongPassword, CodeWrongPasswordFormat:
+		return &InvalidCredentialsError{Code: code}
+	default:
+		return NewError(code)
 	}
 }
 

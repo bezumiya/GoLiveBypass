@@ -40,6 +40,48 @@ type Issue struct {
 	Labels []string `json:"labels,omitempty"`
 }
 
+type Release struct {
+	TagName     string         `json:"tag_name"`
+	Name        string         `json:"name"`
+	Draft       bool           `json:"draft"`
+	Prerelease  bool           `json:"prerelease"`
+	PublishedAt string         `json:"published_at"`
+	HTMLURL     string         `json:"html_url"`
+	Assets      []ReleaseAsset `json:"assets"`
+}
+
+type ReleaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+func (c *Client) LatestStableRelease(ctx context.Context) (Release, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/repos/"+c.repo+"/releases/latest", nil)
+	if err != nil {
+		return Release{}, fmt.Errorf("montando requisicao de release: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", apiAccept)
+	req.Header.Set("X-GitHub-Api-Version", apiVersion)
+	req.Header.Set("User-Agent", "GoLiveBypass-release-catalog")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Release{}, fmt.Errorf("consultando release no GitHub: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return Release{}, fmt.Errorf("GitHub respondeu %s ao consultar release: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var release Release
+	if err := json.Unmarshal(body, &release); err != nil {
+		return Release{}, fmt.Errorf("decodificando release (%s): %w", resp.Status, err)
+	}
+	return release, nil
+}
+
 // VerifyLabels confere no boot que cada label de ISSUE_LABELS existe no repo alvo.
 // Sem isso, o primeiro report real devolveria 422 do GitHub e o usuario acharia
 // que a API quebrou. Erro de auth/rede tambem falha: melhor abortar o boot do que

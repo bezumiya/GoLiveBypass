@@ -9,7 +9,19 @@ Trabalhe a partir da plataforma, distribuição, versão e perfil envolvidos. De
 
 ## Investigar e corrigir
 
+Escolha a entrada pelo sintoma; não leia todos os subsistemas:
+
+| Sintoma | Entrada em `golive-gui/electron/` | Testes em `golive-gui/tests/` |
+| --- | --- | --- |
+| Instalação/ativação Windows | `wiresock.ts`, `wiresock-service.ts`, `wiresock-preflight.ts` | `wiresock*.test.ts` |
+| Ativação/restauração Linux | `linux-helper.ts`, `linux-preflight.ts`, `linux-health.ts` | `linux-*.test.ts` |
+| Login/plano/seleção Proton | `proton.ts`, handlers Proton em `main.ts`; helper em `tools/proton-confgen/` | `proton*.test.ts` |
+| Discord sem tráfego/upload | `discord-scope-proof.ts`, `route-proof.ts`, `wgstats.ts` | `discord-scope-proof.test.ts`, `route-proof.test.ts`, `wgstats.test.ts` |
+
+Delimite o log por horário/versão e reproduza uma operação por vez. Registre estado inicial, ação e resultado esperado/observado. Após duas tentativas iguais sem informação nova, mude a hipótese ou o instrumento. Não altere vários timeouts/perfis simultaneamente. Código executado e logs prevalecem sobre changelog/histórico. Pedido só de diagnóstico não implica implementar a correção.
+
 1. Localize o caminho chamado pela GUI ou standalone antes de editar. Consulte `golive-gui/electron/wiresock.ts`, `linux-helper.ts`, `proton.ts` e o standalone correspondente a partir da raiz do repositório. Confirme o comportamento mais recente no `CHANGELOG.md`.
+   Nos scripts Windows PowerShell `-File`, preserve UTF-8 com BOM para caminhos Unicode. No modo direto, aguarde o resultado/PID, não o encerramento do worker que captura logs do túnel persistente; preserve o handle para códigos de saída. Fallback de serviço exige `run` explicitamente incompatível, não erro genérico de outra opção. Regressão e roteiro: `docs/testing/2026-09-09-windows-update-regression.md`.
 2. Separe estado do serviço, telemetria e prova funcional. No Windows, leia `route-proof.ts` e `discord-scope-proof.ts`: um helper central funcionar não prova que o Discord usa a mesma regra WFP. Observe os diretórios detectados e IPv4/IPv6 apenas em diagnóstico assíncrono, com limpeza dos probes. Falhas, IP brasileiro/direto ou resultados inconclusivos ficam nos logs: não bloquear abertura nem derrubar Discord por esses sinais. Preserve falhas reais de criação do túnel/serviço.
 3. No Linux, confira `discord-vpn`, `wg-discord`, DNS e execução do Discord no namespace com ambiente gráfico/áudio correto. Probes automáticos não devem abrir prompts de elevação em segundo plano. Não altere a rota padrão do host para simular isolamento.
 4. Preserve serialização de ativação/desativação/troca, restauração e proteção contra respostas atrasadas de sessões anteriores. Handshake e RX/TX ajudam no diagnóstico, mas não substituem prova de rota. Não troque de saída durante chamada para melhorar RTT sem evidência de necessidade.

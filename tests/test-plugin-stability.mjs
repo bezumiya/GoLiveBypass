@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import {
     STREAM_NATIVE_GRACE_MS,
     evaluateStreamClaim,
-    initialStreamClaimState
+    initialStreamClaimState,
+    normalizeStreamClaim
 } from "../goLiveBypass/stability.ts";
 
 let passed = 0;
@@ -23,6 +24,13 @@ test("UI sem Live permanece idle", () => {
     assert.deepEqual(result.state, initialStreamClaimState());
 });
 
+test("valor false da store tambem significa Live inativa", () => {
+    assert.equal(normalizeStreamClaim(false), false);
+    assert.equal(normalizeStreamClaim(null), false);
+    assert.equal(normalizeStreamClaim(undefined), null);
+    assert.equal(normalizeStreamClaim({ id: "stream" }), true);
+});
+
 test("store ausente falha fechado", () => {
     const state = initialStreamClaimState();
     const result = evaluateStreamClaim(
@@ -30,6 +38,24 @@ test("store ausente falha fechado", () => {
     );
     assert.equal(result.status, "unknown");
     assert.equal(result.warn, false);
+});
+
+test("observacao desconhecida reinicia a janela temporal", () => {
+    const warming = evaluateStreamClaim(
+        { now: 1_000, senderClaimed: true, nativeStreamCount: 0 }, initialStreamClaimState()
+    );
+    const unknown = evaluateStreamClaim(
+        { now: 60_000, senderClaimed: true, nativeStreamCount: null }, warming.state
+    );
+    assert.equal(unknown.status, "unknown");
+    assert.equal(unknown.warn, false);
+    assert.deepEqual(unknown.state, initialStreamClaimState());
+
+    const restarted = evaluateStreamClaim(
+        { now: 60_000 + STREAM_NATIVE_GRACE_MS - 1, senderClaimed: true, nativeStreamCount: 0 }, unknown.state
+    );
+    assert.equal(restarted.status, "warming");
+    assert.equal(restarted.warn, false);
 });
 
 test("conexao nativa durante aquecimento prova saude", () => {

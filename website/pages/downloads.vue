@@ -1,32 +1,29 @@
 <script setup lang="ts">
-import { downloads, githubReleasePageUrl, release } from '~/data/release'
-import { terminalCommands } from '~/data/install'
 import type { Platform } from '~/components/PlatformTabs.vue'
+
+const { catalog, status, downloadUrl, asset } = useRelease()
+
+const releaseStateLabel = computed(() => {
+  if (status.value === 'stale') return 'cache anterior'
+  if (status.value === 'error') return 'fallback local'
+  if (status.value === 'loading') return 'consultando API'
+  return 'catálogo atualizado'
+})
 
 useSeoMeta({
   title: 'Downloads',
-  description:
-    'Baixe a GUI WireGuard do GoLiveBypass para Windows ou Linux.',
+  description: 'Baixe a GUI WireGuard do GoLiveBypass pela release estável mais recente para Windows, macOS ou Linux.',
   ogTitle: 'Downloads — GoLiveBypass',
-  ogDescription: 'Escolha a GUI ou copie o comando de instalação para a sua plataforma.',
+  ogDescription: 'Downloads estáveis sempre apontando para a release atual do GoLiveBypass.',
   ogUrl: 'https://golivebypass.dev/downloads',
 })
 
 const selectedPlatform = ref<Platform>('windows')
-const commandPlatform = ref<Platform>('windows')
-
-const activeTerminalCommands = computed(() => terminalCommands[commandPlatform.value === 'linux' ? 'linux' : 'windows'])
 
 onMounted(() => {
   const userAgent = navigator.userAgent.toLowerCase()
-  if (userAgent.includes('mac')) {
-    selectedPlatform.value = 'macos'
-    commandPlatform.value = 'macos'
-  }
-  if (userAgent.includes('linux')) {
-    selectedPlatform.value = 'linux'
-    commandPlatform.value = 'linux'
-  }
+  if (userAgent.includes('mac')) selectedPlatform.value = 'macos'
+  if (userAgent.includes('linux')) selectedPlatform.value = 'linux'
 })
 </script>
 
@@ -34,17 +31,17 @@ onMounted(() => {
   <div class="page-wrap site-container">
     <PageIntro
       eyebrow="BAIXAR O PROJETO"
-      title="Escolha a ferramenta para a sua máquina."
-      description="A GUI vem diretamente da release do GitHub. Para terminal, standalone e plugin, copie o comando oficial correspondente ao seu sistema."
+      title="A release estável mais recente, sempre aqui."
+      description="A página consulta o catálogo GoLiveBypass e mantém os botões apontando para a versão estável atual. O fallback local existe apenas para a primeira renderização ou uma indisponibilidade temporária."
     />
 
     <section id="gui" class="release-banner reveal reveal--first">
       <div class="release-banner__copy">
-        <span class="release-banner__label"><span class="status-dot" aria-hidden="true"></span> Release estável</span>
-        <h2>GoLiveBypass <code>v{{ release.version }}</code></h2>
-        <p>A GUI 2.0.0 é a única variante disponível nesta release.</p>
+        <span class="release-banner__label"><span class="status-dot" aria-hidden="true"></span> Release estável · {{ releaseStateLabel }}</span>
+        <h2>GoLiveBypass <code>v{{ catalog.version }}</code></h2>
+        <p>Canal stable. Os downloads usam aliases da API e resolvem o asset atual no momento do clique.</p>
       </div>
-      <a class="text-link" :href="githubReleasePageUrl" target="_blank" rel="noopener noreferrer">
+      <a class="text-link" :href="catalog.pageUrl" target="_blank" rel="noopener noreferrer">
         Ver release no GitHub
         <BaseIcon name="external" :size="16" />
       </a>
@@ -53,10 +50,10 @@ onMounted(() => {
     <section class="section section--page-section reveal reveal--second" aria-labelledby="gui-title">
       <div class="section-heading section-heading--compact">
         <div>
-          <span class="eyebrow">INTERFACE GRÁFICA</span>
-          <h2 id="gui-title">Baixe a GUI</h2>
+          <span class="eyebrow">INTERFACE GRÁFICA · V2</span>
+          <h2 id="gui-title">Baixe a GUI WireGuard</h2>
         </div>
-        <p>Escolhemos uma sugestão com base no seu navegador. Windows e Linux estão disponíveis.</p>
+        <p>Escolha o instalador do seu sistema. A GUI roteia somente o Discord e mantém o restante do computador na rede normal.</p>
       </div>
 
       <PlatformTabs v-model="selectedPlatform" />
@@ -66,24 +63,36 @@ onMounted(() => {
           icon="windows"
           kicker="WINDOWS"
           title="Aplicativo para Windows"
-          description="Abra o executável, escolha a configuração e deixe a GUI cuidar da ativação do Discord."
-          :meta="`GoLiveBypass-${release.version}.exe · release ${release.channel}`"
+          description="A GUI usa WireSock para criar o túnel por aplicativo e oferece Proton Otimizado ou arquivo .conf."
+          :meta="`${asset('windows')?.name ?? `GoLiveBypass-${catalog.version}.exe`} · canal ${catalog.channel}`"
           primary-label="Baixar para Windows"
-          :primary-href="downloads.windowsGui"
+          :primary-href="asset('windows') ? downloadUrl('windows') : undefined"
           secondary-label="Abrir release"
-          :secondary-href="githubReleasePageUrl"
+          :secondary-href="catalog.pageUrl"
           tone="success"
         />
         <div class="platform-note">
           <BaseIcon name="alert" :size="17" />
-          <p>O Windows pode exibir um aviso do SmartScreen na primeira abertura. A release também está disponível no GitHub para conferência.</p>
+          <p>O Windows pode exibir um aviso do SmartScreen na primeira abertura. Confira a assinatura e o hash na página da release se precisar validar o arquivo.</p>
         </div>
       </div>
 
       <div v-else-if="selectedPlatform === 'macos'" id="platform-panel-macos" class="platform-panel" role="tabpanel" aria-labelledby="platform-tab-macos">
+        <DownloadCard
+          icon="apple"
+          kicker="MACOS"
+          title="Aplicativo para macOS"
+          description="Baixe o pacote DMG da release estável. O ZIP alternativo fica disponível no segundo botão."
+          :meta="`${asset('mac-dmg')?.name ?? 'GoLiveBypass.dmg'} · canal ${catalog.channel}`"
+          primary-label="Baixar DMG"
+          :primary-href="asset('mac-dmg') ? downloadUrl('mac-dmg') : undefined"
+          secondary-label="Baixar ZIP"
+          :secondary-href="asset('mac-zip') ? downloadUrl('mac-zip') : undefined"
+          tone="success"
+        />
         <div class="platform-note">
           <BaseIcon name="lock" :size="17" />
-          <p>macOS está temporariamente indisponível. A 2.0.0 não usa injeção nem PAC.</p>
+          <p>Se o pacote não estiver no catálogo da release atual, a própria página mostra o botão indisponível em vez de apontar para um arquivo antigo.</p>
         </div>
       </div>
 
@@ -92,51 +101,60 @@ onMounted(() => {
           icon="linux"
           kicker="LINUX"
           title="AppImage para Linux"
-          description="Um arquivo portátil para Debian, Ubuntu, Fedora, Arch e outras distribuições compatíveis."
-          :meta="`GoLiveBypass-${release.version}.AppImage · release ${release.channel}`"
+          description="Um arquivo portátil para distribuições desktop compatíveis com Electron."
+          :meta="`${asset('linux')?.name ?? `GoLiveBypass-${catalog.version}.AppImage`} · canal ${catalog.channel}`"
           primary-label="Baixar AppImage"
-          :primary-href="downloads.linuxGui"
+          :primary-href="asset('linux') ? downloadUrl('linux') : undefined"
           secondary-label="Ver instruções"
           secondary-href="/instalacao#gui-linux"
         />
         <div class="platform-note">
           <BaseIcon name="terminal" :size="17" />
-          <p>Depois do download, dê permissão de execução com <code>chmod +x GoLiveBypass-*.AppImage</code>.</p>
+          <p>Depois do download, dê permissão de execução com <code>chmod +x GoLiveBypass-*.AppImage</code>. O helper Linux cuida do isolamento aplicável ao processo.</p>
         </div>
       </div>
     </section>
 
-    <section class="section section--page-section reveal reveal--third" aria-labelledby="command-title">
+    <section id="compatibilidade" class="section section--page-section reveal reveal--third" aria-labelledby="compatibility-title">
       <div class="section-heading">
         <div>
-          <span class="eyebrow">INSTALAÇÃO POR COMANDO</span>
-          <h2 id="command-title">Copie e cole no terminal.</h2>
+          <span class="eyebrow">CAMINHOS COMPLEMENTARES</span>
+          <h2 id="compatibility-title">Plugin atual e legado separados.</h2>
         </div>
-        <p>Os instaladores de terminal, standalone e plugin estão temporariamente fora de serviço.</p>
+        <p>Esses arquivos não alteram o download principal da GUI. Use-os somente se você já conhece o caminho correspondente.</p>
       </div>
 
-      <div class="info-note command-platform-unavailable" role="status">
-        <span class="icon-frame icon-frame--muted"><BaseIcon name="apple" :size="18" /></span>
-        <div>
-          <strong>Use a GUI 2.0.0.</strong>
-          <p>Plugin, standalone e instaladores de terminal estão pausados durante a portabilidade para WireGuard.</p>
-        </div>
-      </div>
-
-      <div class="command-section-footnote">
-        <span class="icon-frame icon-frame--muted"><BaseIcon name="lock" :size="17" /></span>
-        <div>
-          <strong>O comando roda os scripts oficiais do repositório.</strong>
-          <p>Não execute os scripts antigos; eles não fazem parte da release 2.0.0.</p>
-        </div>
+      <div class="download-grid">
+        <DownloadCard
+          icon="layers"
+          kicker="WINDOWS X64 · MOD"
+          title="Plugin Vencord / Equicord"
+          description="Transporte WireGuard autônomo para quem já usa um mod compatível. Não compartilha estado com a GUI."
+          :meta="`${asset('plugin')?.name ?? 'goLiveBypass-vencord.zip'} · canal ${catalog.channel}`"
+          primary-label="Baixar plugin"
+          :primary-href="asset('plugin') ? downloadUrl('plugin') : undefined"
+          secondary-label="Abrir release"
+          :secondary-href="catalog.pageUrl"
+        />
+        <DownloadCard
+          icon="code"
+          kicker="LEGADO"
+          title="Standalone"
+          description="Caminho histórico mantido para compatibilidade. Não confunda este arquivo com a arquitetura WireGuard por aplicativo da GUI v2."
+          :meta="`${asset('standalone')?.name ?? `GoLiveBypass-${catalog.version}-bypass.js`} · canal ${catalog.channel}`"
+          primary-label="Baixar standalone"
+          :primary-href="asset('standalone') ? downloadUrl('standalone') : undefined"
+          secondary-label="Ler instalação"
+          secondary-href="/instalacao#legado"
+        />
       </div>
     </section>
 
     <section class="info-note reveal reveal--third">
-      <span class="icon-frame icon-frame--muted"><BaseIcon name="lock" :size="18" /></span>
+      <span class="icon-frame icon-frame--muted"><BaseIcon name="refresh" :size="18" /></span>
       <div>
-        <strong>Links e comandos sem API do GitHub</strong>
-        <p>A página usa links estáticos para a release e para os scripts oficiais. Se uma versão mudar, a tag, os assets e os comandos ficam centralizados nos arquivos de dados do site.</p>
+        <strong>Sincronização automática</strong>
+        <p>A API consulta apenas a última release estável do GitHub, rejeita prereleases e guarda a última resposta válida por cinco minutos. Uma publicação estável invalida o cache pelo webhook.</p>
       </div>
     </section>
 

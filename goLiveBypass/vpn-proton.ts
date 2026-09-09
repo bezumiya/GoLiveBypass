@@ -2,10 +2,10 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { spawn } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import { StringDecoder } from "string_decoder";
 
-import { safeDiagnosticDetail } from "./vpn-types";
+import { normalizeProtonUsername, protonUsernamesMatch, safeDiagnosticDetail } from "./vpn-types";
 
 export type ProtonLoginErrorCode =
     | "INVALID_CREDENTIALS"
@@ -14,6 +14,7 @@ export type ProtonLoginErrorCode =
     | "CAPTCHA_REQUIRED"
     | "CAPTCHA_INVALID"
     | "CAPTCHA_CANCELLED"
+    | "CANCELLED"
     | "NETWORK_ERROR"
     | "TIMEOUT"
     | "MISSING_EXECUTABLE"
@@ -21,7 +22,7 @@ export type ProtonLoginErrorCode =
     | "CONFIGURATION_ERROR"
     | "UNKNOWN";
 
-export type ProtonSessionCheckCode = "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "UNKNOWN";
+export type ProtonSessionCheckCode = "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "SESSION_PERSISTENCE" | "UNKNOWN";
 
 export interface ProtonSessionCheckResult {
     valid: boolean;
@@ -86,6 +87,7 @@ export interface ProtonOptimizationResult {
 export interface RunConfgenOptions {
     args: string[];
     exePath?: string;
+    stdin?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
     onProgress?: (progress: ProtonOptimizationProgress) => void;
@@ -102,7 +104,11 @@ export interface ConfgenResult {
 export const MEASUREMENT_CRITERION_VERSION = 5;
 const MAX_STDOUT_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 512 * 1024;
+const MAX_PROTON_USERNAME_LENGTH = 320;
 const GENERIC_PLAN_ERROR = "Não foi possível confirmar o plano Proton.";
+const ACCOUNT_MISMATCH_ERROR = "A resposta do Proton não corresponde ao usuário solicitado.";
+const LOGIN_CANCELLED_ERROR = "O login Proton foi cancelado.";
+const SESSION_TEMP_FILE_RE = /^\.protonvpn-session-[A-Za-z0-9]+\.tmp$/;
 
 function logError(error: unknown): string {
     return safeDiagnosticDetail(error, 500);
@@ -112,6 +118,39 @@ function abortError(): Error {
     const error = new Error("Operação Proton cancelada.");
     error.name = "AbortError";
     return error;
+}
+
+const protonLoginQueues = new Map<string, Promise<void>>();
+const protonLoginGenerations = new Map<string, number>();
+const activeProtonLogins = new Map<string, AbortController>();
+
+function dataDirKey(dataDir: string): string {
+    const resolved = path.resolve(dataDir);
+    try { return fs.realpathSync(resolved); } catch { return resolved; }
+}
+
+function cancelledLoginResult(): ProtonLoginResult {
+    return { success: false, code: "CANCELLED", message: LOGIN_CANCELLED_ERROR, error: LOGIN_CANCELLED_ERROR, retryable: true };
+}
+
+function usernamesMatch(expected: string, actual: string): boolean {
+    return protonUsernamesMatch(expected, actual);
+}
+
+async function withProtonLoginLock<T>(dataDir: string, operation: () => Promise<T>): Promise<T> {
+    const key = dataDirKey(dataDir);
+    const previous = protonLoginQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const queued = previous.catch(() => undefined).then(() => gate);
+    protonLoginQueues.set(key, queued);
+    await previous.catch(() => undefined);
+    try {
+        return await operation();
+    } finally {
+        release();
+        if (protonLoginQueues.get(key) === queued) protonLoginQueues.delete(key);
+    }
 }
 
 function candidatePaths(): string[] {
@@ -130,10 +169,27 @@ function candidatePaths(): string[] {
     return [...new Set(candidates.map(value => path.resolve(value)))];
 }
 
+function isUsableConfgenExecutable(candidate: string): boolean {
+    try {
+        let current = path.resolve(candidate);
+        const root = path.parse(current).root;
+        while (current !== root) {
+            const info = fs.lstatSync(current);
+            if (info.isSymbolicLink()) return false;
+            current = path.dirname(current);
+        }
+        const stat = fs.lstatSync(candidate);
+        if (!stat.isFile() || stat.size <= 0) return false;
+        if (process.platform !== "win32") {
+            if ((stat.mode & 0o022) !== 0) return false;
+            fs.accessSync(candidate, fs.constants.X_OK);
+        }
+        return true;
+    } catch { return false; }
+}
+
 export function findProtonConfgenExe(): string {
-    const found = candidatePaths().find(candidate => {
-        try { return fs.existsSync(candidate) && fs.statSync(candidate).isFile(); } catch { return false; }
-    });
+    const found = candidatePaths().find(isUsableConfgenExecutable);
     if (!found) throw new Error("O executável proton-confgen não foi encontrado no pacote do plugin.");
     return found;
 }
@@ -175,7 +231,10 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
     return new Promise((resolve, reject) => {
         if (options.signal?.aborted) { reject(abortError()); return; }
         let executable: string;
-        try { executable = path.resolve(options.exePath || findProtonConfgenExe()); }
+        try {
+            executable = path.resolve(options.exePath || findProtonConfgenExe());
+            if (!isUsableConfgenExecutable(executable)) throw new Error("O executável proton-confgen não foi encontrado ou é inválido.");
+        }
         catch (error) { reject(error); return; }
 
         const timeoutMs = options.timeoutMs ?? 25_000;
@@ -187,7 +246,8 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
         let aborted = false;
         let terminationError: Error | undefined;
         let killTimer: ReturnType<typeof setTimeout> | undefined;
-        const decoder = new StringDecoder("utf8");
+        const stdoutDecoder = new StringDecoder("utf8");
+        const stderrDecoder = new StringDecoder("utf8");
 
         const emitProgress = (chunk: string) => {
             stderrBuffer = (stderrBuffer + chunk).slice(-MAX_STDERR_BYTES);
@@ -222,18 +282,28 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
         const abort = () => { aborted = true; kill(abortError()); };
         options.signal?.addEventListener("abort", abort, { once: true });
 
-        child.stdout.on("data", (chunk: Buffer) => { stdout = (stdout + chunk.toString()).slice(-MAX_STDOUT_BYTES); });
+        child.stdout.on("data", (chunk: Buffer) => { stdout = (stdout + stdoutDecoder.write(chunk)).slice(-MAX_STDOUT_BYTES); });
         child.stderr.on("data", (chunk: Buffer) => {
-            const text = decoder.write(chunk);
+            const text = stderrDecoder.write(chunk);
             stderr = (stderr + text).slice(-MAX_STDERR_BYTES);
             emitProgress(text);
         });
         child.once("error", error => { terminationError ??= error; });
+        child.stdin.on("error", error => {
+            if ((error as NodeJS.ErrnoException).code !== "EPIPE") terminationError ??= error;
+        });
+        if (options.stdin !== undefined) child.stdin.end(options.stdin, "utf8");
+        else child.stdin.end();
+        // The signal can be aborted after the initial check but before the
+        // listener is attached. Re-checking closes that small race window.
+        if (options.signal?.aborted) abort();
         child.once("close", code => {
             if (settled) return;
-            const tail = decoder.end();
-            stderr = (stderr + tail).slice(-MAX_STDERR_BYTES);
-            if (tail) emitProgress(`${tail}\n`);
+            const stdoutTail = stdoutDecoder.end();
+            const stderrTail = stderrDecoder.end();
+            stdout = (stdout + stdoutTail).slice(-MAX_STDOUT_BYTES);
+            stderr = (stderr + stderrTail).slice(-MAX_STDERR_BYTES);
+            if (stderrTail) emitProgress(`${stderrTail}\n`);
             clearTimeout(timer);
             clearTimeout(killTimer);
             options.signal?.removeEventListener("abort", abort);
@@ -248,34 +318,122 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
 }
 
 export function classifyProtonError(error: unknown, stderr = "", stdout = ""): { code: ProtonLoginErrorCode; message: string; retryable: boolean } {
+    const structured = classifyStructuredProtonCode(error);
+    if (structured) return structured;
     const raw = `${error instanceof Error ? error.message : String(error)} ${stderr} ${stdout}`.toLowerCase();
+    if (/captcha[_\s-]*(?:cancelled|canceled)|human verification.*cancel/.test(raw)) return { code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
     if (/captcha_invalid|captcha.*expired|human verification.*(invalid|expired)/.test(raw)) return { code: "CAPTCHA_INVALID", message: "A verificação de segurança expirou ou foi recusada.", retryable: true };
     if (/captcha_required|captcha verification required|human verification required|code 9001/.test(raw)) return { code: "CAPTCHA_REQUIRED", message: "O Proton solicitou uma verificação de segurança.", retryable: true };
-    if (/2fa_required|two.?factor|required.*2fa/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
-    if (/2fa|two.?factor|totp|verification code/.test(raw)) return { code: "TWO_FACTOR_INVALID", message: "O código 2FA está incorreto ou expirou.", retryable: false };
+    if (/\b9100\b/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
+    const mentionsTwoFactor = /(?:\b2fa\b|two[\s_-]*factor|totp|verification code)/.test(raw);
+    if (mentionsTwoFactor && /required|necessar|need(?:ed)?|exig/.test(raw)) return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
+    if (mentionsTwoFactor) return { code: "TWO_FACTOR_INVALID", message: "O código 2FA está incorreto ou expirou.", retryable: false };
     if (/invalid credential|invalid password|wrong password|authentication failed|incorrect/.test(raw)) return { code: "INVALID_CREDENTIALS", message: "Usuário ou senha incorretos.", retryable: false };
+    if (/eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
     if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", message: "O ProtonVPN demorou demais para responder.", retryable: true };
     if (/not found|enoent|spawn|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", message: "O componente ProtonVPN não foi encontrado nesta instalação.", retryable: false };
-    if (/network|connection|dns|tls|temporary|unreachable|reset/.test(raw)) return { code: "NETWORK_ERROR", message: "Não foi possível conectar aos servidores ProtonVPN.", retryable: true };
+    if (/network|connection|dns|tls|temporar|unreachable|reset/.test(raw)) return { code: "NETWORK_ERROR", message: "Não foi possível conectar aos servidores ProtonVPN.", retryable: true };
     return { code: "UNKNOWN", message: "Não foi possível concluir a operação ProtonVPN.", retryable: true };
 }
 
+function classifyStructuredProtonCode(value: unknown): { code: ProtonLoginErrorCode; message: string; retryable: boolean } | null {
+    if (typeof value !== "string") return null;
+    switch (value.trim().toUpperCase()) {
+        case "CAPTCHA_REQUIRED": return { code: "CAPTCHA_REQUIRED", message: "O Proton solicitou uma verificação de segurança.", retryable: true };
+        case "CAPTCHA_INVALID": return { code: "CAPTCHA_INVALID", message: "A verificação de segurança expirou ou foi recusada.", retryable: true };
+        case "CAPTCHA_CANCELLED": return { code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
+        case "TWO_FACTOR_REQUIRED": return { code: "TWO_FACTOR_REQUIRED", message: "Esta conta exige autenticação em duas etapas.", retryable: false };
+        case "TWO_FACTOR_INVALID": return { code: "TWO_FACTOR_INVALID", message: "O código 2FA está incorreto ou expirou.", retryable: false };
+        case "INVALID_CREDENTIALS": return { code: "INVALID_CREDENTIALS", message: "Usuário ou senha incorretos.", retryable: false };
+        case "NETWORK_ERROR": return { code: "NETWORK_ERROR", message: "Não foi possível conectar aos servidores ProtonVPN.", retryable: true };
+        case "TIMEOUT": return { code: "TIMEOUT", message: "O ProtonVPN demorou demais para responder.", retryable: true };
+        case "MISSING_EXECUTABLE": return { code: "MISSING_EXECUTABLE", message: "O componente ProtonVPN não foi encontrado nesta instalação.", retryable: false };
+        case "SESSION_PERSISTENCE": return { code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
+        case "CONFIGURATION_ERROR": return { code: "CONFIGURATION_ERROR", message: "A configuração da conta Proton está incompleta.", retryable: false };
+        case "UNKNOWN": return { code: "UNKNOWN", message: "Não foi possível concluir a operação ProtonVPN.", retryable: true };
+        default: return null;
+    }
+}
+
 export function protonSessionFile(dataDir: string): string {
-    return path.join(dataDir, "proton-session.json");
+    return path.join(path.resolve(dataDir), "proton-session.json");
+}
+
+function temporaryProtonSessionFile(dataDir: string): string {
+    // O helper pode ser cancelado ou retornar um desafio CAPTCHA antes de
+    // concluir. Uma sessão em staging impede que essas tentativas toquem na
+    // sessão canônica que ainda pode ser válida.
+    return path.join(path.resolve(dataDir), `.protonvpn-session-${randomUUID().replaceAll("-", "")}.tmp`);
+}
+
+function commitProtonSessionFile(staging: string, target: string): boolean {
+    try {
+        const info = fs.lstatSync(staging);
+        if (!info.isFile() || info.isSymbolicLink() || info.size <= 0) return false;
+        // rename é a troca atômica no mesmo diretório; no Windows o runtime
+        // usa MoveFileEx com substituição do arquivo de destino.
+        fs.renameSync(staging, target);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function cleanupSessionTempFiles(dataDir: string): boolean {
+    const resolved = path.resolve(dataDir);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(resolved); }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    let ok = true;
+    try {
+        for (const entry of fs.readdirSync(resolved, { withFileTypes: true })) {
+            if (!SESSION_TEMP_FILE_RE.test(entry.name)) continue;
+            if (entry.isDirectory() && !entry.isSymbolicLink()) continue;
+            try { fs.rmSync(path.join(resolved, entry.name), { force: true }); }
+            catch { ok = false; }
+        }
+    } catch { return false; }
+    return ok;
+}
+
+function deleteSessionArtifacts(dataDir: string): boolean {
+    const resolved = path.resolve(dataDir);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(resolved); }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    try {
+        fs.rmSync(protonSessionFile(resolved), { force: true });
+        return cleanupSessionTempFiles(resolved);
+    } catch { return false; }
 }
 
 export function savedSessionUsername(dataDir: string): string {
-    try {
-        const value = JSON.parse(fs.readFileSync(protonSessionFile(dataDir), "utf8")) as { username?: unknown };
-        return typeof value.username === "string" ? value.username.trim() : "";
-    } catch { return ""; }
+	try {
+		// This function is intentionally synchronous because it is used while the
+		// main process builds controller settings. Keep the synchronous path
+		// limited to the username-only helper command; it never validates a
+		// session over the network and never returns tokens.
+		const executable = path.resolve(findProtonConfgenExe());
+		const stdout = execFileSync(executable, ["-session-file", protonSessionFile(dataDir), "-session-username", "-json"], {
+			windowsHide: true,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 5_000,
+		});
+		const value = parseConfgenJson(stdout);
+		if (value?.success !== true || typeof value.username !== "string" || value.username.length > MAX_PROTON_USERNAME_LENGTH) return "";
+		return normalizeProtonUsername(value.username);
+	} catch { return ""; }
 }
 
 function sessionCheckFailure(rawValue: unknown): { code: ProtonSessionCheckCode; error: string } {
     const raw = safeDiagnosticDetail(rawValue, 600).toLowerCase();
     if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", error: "A verificação da sessão Proton demorou demais." };
     if (/not found|enoent|spawn|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", error: "O componente ProtonVPN não foi encontrado nesta instalação." };
-    if (/network|connection|dns|tls|temporary|unreachable|reset/.test(raw)) return { code: "NETWORK_ERROR", error: "Não foi possível verificar a sessão Proton por causa da rede." };
+    if (/eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+    if (/network|connection|dns|tls|temporar|unreachable|reset|servidor|rede/.test(raw)) return { code: "NETWORK_ERROR", error: "Não foi possível verificar a sessão Proton por causa da rede." };
     if (/invalid|expired|session|token|unauthori[sz]ed|authentication/.test(raw)) return { code: "INVALID_SESSION", error: "A sessão Proton está inválida ou expirada." };
     return { code: "UNKNOWN", error: "Não foi possível verificar a sessão Proton." };
 }
@@ -285,30 +443,62 @@ export function parseCaptchaUrl(rawUrl: string): { url: string; challenge: strin
         const parsed = new URL(rawUrl);
         const challenge = parsed.searchParams.get("Token")?.trim() || "";
         const host = parsed.hostname.toLowerCase();
-        if (parsed.protocol !== "https:" || !(host === "proton.me" || host.endsWith(".proton.me"))) return null;
+        if (parsed.protocol !== "https:" || parsed.port !== "" || parsed.username || parsed.password || host !== "vpn-api.proton.me") return null;
+        if (parsed.searchParams.getAll("Token").length !== 1) return null;
         if (parsed.pathname !== "/core/v4/captcha" || challenge.length < 3 || challenge.length > 4096) return null;
-        parsed.hash = "";
-        return { url: parsed.toString(), challenge, origin: parsed.origin };
+        if (/[\u0000-\u001f\u007f]/.test(challenge)) return null;
+        const clean = new URL("/core/v4/captcha", parsed.origin);
+        clean.searchParams.set("Token", challenge);
+        return { url: clean.toString(), challenge, origin: clean.origin };
     } catch { return null; }
 }
 
 export function validateCaptchaResponse(value: unknown, challenge: string): value is string {
     if (typeof value !== "string") return false;
     const token = value.trim();
-    if (token.length < 3 || token.length > 16_384 || !challenge || challenge.length > 4096) return false;
+    if (token.length < 3 || token.length > 16_384 || !challenge || challenge.length > 4096 || /[\r\n]/.test(challenge) || token !== value) return false;
     return token.startsWith(`${challenge}:`) && token.length > challenge.length + 1 && !/[\r\n]/.test(token);
 }
 
 function ensureDataDir(dataDir: string): void {
-    fs.mkdirSync(dataDir, { recursive: true });
+    const resolved = path.resolve(dataDir);
+    let ancestor = resolved;
+    const root = path.parse(ancestor).root;
+    while (ancestor !== root) {
+        try {
+            if (fs.lstatSync(ancestor).isSymbolicLink()) throw new Error("A pasta privada da sessão Proton não pode conter links simbólicos.");
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        ancestor = path.dirname(ancestor);
+    }
+    try {
+        const directoryInfo = fs.lstatSync(resolved);
+        if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) throw new Error("A pasta privada da sessão Proton não é um diretório regular.");
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+    }
+    const directoryInfo = fs.lstatSync(resolved);
+    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) throw new Error("A pasta privada da sessão Proton não é um diretório regular.");
+    if (process.platform !== "win32") fs.chmodSync(resolved, 0o700);
 }
 
 export async function checkProtonSession(dataDir: string, username: string): Promise<ProtonSessionCheckResult> {
-    if (!username.trim()) return { valid: false, error: "Usuário Proton não especificado." };
-    ensureDataDir(dataDir);
+    const requestedUsername = normalizeProtonUsername(username);
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { valid: false, error: "Usuário Proton não especificado." };
     try {
-        const result = await runConfgen({ args: ["-username", username.trim(), "-session-file", protonSessionFile(dataDir), "-check-session", "-json"] });
-        if (result.json?.valid === true) return { valid: true, username: typeof result.json.username === "string" ? result.json.username : username.trim(), expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
+        ensureDataDir(dataDir);
+    } catch {
+        return { valid: false, code: "SESSION_PERSISTENCE", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+    }
+    try {
+        const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", protonSessionFile(dataDir), "-check-session", "-json"] });
+        if (result.code === 0 && result.json?.valid === true) {
+            const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
+            if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { valid: false, code: "UNKNOWN", error: ACCOUNT_MISMATCH_ERROR };
+            return { valid: true, username: returnedUsername, expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
+        }
         const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.");
         return { valid: false, ...failure };
     } catch (error) {
@@ -326,10 +516,11 @@ export function normalizeProtonPlan(value: unknown): ProtonPlanResult {
 }
 
 export async function getProtonPlan(dataDir: string, username: string, log?: RunConfgenOptions["log"]): Promise<ProtonPlanResult> {
-    if (!username.trim()) return { success: false, status: "unknown", error: "Sessão Proton não encontrada." };
-    ensureDataDir(dataDir);
+    const requestedUsername = normalizeProtonUsername(username);
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, status: "unknown", error: "Sessão Proton não encontrada." };
     try {
-        const result = await runConfgen({ args: ["-username", username.trim(), "-session-file", protonSessionFile(dataDir), "-check-plan", "-json"], timeoutMs: 10_000, log });
+        ensureDataDir(dataDir);
+        const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", protonSessionFile(dataDir), "-check-plan", "-json"], timeoutMs: 10_000, log });
         return result.code === 0 ? normalizeProtonPlan(result.json) : { success: false, status: "unknown", error: GENERIC_PLAN_ERROR };
     } catch (error) {
         log?.("warn", "falha ao consultar plano Proton", { erro: logError(error) });
@@ -345,26 +536,60 @@ export async function loginProton(
     humanVerificationToken?: string,
     log?: RunConfgenOptions["log"],
 ): Promise<ProtonLoginResult> {
-    if (!username.trim()) return { success: false, code: "CONFIGURATION_ERROR", message: "Informe o usuário Proton.", retryable: false };
-    ensureDataDir(dataDir);
-    const args = ["-username", username.trim(), "-session-file", protonSessionFile(dataDir), "-login-only", "-json"];
-    if (password) args.push("-password", password);
-    if (twoFactorCode) args.push("-2fa", twoFactorCode);
-    if (humanVerificationToken) args.push("-hv-token", humanVerificationToken);
-    try {
-        const result = await runConfgen({ args, timeoutMs: 25_000, log });
-        if (result.json?.success === true) return { success: true, username: typeof result.json.username === "string" ? result.json.username.trim() : username.trim(), message: "Autenticação Proton concluída." };
-        const code = result.json?.code;
-        if (code === "CAPTCHA_REQUIRED" || code === "CAPTCHA_INVALID") {
-            return { success: false, code, message: typeof result.json?.error === "string" ? result.json.error : "O Proton solicitou uma verificação de segurança.", retryable: result.json?.retryable !== false, captchaUrl: typeof result.json?.captchaUrl === "string" ? parseCaptchaUrl(result.json.captchaUrl)?.url : undefined };
+    const requestedUsername = normalizeProtonUsername(username);
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, code: "CONFIGURATION_ERROR", message: "Informe o usuário Proton.", retryable: false };
+    if (typeof password !== "string" || password.length === 0) return { success: false, code: "CONFIGURATION_ERROR", message: "Informe a senha Proton.", retryable: false };
+    const key = dataDirKey(dataDir);
+    const generation = protonLoginGenerations.get(key) ?? 0;
+    return withProtonLoginLock(dataDir, async () => {
+        if ((protonLoginGenerations.get(key) ?? 0) !== generation) return cancelledLoginResult();
+        try {
+            ensureDataDir(dataDir);
+        } catch {
+            return { success: false, code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", error: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
         }
-        const classified = classifyProtonError(result.json?.error || result.stderr || result.stdout);
-        return { success: false, ...classified, error: classified.message };
-    } catch (error) {
-        const classified = classifyProtonError(error);
-        log?.("error", "falha ao executar login Proton", { codigo: classified.code, erro: logError(error) });
-        return { success: false, ...classified, error: classified.message };
-    }
+        const controller = new AbortController();
+        activeProtonLogins.set(key, controller);
+        const stagedSessionFile = temporaryProtonSessionFile(dataDir);
+        const args = ["-username", requestedUsername, "-session-file", stagedSessionFile, "-login-only", "-json", "-stdin-secrets"];
+        const stdin = `${JSON.stringify({
+            password,
+            twoFactorCode: twoFactorCode ?? "",
+            humanVerificationToken: humanVerificationToken ?? "",
+        })}\n`;
+        try {
+            const result = await runConfgen({ args, stdin, timeoutMs: 25_000, signal: controller.signal, log });
+            if ((protonLoginGenerations.get(key) ?? 0) !== generation) {
+                return cancelledLoginResult();
+            }
+            const structured = classifyStructuredProtonCode(result.json?.code);
+            if (structured) {
+                const captchaUrl = (structured.code === "CAPTCHA_REQUIRED" || structured.code === "CAPTCHA_INVALID") && typeof result.json?.captchaUrl === "string"
+                    ? parseCaptchaUrl(result.json.captchaUrl)?.url
+                    : undefined;
+                return { success: false, ...structured, error: structured.message, captchaUrl };
+            }
+            if (result.code === 0 && result.json?.success === true) {
+                const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
+                if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { success: false, code: "UNKNOWN", message: ACCOUNT_MISMATCH_ERROR, error: ACCOUNT_MISMATCH_ERROR, retryable: false };
+                if (!commitProtonSessionFile(stagedSessionFile, protonSessionFile(dataDir))) return { success: false, code: "SESSION_PERSISTENCE", message: "A autenticação terminou, mas não foi possível salvar a sessão Proton.", error: "A autenticação terminou, mas não foi possível salvar a sessão Proton.", retryable: true };
+                return { success: true, username: returnedUsername, message: "Autenticação Proton concluída." };
+            }
+            const detail = [result.json?.code, result.json?.error, result.stderr, result.stdout].filter(value => typeof value === "string" && value.length > 0).join(" ");
+            const classified = classifyProtonError(detail);
+            return { success: false, ...classified, error: classified.message };
+        } catch (error) {
+            if (controller.signal.aborted) {
+                return cancelledLoginResult();
+            }
+            const classified = classifyProtonError(error);
+            log?.("error", "falha ao executar login Proton", { codigo: classified.code, erro: logError(error) });
+            return { success: false, ...classified, error: classified.message };
+        } finally {
+            if (activeProtonLogins.get(key) === controller) activeProtonLogins.delete(key);
+            cleanupSessionTempFiles(dataDir);
+        }
+    });
 }
 
 function finitePositive(value: unknown): value is number {
@@ -384,11 +609,16 @@ export async function generateOptimalProtonConfig(
         log?: RunConfgenOptions["log"];
     },
 ): Promise<ProtonOptimizationResult> {
-    if (!options.username.trim()) return { success: false, error: "Sessão Proton não encontrada." };
-    ensureDataDir(dataDir);
+    const requestedUsername = normalizeProtonUsername(options.username);
+    if (!requestedUsername || requestedUsername.length > MAX_PROTON_USERNAME_LENGTH) return { success: false, error: "Sessão Proton não encontrada." };
+    try {
+        ensureDataDir(dataDir);
+    } catch {
+        return { success: false, error: "Não foi possível acessar o armazenamento local da sessão Proton." };
+    }
     const output = path.join(dataDir, "wireguard.conf");
     const staging = path.join(dataDir, `.wireguard.conf.${randomUUID()}.tmp`);
-    const args = ["-username", options.username.trim(), "-session-file", protonSessionFile(dataDir), "-output", staging, "-json", "-ipv6", "-exclude-countries", "BR"];
+    const args = ["-username", requestedUsername, "-session-file", protonSessionFile(dataDir), "-output", staging, "-json", "-ipv6", "-exclude-countries", "BR"];
     if (options.autoPing !== false) args.push("-auto-ping");
     if (options.speedTest) args.push("-speed-test", "-progress-json");
     if (options.freeOnly !== false) args.push("-free-only");
@@ -426,6 +656,7 @@ export async function generateOptimalProtonConfig(
         return { success: false, error: logError(error) };
     } finally {
         try { fs.rmSync(staging, { force: true }); } catch {}
+        cleanupSessionTempFiles(dataDir);
     }
 }
 
@@ -447,8 +678,14 @@ export async function runIsolatedSpeedSelection(
 }
 
 export function removeProtonSession(dataDir: string): boolean {
-    try {
-        fs.rmSync(protonSessionFile(dataDir), { force: true });
-        return true;
-    } catch { return false; }
+    cancelProtonLogin(dataDir);
+    return deleteSessionArtifacts(dataDir);
+}
+
+export function cancelProtonLogin(dataDir: string): boolean {
+    const key = dataDirKey(dataDir);
+    protonLoginGenerations.set(key, (protonLoginGenerations.get(key) ?? 0) + 1);
+    const active = activeProtonLogins.get(key);
+    active?.abort();
+    return Boolean(active);
 }

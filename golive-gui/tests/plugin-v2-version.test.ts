@@ -19,7 +19,7 @@ describe("linha major v2 do plugin", () => {
     const native = read("native.ts");
     expect(native).toContain("release.prerelease === true");
     expect(native).toContain("nenhum release estável disponível");
-    expect(native).toContain("compareUpdateVersion(PLUGIN_VERSION, release.version)");
+    expect(native).toContain("compareUpdateVersion(currentVersion, release.version)");
   });
 
   it("mantém beta.1 e beta-1 equivalentes na ordenação do plugin", () => {

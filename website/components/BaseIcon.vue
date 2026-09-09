@@ -4,6 +4,8 @@ export type IconName =
   | 'apple'
   | 'arrow-right'
   | 'book'
+  | 'bug'
+  | 'bolt'
   | 'check'
   | 'chevron-down'
   | 'code'
@@ -11,6 +13,7 @@ export type IconName =
   | 'discord'
   | 'download'
   | 'external'
+  | 'file'
   | 'github'
   | 'layers'
   | 'linux'
@@ -27,6 +30,8 @@ export type IconName =
   | 'terminal'
   | 'windows'
   | 'x'
+  | 'settings'
+  | 'upload'
 
 withDefaults(
   defineProps<{
@@ -71,6 +76,13 @@ withDefaults(
       <path d="M4 5.5v16" />
       <path d="M8 7h8M8 11h7" />
     </template>
+    <template v-else-if="name === 'bug'">
+      <path d="M9 8.5h6a3 3 0 0 1 3 3v3.2a5 5 0 0 1-5 5.3h-2a5 5 0 0 1-5-5.3v-3.2a3 3 0 0 1 3-3Z" />
+      <path d="M9 8.5 8 5.8M15 8.5l1-2.7M5 12H2.5M21.5 12H19M6 16l-2 1.5M18 16l2 1.5M10 5.5V3M14 5.5V3" />
+    </template>
+    <template v-else-if="name === 'bolt'">
+      <path d="m13.5 2-8 11h6l-1 9 8-12h-6l1-8Z" />
+    </template>
     <template v-else-if="name === 'check'">
       <path d="m4.5 12.5 5 5L19.5 7" />
     </template>
@@ -96,6 +108,10 @@ withDefaults(
       <path d="M14 4h6v6" />
       <path d="m20 4-9 9" />
       <path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </template>
+    <template v-else-if="name === 'file'">
+      <path d="M6 3h8l4 4v14H6z" />
+      <path d="M14 3v5h4M9 13h6M9 17h6" />
     </template>
     <template v-else-if="name === 'github'">
       <path fill="currentColor" stroke="none" d="M12 2.3a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.9c-2.8.6-3.4-1.2-3.4-1.2-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 0 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.7.3-1.1.6-1.4-2.2-.2-4.5-1.1-4.5-4.9 0-1.1.4-1.9 1-2.6-.1-.2-.4-1.2.1-2.5 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 4.9 0c1.9-1.3 2.7-1 2.7-1 .5 1.3.2 2.3.1 2.5.6.7 1 1.5 1 2.6 0 3.8-2.3 4.7-4.5 4.9.4.3.7 1 .7 1.9v2.8c0 .3.2.6.7.5A10 10 0 0 0 12 2.3Z" />
@@ -143,6 +159,13 @@ withDefaults(
     <template v-else-if="name === 'sun'">
       <circle cx="12" cy="12" r="4" />
       <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </template>
+    <template v-else-if="name === 'settings'">
+      <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+      <path d="m19.4 15 .1.1a1.7 1.7 0 0 1-2.4 2.4l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a1.7 1.7 0 0 1-3.4 0v-.2a1.7 1.7 0 0 0-2.9-1.2l-.1.1a1.7 1.7 0 0 1-2.4-2.4l.1-.1a1.7 1.7 0 0 0-1.2-2.9h-.2a1.7 1.7 0 0 1 0-3.4h.2a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a1.7 1.7 0 0 1 2.4-2.4l.1.1a1.7 1.7 0 0 0 2.9-1.2V2a1.7 1.7 0 0 1 3.4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a1.7 1.7 0 0 1 2.4 2.4l-.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a1.7 1.7 0 0 1 0 3.4h-.2a1.7 1.7 0 0 0-1.2 2.9Z" />
+    </template>
+    <template v-else-if="name === 'upload'">
+      <path d="M12 16V4M7 9l5-5 5 5M5 20h14" />
     </template>
     <template v-else-if="name === 'terminal'">
       <path d="m5 7 5 5-5 5M13 17h6" />

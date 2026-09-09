@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ type Config struct {
 	GitHubToken         string
 	GitHubWebhookSecret string
 	GitHubRepo          string
+	WebsiteOrigins      []string
 	Labels              []string
 	Port                string
 	BasePath            string
@@ -27,6 +29,7 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		GitHubRepo:      getenv("GITHUB_REPO", "bezumiya/GoLiveBypass"),
+		WebsiteOrigins:  splitCSV(getenv("WEBSITE_ORIGINS", "https://golivebypass.dev,http://localhost:3000,http://127.0.0.1:3000")),
 		Port:            getenv("PORT", "8080"),
 		RateLimitPerMin: getenvFloat("RATE_LIMIT", 10),
 		BlockSeconds:    getenvInt("BLOCK_SECONDS", 300),
@@ -49,6 +52,9 @@ func Load() (*Config, error) {
 	if !strings.Contains(cfg.GitHubRepo, "/") {
 		return nil, fmt.Errorf("GITHUB_REPO deve estar no formato owner/repo (recebido %q)", cfg.GitHubRepo)
 	}
+	if err := validateWebsiteOrigins(cfg.WebsiteOrigins); err != nil {
+		return nil, err
+	}
 	cfg.Labels = splitCSV(getenv("ISSUE_LABELS", "bug,gui"))
 
 	cfg.BasePath = strings.Trim(getenv("BASE_PATH", ""), "/")
@@ -56,6 +62,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("BASE_PATH invalida: %q (use um segmento de path, ex.: bugs)", cfg.BasePath)
 	}
 	return cfg, nil
+}
+
+func validateWebsiteOrigins(origins []string) error {
+	for _, origin := range origins {
+		if strings.Contains(origin, "*") {
+			return errors.New("WEBSITE_ORIGINS nao pode usar o wildcard *")
+		}
+		u, err := url.Parse(origin)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("WEBSITE_ORIGINS contem uma origem invalida: %q", origin)
+		}
+	}
+	return nil
 }
 
 func isValidBasePath(s string) bool {

@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import { app } from "electron";
 
 import * as proton from "./vpn-proton";
@@ -8,7 +9,9 @@ import {
     VPN_OWNER_KIND,
     VPN_SCHEMA_VERSION,
     isSupportedWindowsArchitecture,
+    protonUsernamesMatch,
     normalizeVpnSettings,
+    normalizeProtonUsername,
     safeDiagnosticDetail,
     type VpnDiagnostic,
     type VpnOwnerRecord,
@@ -32,6 +35,7 @@ export interface ProtonLoginPayload {
     username: string;
     password?: string;
     twoFactorCode?: string;
+    requestId?: string;
 }
 
 export interface ProtonOptimizationOptions {
@@ -46,15 +50,43 @@ export interface ProtonOptimizationOptions {
 const OWNER_FILE = "owner.lock";
 const MIGRATION_FILE = "migration-v1.json";
 const PROFILE_FILE = "wireguard.conf";
+const PROFILE_ACCOUNT_FILE = "wireguard-profile-account.json";
 const SERVICE_CONFIG_FILE = "wiresock-discord.conf";
 const WATCHDOG_MS = 15_000;
+const OWNER_MUTEX_SUFFIX = ".mutex";
+const OWNER_MUTEX_HOLDER_FILE = "holder.json";
+const OWNER_MUTEX_RETRY_MS = 25;
+const OWNER_MUTEX_MAX_ATTEMPTS = 80;
+const OWNER_MUTEX_STALE_MS = 15_000;
 
 function errorMessage(error: unknown): string {
     return safeDiagnosticDetail(error, 600);
 }
 
+type OwnershipToken = Pick<VpnOwnerRecord, "kind" | "pid" | "generation" | "createdAt">;
+
+function ownershipToken(owner: VpnOwnerRecord): OwnershipToken {
+    return { kind: owner.kind, pid: owner.pid, generation: owner.generation, createdAt: owner.createdAt };
+}
+
+function sameOwnership(a: OwnershipToken | VpnOwnerRecord | null | undefined, b: OwnershipToken | VpnOwnerRecord | null | undefined): boolean {
+    return Boolean(a && b
+        && a.kind === b.kind
+        && a.pid === b.pid
+        && a.generation === b.generation
+        && a.createdAt === b.createdAt);
+}
+
 function isWindows(): boolean {
     return process.platform === "win32";
+}
+
+function isUnknownWireSockInspection(inspection: windows.WireSockInspection): boolean {
+    return !inspection.reliable;
+}
+
+function unknownWireSockMessage(inspection: windows.WireSockInspection): string {
+    return inspection.reason || "Não foi possível confirmar o estado do WireSock; estado desconhecido.";
 }
 
 function processAlive(pid: number): boolean {
@@ -68,13 +100,38 @@ function processAlive(pid: number): boolean {
 }
 
 function normalizeUsername(value: string): string {
-    return value.trim().slice(0, 320);
+    return normalizeProtonUsername(value).slice(0, 320);
+}
+
+function normalizeLoginRequestId(value: unknown): string {
+    const candidate = typeof value === "string" ? value.trim().slice(0, 120) : "";
+    return /^[A-Za-z0-9._:-]{1,120}$/.test(candidate) ? candidate : randomUUID();
+}
+
+function cancelledLoginResult(): proton.ProtonLoginResult {
+    const message = "O login Proton foi cancelado.";
+    return { success: false, code: "CANCELLED", message, error: message, retryable: true };
+}
+
+interface ProtonProfileSelection {
+    country: string;
+    freeOnly: boolean;
+    autoPing: boolean;
+}
+
+function normalizeCountry(value: string): string {
+    return value.trim()
+        .split(",")
+        .map(part => part.trim().toUpperCase())
+        .filter(part => /^[A-Z]{2}$/.test(part))
+        .join(",");
 }
 
 export class PluginVpnController {
     private readonly options: PluginVpnControllerOptions;
     private readonly dataDir: string;
     private readonly profilePath: string;
+    private readonly profileAccountPath: string;
     private readonly serviceConfigPath: string;
     private readonly ownerPath: string;
     private state: VpnState = "inactive";
@@ -88,12 +145,18 @@ export class PluginVpnController {
     private watchdogChecking = false;
     private restarting = false;
     private initialized = false;
+    private automaticBootSuppressed = false;
     private optimization: { id: string; controller: AbortController } | null = null;
+    private protonLogin: { id: string; controller: AbortController } | null = null;
+    private routeProbeFlights = new Set<Promise<void>>();
+    private ownershipToken: OwnershipToken | null = null;
+    private diagnosticGeneration = 0;
 
     public constructor(options: PluginVpnControllerOptions) {
         this.options = options;
         this.dataDir = path.resolve(options.dataDir);
         this.profilePath = path.join(this.dataDir, PROFILE_FILE);
+        this.profileAccountPath = path.join(this.dataDir, PROFILE_ACCOUNT_FILE);
         this.serviceConfigPath = path.join(this.dataDir, SERVICE_CONFIG_FILE);
         this.ownerPath = path.join(this.dataDir, OWNER_FILE);
     }
@@ -106,23 +169,59 @@ export class PluginVpnController {
         return this.restarting;
     }
 
+    public shouldSkipAutomaticEnable(): boolean {
+        return this.automaticBootSuppressed;
+    }
+
     public hasCleanupWork(): boolean {
         const inspection = windows.inspectWireSock(this.serviceConfigPath);
+        if (isUnknownWireSockInspection(inspection)) return this.state !== "blocked_external";
         if (inspection.active) return inspection.owned;
         if (this.state === "blocked_external") return false;
         if (this.state === "inactive") return this.readOwner() !== null;
         return true;
     }
 
-    public async initialize(): Promise<void> {
+    public initialize(): Promise<void> {
+        return this.serial(() => this.initializeInternal());
+    }
+
+    private async initializeInternal(): Promise<void> {
         if (this.initialized || !isWindows()) return;
         this.initialized = true;
         try {
             await this.migrateGuiState();
             const owner = this.readOwner();
             const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            if (isUnknownWireSockInspection(inspection)) {
+                this.initialized = false;
+                this.state = "recovery_required";
+                this.externalReason = null;
+                this.setDiagnostic("ownership", false, unknownWireSockMessage(inspection));
+                this.options.log("warn", "boot não confirmou o estado do WireSock; cleanup adiado", { mode: "diagnostic-only" });
+                return;
+            }
             if (!inspection.active) {
-                if (owner) this.releaseOwnership(owner);
+                if (this.isLiveForeignOwner(owner)) {
+                    this.state = "recovery_required";
+                    this.setDiagnostic("ownership", false, "outra instância do plugin ainda possui o lock da VPN");
+                    this.options.log("warn", "boot encontrou owner vivo enquanto o serviço não foi confirmado; cleanup adiado");
+                    return;
+                }
+                const relaunchWasNotConfirmed = owner?.restarting === true;
+                if (relaunchWasNotConfirmed) this.automaticBootSuppressed = true;
+                await this.removeProbe({ staleOwner: owner, sweep: true });
+                if (owner && !await this.releaseOwnership(owner)) {
+                    this.state = "recovery_required";
+                    this.setDiagnostic("ownership", false, "não foi possível liberar o lock da VPN no boot");
+                    return;
+                }
+                if (relaunchWasNotConfirmed) {
+                    this.state = "recovery_required";
+                    this.setDiagnostic("ownership", false, "o relaunch anterior não confirmou o WireSock; ativação automática suspensa");
+                    this.options.log("warn", "relaunch do Discord não confirmou o WireSock; autostart suspenso");
+                    return;
+                }
                 this.state = "inactive";
                 return;
             }
@@ -130,19 +229,32 @@ export class PluginVpnController {
                 this.blockExternal(inspection.reason || "WireSock externo já está ativo.");
                 return;
             }
+            if (!this.options.isEnabled() && this.isLiveForeignOwner(owner)) {
+                this.state = "recovery_required";
+                this.setDiagnostic("ownership", false, "outra instância do plugin ainda possui o lock da VPN");
+                this.options.log("warn", "plugin desativado não interrompeu uma sessão pertencente a outra instância viva");
+                return;
+            }
             if (!this.options.isEnabled()) {
                 this.options.log("warn", "WireSock próprio encontrado com o plugin desativado; restaurando a rede");
-                await this.stopInternal(false);
+                await this.claimActiveOwnership(owner, inspection);
+                const cleanup = await this.stopInternal(false);
+                if (!cleanup.success) this.initialized = false;
                 return;
             }
             this.generation = Math.max(this.generation, owner?.generation ?? 0);
-            this.adoptOwnership(owner, inspection);
+            const adopted = await this.claimActiveOwnership(owner, inspection);
+            if (adopted.probePath) await this.cleanupStaleProbes([adopted.probePath]);
             this.state = "active";
             this.discordPid = process.pid;
+            this.diagnosticGeneration++;
             this.startWatchdog();
             this.startDiagnostics("adoption");
             this.options.log("info", "sessão WireSock própria adotada após inicialização", { generation: this.generation });
         } catch (error) {
+            // Permite que um retry explícito tente a recuperação novamente após
+            // uma falha transitória durante o boot.
+            this.initialized = false;
             this.state = "recovery_required";
             this.setDiagnostic("ownership", false, errorMessage(error));
             this.options.log("error", "falha ao recuperar sessão VPN no boot", { erro: errorMessage(error) });
@@ -167,14 +279,33 @@ export class PluginVpnController {
             };
         }
         const inspection = windows.inspectWireSock(this.serviceConfigPath);
-        if (this.state === "active" && inspection.active && !inspection.owned) {
-            this.state = "blocked_external";
-            this.externalReason = inspection.reason;
-            this.stopWatchdog();
+        if (isUnknownWireSockInspection(inspection)) {
+            const message = this.state === "active" || this.state === "restart_pending"
+                ? unknownWireSockMessage(inspection)
+                : this.statusMessage();
+            return {
+                state: this.state,
+                platform: "windows",
+                architecture: process.arch,
+                owned: false,
+                active: false,
+                generation: this.generation,
+                discordPid: this.discordPid,
+                profilePath: fs.existsSync(this.profilePath) ? this.profilePath : null,
+                configPath: fs.existsSync(this.serviceConfigPath) ? this.serviceConfigPath : null,
+                externalReason: null,
+                lastDiagnostic: this.lastDiagnostic,
+                message,
+            };
+        }
+        if (inspection.reliable && inspection.active && !inspection.owned) {
+            const reason = inspection.reason || "WireSock externo está ativo.";
+            if (this.state !== "blocked_external" || this.externalReason !== reason) this.blockExternal(reason);
         }
         const active = this.state === "active" && inspection.active && inspection.owned;
+        const reportedState: VpnState = this.state === "active" && !inspection.active ? "inactive" : this.state;
         return {
-            state: this.state,
+            state: reportedState,
             platform: "windows",
             architecture: process.arch,
             owned: inspection.owned && (active || this.readOwner() !== null),
@@ -185,20 +316,31 @@ export class PluginVpnController {
             configPath: fs.existsSync(this.serviceConfigPath) ? this.serviceConfigPath : null,
             externalReason: this.externalReason,
             lastDiagnostic: this.lastDiagnostic,
-            message: this.statusMessage(),
+            message: reportedState === "inactive" ? "VPN inativa" : this.statusMessage(),
         };
     }
 
     public enable(): Promise<VpnOperationResult> {
+        this.automaticBootSuppressed = false;
         return this.serial(() => this.startInternal(true));
     }
 
     public shutdown(relaunch = true): Promise<VpnOperationResult> {
+        this.cancelProtonLogin();
+        this.optimization?.controller.abort();
         return this.serial(() => this.stopInternal(relaunch));
     }
 
     public restoreNetwork(): Promise<VpnOperationResult> {
+        this.cancelProtonLogin();
+        this.optimization?.controller.abort();
         return this.serial(() => this.stopInternal(false));
+    }
+
+    public restartDiscord(): Promise<VpnOperationResult> {
+        this.cancelProtonLogin();
+        this.optimization?.controller.abort();
+        return this.serial(() => this.restartInternal());
     }
 
     public async importCustomConfig(sourcePath: string): Promise<{ success: boolean; error?: string; path?: string }> {
@@ -209,6 +351,7 @@ export class PluginVpnController {
             const raw = fs.readFileSync(source, "utf8");
             const validation = windows.validateWireGuardProfile(raw);
             if (!validation.valid) throw new Error(validation.error);
+            this.clearProtonProfileAccount();
             this.writeProfileAtomically(raw);
             return { success: true, path: this.profilePath };
         } catch (error) {
@@ -228,16 +371,63 @@ export class PluginVpnController {
         }
     }
 
-    public async loginProton(payload: ProtonLoginPayload, solveCaptcha: (url: string) => Promise<string | null>): Promise<proton.ProtonLoginResult> {
-        const username = normalizeUsername(payload.username);
-        let result = await proton.loginProton(this.dataDir, username, payload.password, payload.twoFactorCode, undefined, this.options.log);
-        for (let attempt = 0; attempt < 3 && (result.code === "CAPTCHA_REQUIRED" || result.code === "CAPTCHA_INVALID"); attempt++) {
-            if (!result.captchaUrl) break;
-            const token = await solveCaptcha(result.captchaUrl);
-            if (!token) return { success: false, code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
-            result = await proton.loginProton(this.dataDir, username, payload.password, payload.twoFactorCode, token, this.options.log);
+    public loginProton(payload: ProtonLoginPayload, solveCaptcha: (url: string, signal: AbortSignal) => Promise<string | null>): Promise<proton.ProtonLoginResult> {
+        if (this.protonLogin) {
+            const message = "Já existe um login Proton em andamento.";
+            return Promise.resolve({ success: false, code: "CONFIGURATION_ERROR", message, error: message, retryable: true });
         }
-        return result;
+
+        const operation = { id: normalizeLoginRequestId(payload.requestId), controller: new AbortController() };
+        this.protonLogin = operation;
+        return this.serial(async () => {
+            const isCurrent = () => this.protonLogin === operation && !operation.controller.signal.aborted;
+            try {
+                if (!isCurrent()) return cancelledLoginResult();
+                const username = normalizeUsername(payload.username);
+                const previousUsername = normalizeUsername(proton.savedSessionUsername(this.dataDir) || this.settings().protonUsername);
+                const switchingAccount = Boolean(previousUsername && username && previousUsername.toLowerCase() !== username.toLowerCase());
+                const currentStatus = switchingAccount ? this.getStatus() : null;
+                if (switchingAccount && (currentStatus?.active || this.state === "active")) {
+                    const message = "Restaure a rede antes de trocar a conta Proton.";
+                    return { success: false, code: "CONFIGURATION_ERROR", message, error: message, retryable: false };
+                }
+
+                let result = await proton.loginProton(this.dataDir, username, payload.password, payload.twoFactorCode, undefined, this.options.log);
+                if (!isCurrent()) return cancelledLoginResult();
+                for (let attempt = 0; attempt < 3 && (result.code === "CAPTCHA_REQUIRED" || result.code === "CAPTCHA_INVALID"); attempt++) {
+                    if (!result.captchaUrl) break;
+                    const token = await solveCaptcha(result.captchaUrl, operation.controller.signal);
+                    if (!isCurrent()) return cancelledLoginResult();
+                    if (!token) return { success: false, code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
+                    result = await proton.loginProton(this.dataDir, username, payload.password, payload.twoFactorCode, token, this.options.log);
+                    if (!isCurrent()) return cancelledLoginResult();
+                }
+                if (result.success && switchingAccount) {
+                    try {
+                        this.clearProtonProfileAccount();
+                        this.options.log("info", "marcador do perfil Proton invalidado após troca de conta");
+                    } catch (error) {
+                        // A ausência do marcador também força regeneração; não transforma
+                        // uma sessão autenticada em falha por um cleanup opcional.
+                        this.options.log("warn", "não consegui limpar o marcador do perfil Proton", { erro: errorMessage(error) });
+                    }
+                }
+                return result;
+            } finally {
+                if (this.protonLogin === operation) this.protonLogin = null;
+            }
+        });
+    }
+
+    public cancelProtonLogin(requestId?: string): boolean {
+        const operation = this.protonLogin;
+        if (!operation) return false;
+        if (typeof requestId === "string" && requestId.trim() && operation.id !== requestId.trim()) return false;
+        operation.controller.abort();
+        // Este caminho é deliberadamente fora da fila serial: o login pode estar
+        // bloqueado aguardando o CAPTCHA e a fila não teria como cancelá-lo.
+        proton.cancelProtonLogin(this.dataDir);
+        return true;
     }
 
     public checkProtonSession(username: string) {
@@ -248,53 +438,89 @@ export class PluginVpnController {
         return proton.getProtonPlan(this.dataDir, normalizeUsername(username), this.options.log);
     }
 
-    public logoutProton(): boolean {
-        return proton.removeProtonSession(this.dataDir);
+    public logoutProton(): Promise<{ success: boolean; error?: string }> {
+        return this.serial(async () => {
+            const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            const owner = this.readOwner();
+            if (isUnknownWireSockInspection(inspection)) {
+                return { success: false, error: unknownWireSockMessage(inspection) };
+            }
+            if (inspection.active || owner || this.state !== "inactive") {
+                return { success: false, error: "Restaure a rede antes de sair da conta Proton." };
+            }
+
+            try {
+                const settings = this.settings();
+                // O perfil e a configuração do serviço contêm a PrivateKey. Só
+                // removemos esses arquivos quando o modo Proton os gerou; um
+                // .conf personalizado nunca deve ser apagado pelo logout.
+                if (settings.mode === "proton") this.clearProtonArtifacts();
+                if (!proton.removeProtonSession(this.dataDir))
+                    return { success: false, error: "Não foi possível remover a sessão Proton do armazenamento local." };
+                return { success: true };
+            } catch (error) {
+                this.options.log("warn", "não consegui concluir o logout Proton", { erro: errorMessage(error) });
+                return { success: false, error: "Não foi possível limpar todos os dados locais da sessão Proton." };
+            }
+        });
     }
 
     public async optimizeProton(options: ProtonOptimizationOptions): Promise<proton.ProtonOptimizationResult & { cancelled?: boolean; deferred?: boolean }> {
+        if (!isWindows() || process.arch !== "x64") return { success: false, error: "A VPN do plugin nesta versão exige Windows x64." };
+        if (this.optimization) return { success: false, error: "Já existe uma otimização Proton em andamento." };
+
+        const id = options.requestId || `proton-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const operationController = new AbortController();
+        this.optimization = { id, controller: operationController };
+
         return this.serial(async () => {
-            if (!isWindows() || process.arch !== "x64") return { success: false, error: "A VPN do plugin nesta versão exige Windows x64." };
-            const settings = this.settings();
-            const username = normalizeUsername(settings.protonUsername);
-            if (!username) return { success: false, error: "Faça login com sua conta Proton antes de otimizar a rota." };
-            if (this.optimization) return { success: false, error: "Já existe uma otimização Proton em andamento." };
-
-            const wasActive = this.getStatus().active;
-            if (this.state === "blocked_external") return { success: false, error: this.externalReason || "WireSock externo está ativo." };
-            if (wasActive) {
-                const stopped = await this.stopInternal(false);
-                if (!stopped.success) return { success: false, error: stopped.error || "Não foi possível pausar a VPN para otimizar a rota." };
-            }
-
-            const restorePreviousRoute = async (): Promise<string | null> => {
-                if (!wasActive) return null;
-                const restored = await this.startInternal(true);
-                return restored.success ? null : restored.error || "Não foi possível reativar a rota WireGuard anterior.";
-            };
-
-            const id = options.requestId || `proton-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-            const controller = new AbortController();
-            this.optimization = { id, controller };
             try {
+                const settings = this.settings();
+                const username = normalizeUsername(settings.protonUsername);
+                if (!username) return { success: false, error: "Faça login com sua conta Proton antes de otimizar a rota." };
+                const selection: ProtonProfileSelection = {
+                    country: normalizeCountry(options.country ?? settings.protonCountry),
+                    freeOnly: options.freeOnly ?? settings.protonFreeOnly,
+                    autoPing: options.autoPing ?? settings.protonAutoPing,
+                };
+
+                const wasActive = this.getStatus().active;
+                if (this.state === "blocked_external") return { success: false, error: this.externalReason || "WireSock externo está ativo." };
+                const restorePreviousRoute = async (): Promise<string | null> => {
+                    if (!wasActive) return null;
+                    const restored = await this.startInternal(false);
+                    return restored.success ? null : restored.error || "Não foi possível reativar a rota WireGuard anterior.";
+                };
+
+                if (operationController.signal.aborted) return { success: false, cancelled: true, error: "Otimização Proton cancelada." };
+                if (wasActive) {
+                    const stopped = await this.stopInternal(false);
+                    if (!stopped.success) return { success: false, error: stopped.error || "Não foi possível pausar a VPN para otimizar a rota." };
+                    if (operationController.signal.aborted) {
+                        const restoreError = await restorePreviousRoute();
+                        return { success: false, cancelled: true, error: restoreError || "Otimização Proton cancelada." };
+                    }
+                }
+
                 let result: proton.ProtonOptimizationResult;
                 try {
                     result = await proton.generateOptimalProtonConfig(this.dataDir, {
                         username,
-                        country: options.country ?? settings.protonCountry,
-                        freeOnly: options.freeOnly ?? settings.protonFreeOnly,
-                        autoPing: options.autoPing ?? settings.protonAutoPing,
+                        country: selection.country,
+                        freeOnly: selection.freeOnly,
+                        autoPing: selection.autoPing,
                         speedTest: options.speedTest === true,
-                        signal: controller.signal,
+                        signal: operationController.signal,
                         onProgress: progress => options.onProgress?.({ ...progress, requestId: id }),
                         log: this.options.log,
                     });
+                    if (result.success) this.writeProtonProfileAccount(username, selection);
                 } catch (error) {
                     const restoreError = await restorePreviousRoute();
                     if (restoreError) this.options.log("error", "otimização falhou e a rota anterior não voltou", { erro: restoreError });
                     throw error;
                 }
-                if (controller.signal.aborted) {
+                if (operationController.signal.aborted) {
                     const restoreError = await restorePreviousRoute();
                     return { success: false, cancelled: true, error: restoreError || "Otimização Proton cancelada." };
                 }
@@ -307,7 +533,7 @@ export class PluginVpnController {
                 }
                 return result;
             } finally {
-                this.optimization = null;
+                if (this.optimization?.id === id) this.optimization = null;
             }
         });
     }
@@ -351,6 +577,7 @@ export class PluginVpnController {
     private blockExternal(reason: string): void {
         this.state = "blocked_external";
         this.externalReason = safeDiagnosticDetail(reason);
+        this.diagnosticGeneration++;
         this.setDiagnostic("ownership", false, this.externalReason);
         this.stopWatchdog();
         this.options.log("warn", "VPN recusada para preservar WireSock externo", { motivo: this.externalReason });
@@ -363,13 +590,23 @@ export class PluginVpnController {
             return { success: false, state: this.state, error: this.externalReason };
         }
         const existing = windows.inspectWireSock(this.serviceConfigPath);
+        if (isUnknownWireSockInspection(existing)) {
+            this.state = "recovery_required";
+            this.externalReason = null;
+            const error = unknownWireSockMessage(existing);
+            this.setDiagnostic("ownership", false, error);
+            this.options.log("warn", "ativação adiada porque o estado do WireSock é desconhecido", { mode: "diagnostic-only" });
+            return { success: false, state: this.state, error };
+        }
         if (existing.active && existing.owned) {
             if (this.state !== "active") {
                 const owner = this.readOwner();
                 this.generation = Math.max(this.generation, owner?.generation ?? 0);
-                this.adoptOwnership(owner, existing);
+                const adopted = await this.claimActiveOwnership(owner, existing);
+                if (adopted.probePath) await this.cleanupStaleProbes([adopted.probePath]);
                 this.state = "active";
                 this.discordPid = process.pid;
+                this.diagnosticGeneration++;
                 this.startWatchdog();
                 this.startDiagnostics("adoption");
             }
@@ -383,24 +620,30 @@ export class PluginVpnController {
         this.state = "preparing";
         this.externalReason = null;
         this.generation++;
+        this.diagnosticGeneration++;
         let owner: VpnOwnerRecord | null = null;
         let started = false;
         try {
             await this.migrateGuiState();
+            owner = await this.acquireOwnership();
+            await this.cleanupStaleProbes(this.probePath ? [this.probePath] : []);
             const settings = this.settings();
             if (settings.mode === "proton") {
                 if (!settings.protonUsername) throw new Error("Faça login com sua conta Proton antes de ativar.");
-                if (!fs.existsSync(this.profilePath)) {
+                const selection = this.protonProfileSelection(settings);
+                if (!fs.existsSync(this.profilePath) || !this.protonProfileMatches(settings.protonUsername, selection)) {
                     const generated = await proton.generateOptimalProtonConfig(this.dataDir, {
                         username: settings.protonUsername,
-                        country: settings.protonCountry,
-                        freeOnly: settings.protonFreeOnly,
-                        autoPing: settings.protonAutoPing,
+                        country: selection.country,
+                        freeOnly: selection.freeOnly,
+                        autoPing: selection.autoPing,
                         log: this.options.log,
                     });
                     if (!generated.success) throw new Error(generated.error || "Não foi possível gerar a configuração Proton.");
+                    this.writeProtonProfileAccount(settings.protonUsername, selection);
                 }
-            } else if (settings.customConfigPath) {
+            } else {
+                if (!settings.customConfigPath) throw new Error("Configure um arquivo WireGuard personalizado antes de ativar.");
                 const imported = await this.importCustomConfig(settings.customConfigPath);
                 if (!imported.success) throw new Error(imported.error);
             }
@@ -408,27 +651,26 @@ export class PluginVpnController {
             const validation = windows.validateWireGuardProfile(raw);
             if (!validation.valid) throw new Error(validation.error);
 
-            owner = this.acquireOwnership();
             const apps = this.discordAllowedApps();
             const probe = this.prepareRouteProbe();
             if (probe) apps.push(probe);
             owner.probePath = probe;
-            this.writeOwner(owner);
+            await this.writeOwner(owner);
             this.state = "starting";
             const startedResult = await windows.startWireSockService(this.serviceConfigPath, raw, apps, this.options.log);
             started = true;
             owner.configPath = startedResult.configPath;
             owner.restarting = relaunch;
-            this.writeOwner(owner);
+            await this.writeOwner(owner);
             this.discordPid = process.pid;
             this.state = relaunch ? "restart_pending" : "active";
             this.startWatchdog();
             this.startDiagnostics("activation");
             if (relaunch) {
-                if (!this.requestRelaunch()) {
+                if (!await this.requestRelaunch()) {
                     this.state = "active";
                     owner.restarting = false;
-                    this.writeOwner(owner);
+                    await this.writeOwner(owner);
                     return { success: false, state: this.state, error: "A VPN foi iniciada, mas não consegui reiniciar o Discord para aplicar a rota." };
                 }
                 return { success: true, state: "restart_pending", message: "VPN preparada; o Discord será reiniciado." };
@@ -436,18 +678,27 @@ export class PluginVpnController {
             return { success: true, state: "active", message: this.statusMessage() };
         } catch (error) {
             this.stopWatchdog();
-            if (started || windows.inspectWireSock(this.serviceConfigPath).active) {
+            const currentInspection = windows.inspectWireSock(this.serviceConfigPath);
+            if (started || (currentInspection.reliable && currentInspection.active)) {
                 const cleanup = await windows.stopOwnedWireSock(this.serviceConfigPath, this.options.log);
                 if (!cleanup.stopped) {
+                    await this.removeProbe({ sweep: false });
                     this.state = "recovery_required";
                     this.setDiagnostic("wireguard", false, cleanup.error || "limpeza incompleta");
                     return { success: false, state: this.state, error: `A ativação falhou e a rede não foi restaurada: ${cleanup.error || "limpeza incompleta"}.` };
                 }
+                await this.removeProbe({ sweep: true });
+            } else {
+                await this.removeProbe({ sweep: true });
             }
-            if (owner) this.releaseOwnership(owner);
-            this.removeProbe();
-            this.state = "inactive";
             const message = errorMessage(error);
+            if (owner && !await this.releaseOwnership(owner)) {
+                this.state = "recovery_required";
+                this.setDiagnostic("ownership", false, "não foi possível liberar o lock após falha de ativação");
+                return { success: false, state: this.state, error: `${message} O lock da VPN ficou pendente e requer recuperação.` };
+            }
+            this.state = "inactive";
+            this.diagnosticGeneration++;
             this.setDiagnostic("wireguard", false, message);
             this.options.log("error", "ativação VPN falhou", { erro: message });
             return { success: false, state: this.state, error: message };
@@ -457,7 +708,16 @@ export class PluginVpnController {
     private async stopInternal(relaunch: boolean): Promise<VpnOperationResult> {
         if (!isSupportedWindowsArchitecture(process.platform, process.arch)) return { success: false, state: "blocked_external", error: "A VPN do plugin nesta versão exige Windows x64." };
         this.stopWatchdog();
+        this.diagnosticGeneration++;
         const inspection = windows.inspectWireSock(this.serviceConfigPath);
+        if (isUnknownWireSockInspection(inspection)) {
+            this.state = "recovery_required";
+            this.externalReason = null;
+            const error = unknownWireSockMessage(inspection);
+            this.setDiagnostic("wireguard", false, error);
+            this.options.log("warn", "restauração adiada porque o estado do WireSock é desconhecido", { mode: "diagnostic-only" });
+            return { success: false, state: this.state, error };
+        }
         const owner = this.readOwner();
         const needsInactiveCleanup = Boolean(owner)
             || this.state === "preparing"
@@ -466,35 +726,55 @@ export class PluginVpnController {
             || this.state === "restart_pending"
             || this.state === "recovery_required";
         if (!inspection.active && !needsInactiveCleanup) {
-            if (owner) this.releaseOwnership(owner);
-            this.removeProbe();
+            await this.removeProbe({ staleOwner: owner, sweep: true });
+            if (owner && !await this.releaseOwnership(owner)) {
+                this.state = "recovery_required";
+                this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
+                return { success: false, state: this.state, error: "A rede está inativa, mas o lock da VPN ficou pendente." };
+            }
             this.state = "inactive";
             this.discordPid = null;
             return { success: true, state: this.state, message: this.statusMessage() };
         }
-        if (inspection.active && !inspection.owned) {
+        if (inspection.reliable && inspection.active && !inspection.owned) {
             this.blockExternal(inspection.reason || "WireSock externo está ativo; não será interrompido.");
             return { success: false, state: this.state, error: this.externalReason || undefined };
         }
         this.state = "stopping";
         const cleanup = await windows.stopOwnedWireSock(this.serviceConfigPath, this.options.log);
         if (!cleanup.stopped) {
+            await this.removeProbe({ sweep: false });
             this.state = "recovery_required";
             this.setDiagnostic("wireguard", false, cleanup.error || "limpeza incompleta");
             return { success: false, state: this.state, error: cleanup.error || "Não foi possível restaurar a rede." };
         }
-        this.removeProbe();
-        if (owner) this.releaseOwnership(owner);
+        await this.removeProbe({ sweep: true });
+        if (owner && !await this.releaseOwnership(owner)) {
+            this.state = "recovery_required";
+            this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
+            return { success: false, state: this.state, error: "A rede foi restaurada, mas o lock da VPN ficou pendente." };
+        }
         this.discordPid = null;
         this.state = "inactive";
         this.externalReason = null;
         this.setDiagnostic("wireguard", true, "serviço WireSock próprio parado e rede restaurada");
         if (relaunch && !this.restarting) {
-            if (!this.requestRelaunch())
+            if (!await this.requestRelaunch())
                 return { success: false, state: this.state, error: "A rede foi restaurada, mas não consegui reiniciar o Discord." };
             return { success: true, state: "restart_pending", message: "Rede restaurada; o Discord será reiniciado." };
         }
         return { success: true, state: this.state, message: this.statusMessage() };
+    }
+
+    private async restartInternal(): Promise<VpnOperationResult> {
+        const cleanup = await this.stopInternal(false);
+        if (!cleanup.success && this.state !== "blocked_external") return cleanup;
+        if (!cleanup.success) {
+            this.options.log("info", "reinício explícito preservou o WireSock externo; o plugin não é proprietário do túnel");
+        }
+        if (!await this.requestRelaunch())
+            return { success: false, state: this.state, error: "A rede foi restaurada, mas não consegui reiniciar o Discord." };
+        return { success: true, state: "restart_pending", message: "Rede restaurada; o Discord será reiniciado para aplicar a atualização." };
     }
 
     private discordAllowedApps(): string[] {
@@ -512,6 +792,7 @@ export class PluginVpnController {
             const source = proton.findProtonConfgenExe();
             const target = windows.routeProbeExecutablePath(this.dataDir);
             windows.copyRouteProbe(source, target);
+            this.probePath = target;
             return target;
         } catch (error) {
             this.options.log("warn", "helper de diagnóstico não foi incluído em AllowedApps", { erro: errorMessage(error) });
@@ -519,46 +800,132 @@ export class PluginVpnController {
         }
     }
 
-    private removeProbe(): void {
-        if (this.probePath) windows.removeRouteProbe(this.probePath);
-        const owner = this.readOwner();
-        if (owner?.probePath) windows.removeRouteProbe(owner.probePath);
+    private trackRouteProbe(flight: Promise<void>): void {
+        this.routeProbeFlights.add(flight);
+        void flight.then(
+            () => this.routeProbeFlights.delete(flight),
+            () => this.routeProbeFlights.delete(flight),
+        );
+    }
+
+    private async waitForRouteProbes(): Promise<void> {
+        await Promise.allSettled([...this.routeProbeFlights]);
+    }
+
+    private reportProbeCleanup(stage: string, result: windows.RouteProbeCleanupResult): void {
+        if (result.removed > 0) {
+            this.options.log("info", "probes temporários de diagnóstico removidos", { stage, removidos: result.removed });
+        }
+        if (result.busy > 0 || result.invalid > 0) {
+            this.options.log("warn", "cleanup de probes temporários incompleto", {
+                stage,
+                ocupados: result.busy,
+                inválidos: result.invalid,
+                recentes: result.recent,
+            });
+        }
+    }
+
+    private async cleanupStaleProbes(protectedPaths: readonly string[] = []): Promise<void> {
+        await this.waitForRouteProbes();
+        const result = await windows.cleanupRouteProbes(this.dataDir, protectedPaths);
+        this.reportProbeCleanup("stale", result);
+    }
+
+    private async removeProbe(options: { staleOwner?: VpnOwnerRecord | null; sweep?: boolean } = {}): Promise<void> {
+        await this.waitForRouteProbes();
+        const localToken = this.ownershipToken;
+        const current = this.readOwner();
+        const candidates = new Set<string>();
+        const canRemoveLocal = !current || sameOwnership(localToken, current);
+        if (this.probePath && canRemoveLocal) candidates.add(this.probePath);
+        if (current && sameOwnership(localToken, current) && current.probePath) candidates.add(current.probePath);
+        const staleOwner = options.staleOwner;
+        if (options.sweep && staleOwner?.probePath && (!current || sameOwnership(staleOwner, current)))
+            candidates.add(staleOwner.probePath);
+
+        for (const candidate of candidates) {
+            if (!windows.isManagedRouteProbePath(this.dataDir, candidate)) continue;
+            const removal = await windows.removeRouteProbe(this.dataDir, candidate);
+            if (removal === "busy") this.options.log("warn", "probe temporário ainda está ocupado", { stage: "known" });
+        }
+
+        // Never sweep while another ownership token is visible. This keeps an
+        // old Discord instance from deleting a probe created by its successor.
+        const after = this.readOwner();
+        const canSweep = options.sweep && (!after || sameOwnership(localToken, after) || sameOwnership(staleOwner, after));
+        if (canSweep) {
+            const protectedPaths = after?.probePath ? [after.probePath] : [];
+            const result = await windows.cleanupRouteProbes(this.dataDir, protectedPaths);
+            this.reportProbeCleanup("all", result);
+        }
         this.probePath = undefined;
     }
 
     private startDiagnostics(stage: string): void {
+        const diagnosticGeneration = this.diagnosticGeneration;
+        const vpnGeneration = this.generation;
+        const isCurrent = () => this.diagnosticGeneration === diagnosticGeneration
+            && this.generation === vpnGeneration
+            && (this.state === "active" || this.state === "restart_pending");
         void windows.diagnoseWindowsNetwork(this.options.log).then(result => {
+            if (!isCurrent()) return;
             this.setDiagnostic("network", result.ok, `${stage}: ${result.detail}`);
-        }).catch(error => this.setDiagnostic("network", false, error));
+        }).catch(error => {
+            if (isCurrent()) this.setDiagnostic("network", false, error);
+        });
 
         const owner = this.readOwner();
         const probePath = owner?.probePath;
         if (!probePath || !fs.existsSync(probePath)) return;
-        void windows.runRouteProbe(probePath).then(result => {
+        const flight = windows.runRouteProbe(probePath).then(result => {
+            if (!isCurrent()) return;
             this.setDiagnostic("route", Boolean(result?.success), safeDiagnosticDetail(JSON.stringify(result || { error: "resposta vazia" }), 500));
             this.options.log(result?.success ? "info" : "warn", "probe de rota do Discord concluído", { stage, result: safeDiagnosticDetail(JSON.stringify(result || {}), 500), mode: "log-only" });
         }).catch(error => {
+            if (!isCurrent()) return;
             this.setDiagnostic("route", false, error);
             this.options.log("warn", "probe de rota do Discord falhou", { stage, erro: errorMessage(error), mode: "log-only" });
         });
+        this.trackRouteProbe(flight);
     }
 
     private async checkWatchdog(): Promise<void> {
         if (this.watchdogChecking || this.state !== "active") return;
         this.watchdogChecking = true;
+        const diagnosticGeneration = this.diagnosticGeneration;
+        const vpnGeneration = this.generation;
+        const isCurrent = () => this.diagnosticGeneration === diagnosticGeneration
+            && this.generation === vpnGeneration
+            && this.state === "active";
         try {
             const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            if (!inspection.reliable) {
+                if (isCurrent()) this.setDiagnostic("wireguard", false, inspection.reason || "Estado do WireSock desconhecido.");
+                this.options.log("warn", "watchdog não conseguiu confirmar o estado do WireSock", { mode: "diagnostic-only" });
+                return;
+            }
             if (!inspection.active) {
                 // WMI/sc.exe can briefly return an empty snapshot while the
                 // service is still alive. Confirm across several samples for
                 // evidence, but keep this probe diagnostic-only.
                 let confirmation = inspection;
-                for (let attempt = 0; attempt < 5 && !confirmation.active; attempt++) {
+                for (let attempt = 0; attempt < 5 && confirmation.reliable && !confirmation.active; attempt++) {
                     await new Promise<void>(resolve => setTimeout(resolve, 1_000));
-                    if (this.state !== "active") return;
+                    if (!isCurrent()) return;
                     confirmation = windows.inspectWireSock(this.serviceConfigPath);
                 }
+                if (!confirmation.reliable) {
+                    if (isCurrent()) this.setDiagnostic("wireguard", false, confirmation.reason || "Estado do WireSock desconhecido.");
+                    this.options.log("warn", "watchdog não confirmou ausência do WireSock porque a leitura ficou desconhecida", { mode: "diagnostic-only" });
+                    return;
+                }
                 if (!confirmation.active) {
+                    this.diagnosticGeneration++;
+                    this.state = "inactive";
+                    this.discordPid = null;
+                    this.externalReason = null;
+                    this.stopWatchdog();
                     this.setDiagnostic("wireguard", false, "serviço WireSock próprio desapareceu");
                     this.options.log("warn", "watchdog não confirmou o WireSock próprio", {
                         mode: "diagnostic-only",
@@ -598,15 +965,120 @@ export class PluginVpnController {
         this.watchdog = null;
     }
 
-    private requestRelaunch(): boolean {
-        const owner = this.readOwner();
-        if (owner) {
-            owner.pid = process.pid;
-            owner.restarting = true;
-            this.writeOwner(owner);
-        }
-        this.restarting = true;
+    private isLiveForeignOwner(owner: VpnOwnerRecord | null): boolean {
+        return Boolean(owner && owner.pid !== process.pid && !owner.restarting && processAlive(owner.pid));
+    }
+
+    private ownerMutexPath(): string {
+        return `${this.ownerPath}${OWNER_MUTEX_SUFFIX}`;
+    }
+
+    private readOwnerMutexHolder(mutexPath: string): { pid: number; token: string; acquiredAt: number } | null {
         try {
+            const value = JSON.parse(fs.readFileSync(path.join(mutexPath, OWNER_MUTEX_HOLDER_FILE), "utf8")) as Partial<{
+                pid: number;
+                token: string;
+                acquiredAt: number;
+            }>;
+            const pid = value.pid;
+            const token = value.token;
+            const acquiredAt = value.acquiredAt;
+            if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || typeof token !== "string" || !token
+                || typeof acquiredAt !== "number" || !Number.isFinite(acquiredAt)) return null;
+            return { pid, token, acquiredAt };
+        } catch {
+            return null;
+        }
+    }
+
+    private ownerMutexIsStale(mutexPath: string): boolean {
+        const holder = this.readOwnerMutexHolder(mutexPath);
+        if (!holder) return false;
+        const alive = holder.pid === process.pid || processAlive(holder.pid);
+        if (alive) return false;
+        try {
+            const age = Date.now() - Math.max(holder.acquiredAt, fs.statSync(mutexPath).mtimeMs);
+            return age > OWNER_MUTEX_STALE_MS;
+        } catch {
+            return false;
+        }
+    }
+
+    private reclaimStaleOwnerMutex(mutexPath: string): boolean {
+        if (!this.ownerMutexIsStale(mutexPath)) return false;
+        const quarantine = `${mutexPath}.stale.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+        try {
+            // Renomear primeiro evita que a remoção de um reclaim concorrente
+            // alcance um mutex novo criado imediatamente no caminho original.
+            fs.renameSync(mutexPath, quarantine);
+            fs.rmSync(quarantine, { recursive: true, force: true });
+            return true;
+        } catch {
+            try { fs.rmSync(quarantine, { recursive: true, force: true }); } catch { }
+            return false;
+        }
+    }
+
+    private async acquireOwnerMutex(): Promise<{ path: string; token: string }> {
+        fs.mkdirSync(this.dataDir, { recursive: true });
+        const mutexPath = this.ownerMutexPath();
+        const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        for (let attempt = 0; attempt < OWNER_MUTEX_MAX_ATTEMPTS; attempt++) {
+            let created = false;
+            try {
+                fs.mkdirSync(mutexPath);
+                created = true;
+                const holder = { pid: process.pid, token, acquiredAt: Date.now() };
+                fs.writeFileSync(path.join(mutexPath, OWNER_MUTEX_HOLDER_FILE), JSON.stringify(holder), { encoding: "utf8", flag: "wx", mode: 0o600 });
+                return { path: mutexPath, token };
+            } catch (error) {
+                if (created) {
+                    try { fs.rmSync(mutexPath, { recursive: true, force: true }); } catch { }
+                    throw new Error(`Não foi possível preparar o mutex de ownership: ${errorMessage(error)}`);
+                }
+                const code = (error as { code?: unknown })?.code;
+                if (code !== "EEXIST") throw new Error(`Não foi possível acessar o mutex de ownership: ${errorMessage(error)}`);
+                if (this.reclaimStaleOwnerMutex(mutexPath)) continue;
+                if (attempt + 1 >= OWNER_MUTEX_MAX_ATTEMPTS)
+                    throw new Error("Outra operação de ownership da VPN está em andamento; tente novamente.");
+                await new Promise<void>(resolve => setTimeout(resolve, OWNER_MUTEX_RETRY_MS));
+            }
+        }
+        throw new Error("Não foi possível reservar o mutex de ownership da VPN.");
+    }
+
+    private releaseOwnerMutex(lease: { path: string; token: string }): void {
+        const holder = this.readOwnerMutexHolder(lease.path);
+        if (!holder || holder.token !== lease.token || holder.pid !== process.pid) {
+            this.options.log("warn", "mutex de ownership não pertence mais a esta operação");
+            return;
+        }
+        try {
+            fs.rmSync(lease.path, { recursive: true, force: true });
+        } catch (error) {
+            this.options.log("warn", "não consegui liberar o mutex de ownership", { erro: errorMessage(error) });
+        }
+    }
+
+    private async withOwnerMutex<T>(operation: () => Promise<T>): Promise<T> {
+        const lease = await this.acquireOwnerMutex();
+        try {
+            return await operation();
+        } finally {
+            this.releaseOwnerMutex(lease);
+        }
+    }
+
+    private async requestRelaunch(): Promise<boolean> {
+        const owner = this.readOwner();
+        const expected = owner ? ownershipToken(owner) : null;
+        try {
+            if (owner) {
+                owner.pid = process.pid;
+                owner.restarting = true;
+                await this.writeOwner(owner, expected);
+            }
+            this.restarting = true;
             app.relaunch();
             app.exit(0);
             return true;
@@ -614,69 +1086,89 @@ export class PluginVpnController {
             this.restarting = false;
             if (owner) {
                 owner.restarting = false;
-                this.writeOwner(owner);
+                try { await this.writeOwner(owner, ownershipToken(owner)); } catch (restoreError) {
+                    this.options.log("error", "não consegui restaurar o marcador de reinício da VPN", { erro: errorMessage(restoreError) });
+                }
             }
             this.options.log("error", "não consegui solicitar reinício do Discord", { erro: errorMessage(error) });
             return false;
         }
     }
 
-    private acquireOwnership(): VpnOwnerRecord {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-        const existing = this.readOwner();
-        const inspection = windows.inspectWireSock(this.serviceConfigPath);
-        if (inspection.active && !inspection.owned) throw new Error(inspection.reason || "WireSock externo está ativo.");
-        if (existing?.pid === process.pid) {
-            this.probePath = existing.probePath;
-            return existing;
-        }
-        if (existing && existing.pid !== process.pid) {
-            if (existing.restarting && inspection.active && inspection.owned) {
-                this.generation = Math.max(this.generation, existing.generation);
-                this.probePath = existing.probePath;
-                return { ...existing, pid: process.pid, restarting: false };
-            }
-            if (processAlive(existing.pid)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
-            if (inspection.active && inspection.owned) {
-                this.generation = Math.max(this.generation, existing.generation);
-                this.probePath = existing.probePath;
-                return { ...existing, pid: process.pid, restarting: false };
-            }
-            this.releaseOwnership(existing);
-        }
-        const owner: VpnOwnerRecord = {
-            kind: VPN_OWNER_KIND,
-            pid: process.pid,
-            generation: this.generation,
-            profilePath: this.profilePath,
-            configPath: this.serviceConfigPath,
-            createdAt: Date.now(),
-        };
-        try {
-            const descriptor = fs.openSync(this.ownerPath, "wx");
-            fs.writeFileSync(descriptor, JSON.stringify(owner), "utf8");
-            fs.closeSync(descriptor);
-        } catch (error) {
-            const current = this.readOwner();
-            if (current && processAlive(current.pid)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
-            throw new Error(`Não foi possível reservar ownership da VPN: ${errorMessage(error)}`);
-        }
-        this.probePath = undefined;
-        return owner;
+    private async claimActiveOwnership(previous: VpnOwnerRecord | null, inspection: windows.WireSockInspection): Promise<VpnOwnerRecord> {
+        if (this.isLiveForeignOwner(previous)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+        return this.adoptOwnership(previous, inspection);
     }
 
-    private adoptOwnership(previous: VpnOwnerRecord | null, inspection: windows.WireSockInspection): void {
-        const source: VpnOwnerRecord = previous ?? {
-            kind: VPN_OWNER_KIND,
-            pid: process.pid,
-            generation: this.generation,
-            profilePath: this.profilePath,
-            configPath: this.serviceConfigPath,
-            createdAt: Date.now(),
-        } satisfies VpnOwnerRecord;
-        this.probePath = source.probePath;
-        this.writeOwner({ ...source, pid: process.pid, configPath: this.serviceConfigPath, profilePath: this.profilePath, restarting: false });
-        this.options.log("info", "ownership do WireSock confirmado", { services: inspection.services, pids: inspection.processIds });
+    private async acquireOwnership(): Promise<VpnOwnerRecord> {
+        return this.withOwnerMutex(async () => {
+            const existing = this.readOwner();
+            const ownerFileExists = fs.existsSync(this.ownerPath);
+            const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            if (isUnknownWireSockInspection(inspection)) throw new Error(unknownWireSockMessage(inspection));
+            if (inspection.reliable && inspection.active && !inspection.owned) throw new Error(inspection.reason || "WireSock externo está ativo.");
+            if (this.isLiveForeignOwner(existing)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+            if (existing?.pid === process.pid) {
+                this.probePath = existing.probePath;
+                this.ownershipToken = ownershipToken(existing);
+                return existing;
+            }
+            if (inspection.active && inspection.owned) {
+                if (!existing && ownerFileExists) throw new Error("O lock da VPN está inválido; a sessão ativa foi preservada para recuperação manual.");
+                const source = existing ?? {
+                    kind: VPN_OWNER_KIND,
+                    pid: process.pid,
+                    generation: this.generation,
+                    profilePath: this.profilePath,
+                    configPath: this.serviceConfigPath,
+                    createdAt: Date.now(),
+                } satisfies VpnOwnerRecord;
+                this.generation = Math.max(this.generation, source.generation);
+                const adopted = { ...source, pid: process.pid, profilePath: this.profilePath, configPath: this.serviceConfigPath, restarting: false };
+                this.writeOwnerUnlocked(adopted);
+                this.probePath = adopted.probePath;
+                this.ownershipToken = ownershipToken(adopted);
+                return adopted;
+            }
+            if (!existing && ownerFileExists) this.quarantineInvalidOwnerUnlocked();
+            const owner: VpnOwnerRecord = {
+                kind: VPN_OWNER_KIND,
+                pid: process.pid,
+                generation: this.generation,
+                profilePath: this.profilePath,
+                configPath: this.serviceConfigPath,
+                createdAt: Date.now(),
+            };
+            this.writeOwnerUnlocked(owner);
+            this.probePath = undefined;
+            this.ownershipToken = ownershipToken(owner);
+            return owner;
+        });
+    }
+
+    private async adoptOwnership(previous: VpnOwnerRecord | null, inspection: windows.WireSockInspection): Promise<VpnOwnerRecord> {
+        if (isUnknownWireSockInspection(inspection)) throw new Error(unknownWireSockMessage(inspection));
+        return this.withOwnerMutex(async () => {
+            const current = this.readOwner();
+            if (this.isLiveForeignOwner(current)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
+            if (!current && fs.existsSync(this.ownerPath))
+                throw new Error("O lock da VPN está inválido; a sessão ativa foi preservada para recuperação manual.");
+            const source: VpnOwnerRecord = current ?? previous ?? {
+                kind: VPN_OWNER_KIND,
+                pid: process.pid,
+                generation: this.generation,
+                profilePath: this.profilePath,
+                configPath: this.serviceConfigPath,
+                createdAt: Date.now(),
+            } satisfies VpnOwnerRecord;
+            this.generation = Math.max(this.generation, source.generation);
+            const adopted = { ...source, pid: process.pid, configPath: this.serviceConfigPath, profilePath: this.profilePath, restarting: false };
+            this.writeOwnerUnlocked(adopted);
+            this.probePath = adopted.probePath;
+            this.ownershipToken = ownershipToken(adopted);
+            this.options.log("info", "ownership do WireSock confirmado", { services: inspection.services, pids: inspection.processIds });
+            return adopted;
+        });
     }
 
     private readOwner(): VpnOwnerRecord | null {
@@ -696,24 +1188,64 @@ export class PluginVpnController {
                 generation,
                 profilePath: this.profilePath,
                 configPath: this.serviceConfigPath,
-                probePath: typeof value.probePath === "string" ? value.probePath : undefined,
+                probePath: typeof value.probePath === "string" && windows.isManagedRouteProbePath(this.dataDir, value.probePath)
+                    ? value.probePath
+                    : undefined,
                 restarting: value.restarting === true,
                 createdAt,
             };
         } catch { return null; }
     }
 
-    private writeOwner(owner: VpnOwnerRecord): void {
+    private writeOwnerUnlocked(owner: VpnOwnerRecord): void {
         fs.mkdirSync(this.dataDir, { recursive: true });
-        const temporary = `${this.ownerPath}.${process.pid}.${Date.now()}.tmp`;
-        fs.writeFileSync(temporary, JSON.stringify(owner), "utf8");
-        fs.renameSync(temporary, this.ownerPath);
+        const temporary = `${this.ownerPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+        try {
+            fs.writeFileSync(temporary, JSON.stringify(owner), { encoding: "utf8", mode: 0o600 });
+            fs.renameSync(temporary, this.ownerPath);
+        } catch (error) {
+            try { fs.rmSync(temporary, { force: true }); } catch { }
+            throw error;
+        }
     }
 
-    private releaseOwnership(owner: VpnOwnerRecord): void {
-        const current = this.readOwner();
-        if (!current || current.kind !== owner.kind || current.configPath !== owner.configPath) return;
-        try { fs.rmSync(this.ownerPath, { force: true }); } catch (error) { this.options.log("warn", "não consegui remover lock da VPN", { erro: errorMessage(error) }); }
+    private async writeOwner(owner: VpnOwnerRecord, expected: OwnershipToken | null = this.ownershipToken): Promise<void> {
+        await this.withOwnerMutex(async () => {
+            if (expected) {
+                const current = this.readOwner();
+                if (!current || !sameOwnership(expected, current)) throw new Error("ownership da VPN mudou durante a operação");
+            }
+            this.writeOwnerUnlocked(owner);
+            this.ownershipToken = ownershipToken(owner);
+        });
+    }
+
+    private quarantineInvalidOwnerUnlocked(): void {
+        if (!fs.existsSync(this.ownerPath)) return;
+        const quarantine = `${this.ownerPath}.invalid.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.bak`;
+        fs.renameSync(this.ownerPath, quarantine);
+        this.options.log("warn", "lock inválido da VPN movido para recuperação", { arquivo: path.basename(quarantine) });
+    }
+
+    private async releaseOwnership(owner: VpnOwnerRecord): Promise<boolean> {
+        try {
+            return await this.withOwnerMutex(async () => {
+                const current = this.readOwner();
+                if (!current) {
+                    if (fs.existsSync(this.ownerPath)) return false;
+                    if (sameOwnership(this.ownershipToken, owner)) this.ownershipToken = null;
+                    return true;
+                }
+                if (!sameOwnership(current, owner)) return false;
+                fs.rmSync(this.ownerPath, { force: true });
+                const removed = !fs.existsSync(this.ownerPath);
+                if (removed && sameOwnership(this.ownershipToken, owner)) this.ownershipToken = null;
+                return removed;
+            });
+        } catch (error) {
+            this.options.log("warn", "não consegui remover lock da VPN", { erro: errorMessage(error) });
+            return false;
+        }
     }
 
     private writeProfileAtomically(raw: string): void {
@@ -723,22 +1255,93 @@ export class PluginVpnController {
         fs.renameSync(temporary, this.profilePath);
     }
 
+    private protonProfileSelection(settings: VpnSettings): ProtonProfileSelection {
+        return {
+            country: normalizeCountry(settings.protonCountry),
+            freeOnly: settings.protonFreeOnly,
+            autoPing: settings.protonAutoPing,
+        };
+    }
+
+    private protonProfileMatches(username: string, selection: ProtonProfileSelection): boolean {
+        if (!fs.existsSync(this.profilePath) || !fs.existsSync(this.profileAccountPath)) return false;
+        try {
+            const value = JSON.parse(fs.readFileSync(this.profileAccountPath, "utf8")) as {
+                schema?: unknown;
+                username?: unknown;
+                country?: unknown;
+                freeOnly?: unknown;
+                autoPing?: unknown;
+            };
+            return value.schema === VPN_SCHEMA_VERSION
+                && typeof value.username === "string"
+                && protonUsernamesMatch(value.username, username)
+                && value.country === selection.country
+                && value.freeOnly === selection.freeOnly
+                && value.autoPing === selection.autoPing;
+        } catch {
+            return false;
+        }
+    }
+
+    private writeProtonProfileAccount(username: string, selection: ProtonProfileSelection): void {
+        fs.mkdirSync(this.dataDir, { recursive: true });
+        const temporary = `${this.profileAccountPath}.${process.pid}.${Date.now()}.tmp`;
+        fs.writeFileSync(temporary, JSON.stringify({
+            schema: VPN_SCHEMA_VERSION,
+            username: normalizeUsername(username),
+            country: selection.country,
+            freeOnly: selection.freeOnly,
+            autoPing: selection.autoPing,
+        }), { encoding: "utf8", mode: 0o600 });
+        fs.renameSync(temporary, this.profileAccountPath);
+    }
+
+    private clearProtonProfileAccount(): void {
+        fs.rmSync(this.profileAccountPath, { force: true });
+    }
+
+    private clearProtonArtifacts(): void {
+        for (const target of [this.profilePath, this.serviceConfigPath, this.profileAccountPath])
+            fs.rmSync(target, { force: true });
+        this.probePath = undefined;
+    }
+
     private async migrateGuiState(): Promise<void> {
         fs.mkdirSync(this.dataDir, { recursive: true });
         const markerPath = path.join(this.dataDir, MIGRATION_FILE);
-        if (fs.existsSync(markerPath)) return;
         const copies = [PROFILE_FILE, "proton-session.json"];
+        const imported: string[] = [];
         for (const file of copies) {
             const source = path.join(this.options.guiDataDir, file);
             const target = path.join(this.dataDir, file);
             if (fs.existsSync(source) && !fs.existsSync(target)) {
-                try { fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL); this.options.log("info", "estado compatível da GUI importado", { arquivo: file }); }
-                catch (error) { this.options.log("warn", "não consegui importar estado da GUI", { arquivo: file, erro: errorMessage(error) }); }
+                const temporary = `${target}.${process.pid}.${Date.now()}.migration.tmp`;
+                try {
+                    fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
+                    const raw = fs.readFileSync(temporary, "utf8");
+                    if (file === PROFILE_FILE) {
+                        const validation = windows.validateWireGuardProfile(raw);
+                        if (!validation.valid) throw new Error(validation.error || "perfil WireGuard inválido");
+                    } else {
+                        const session = JSON.parse(raw) as unknown;
+                        if (session === null || typeof session !== "object" || Array.isArray(session))
+                            throw new Error("sessão Proton inválida");
+                    }
+                    fs.renameSync(temporary, target);
+                    imported.push(file);
+                    this.options.log("info", "estado compatível da GUI importado", { arquivo: file });
+                } catch (error) {
+                    this.options.log("warn", "não consegui importar estado da GUI", { arquivo: file, erro: errorMessage(error) });
+                    try { fs.rmSync(temporary, { force: true }); } catch { }
+                }
             }
         }
-        const temporary = `${markerPath}.${process.pid}.${Date.now()}.tmp`;
-        fs.writeFileSync(temporary, JSON.stringify({ schema: VPN_SCHEMA_VERSION, completedAt: Date.now(), source: "gui-compatible-profile-only" }), "utf8");
-        fs.renameSync(temporary, markerPath);
+        if (!fs.existsSync(markerPath) || imported.length > 0) {
+            const temporary = `${markerPath}.${process.pid}.${Date.now()}.tmp`;
+            fs.writeFileSync(temporary, JSON.stringify({ schema: VPN_SCHEMA_VERSION, completedAt: Date.now(), source: "gui-compatible-profile-only", imported }), "utf8");
+            fs.renameSync(temporary, markerPath);
+        }
     }
 }
 

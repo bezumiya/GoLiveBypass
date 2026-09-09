@@ -103,6 +103,27 @@ func (b *Broker) Subscribe(ip string) (*Subscription, *ReleaseEvent, error) {
 	return &Subscription{broker: b, client: c}, latest, nil
 }
 
+// SeedLatest registra a linha de base conhecida pelo poller sem acordar os
+// clientes. Isso fecha a janela logo apos um restart: um webhook atrasado nao
+// pode ser o primeiro evento e rebaixar o replay antes do proximo poll.
+func (b *Broker) SeedLatest(event ReleaseEvent) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, valid := CompareReleaseTags(event.Tag, event.Tag); !valid {
+		return false
+	}
+	if b.latest != nil {
+		comparison, valid := CompareReleaseTags(event.Tag, b.latest.Tag)
+		if !valid || comparison <= 0 {
+			return false
+		}
+	}
+	copy := event
+	b.latest = &copy
+	return true
+}
+
 // Publish retorna false quando o delivery ja foi processado. Eventos novos
 // substituem o pulso pendente de um cliente lento, em vez de travar o webhook.
 func (b *Broker) Publish(deliveryID string, event ReleaseEvent) bool {
@@ -114,10 +135,26 @@ func (b *Broker) Publish(deliveryID string, event ReleaseEvent) bool {
 	if _, ok := b.seen[deliveryID]; ok {
 		return false
 	}
-	b.seen[deliveryID] = now
-	if len(b.seen) > maxRememberedDelivery {
-		b.pruneOldest()
+	if _, valid := CompareReleaseTags(event.Tag, event.Tag); !valid {
+		return false
 	}
+	// O polling usa um delivery proprio. Se o webhook chegar tambem, o mesmo
+	// release nao deve acordar cada cliente duas vezes.
+	if b.latest != nil && b.latest.Tag == event.Tag && b.latest.PublishedAt == event.PublishedAt {
+		b.rememberDelivery(deliveryID, now)
+		return false
+	}
+	if b.latest != nil {
+		comparison, valid := CompareReleaseTags(event.Tag, b.latest.Tag)
+		if !valid || comparison <= 0 {
+			// Um webhook atrasado nunca pode rebaixar o replay deixado pelo
+			// poller (ou por outro webhook). Ainda marcamos o delivery como
+			// visto para nao reprocessa-lo em cada retry do GitHub.
+			b.rememberDelivery(deliveryID, now)
+			return false
+		}
+	}
+	b.rememberDelivery(deliveryID, now)
 
 	event.DeliveryID = deliveryID
 	copy := event
@@ -153,6 +190,13 @@ func (b *Broker) pruneSeen(now time.Time) {
 		if seenAt.Before(cutoff) {
 			delete(b.seen, id)
 		}
+	}
+}
+
+func (b *Broker) rememberDelivery(deliveryID string, now time.Time) {
+	b.seen[deliveryID] = now
+	if len(b.seen) > maxRememberedDelivery {
+		b.pruneOldest()
 	}
 }
 

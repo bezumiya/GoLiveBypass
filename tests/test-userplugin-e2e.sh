@@ -40,6 +40,28 @@ trap "rm -rf '$WORK'" EXIT
 
 cd "$WORK"
 
+# O helper nativo faz parte do asset real do plugin. O workflow de release o
+# compila para Windows x64 antes de zipar; reproduzimos essa etapa em um
+# diretório temporário para não sujar goLiveBypass/ no checkout.
+step "Preparar helper proton-confgen Windows x64"
+PLUGIN_SOURCE="$WORK/goLiveBypass"
+cp -R "$REPO/goLiveBypass" "$PLUGIN_SOURCE"
+mkdir -p "$PLUGIN_SOURCE/bin/win32-x64"
+if command -v go >/dev/null 2>&1; then
+    if (cd "$REPO/tools/proton-confgen" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$PLUGIN_SOURCE/bin/win32-x64/proton-confgen.exe" ./cmd/protonvpn-wg); then
+        ok "proton-confgen.exe compilado para Windows x64"
+    else
+        bad "falha ao compilar proton-confgen.exe para Windows x64"
+        exit 1
+    fi
+elif [ -f "$REPO/tools/proton-confgen/build/proton-confgen.exe" ]; then
+    cp "$REPO/tools/proton-confgen/build/proton-confgen.exe" "$PLUGIN_SOURCE/bin/win32-x64/proton-confgen.exe"
+    ok "proton-confgen.exe reutilizado do build local"
+else
+    bad "Go e proton-confgen.exe não estão disponíveis para montar o asset"
+    exit 1
+fi
+
 # Helper python para criar zip (caminho de origem -> zip)
 create_zip_py() {
 python3 - "$@" <<'PYEOF'
@@ -77,7 +99,7 @@ PYEOF
 
 # --------------------------------------------------------------------------- 1. Zipar
 step "1. Zipar o plugin (simula CI)"
-if create_zip_py "$REPO/goLiveBypass" "$ASSET"; then
+if create_zip_py "$PLUGIN_SOURCE" "$ASSET"; then
     ok "zip criado: $ASSET ($(stat -c%s "$ASSET" 2>/dev/null || stat -f%z "$ASSET") bytes)"
 else
     bad "zip falhou"
@@ -86,7 +108,7 @@ fi
 
 # --------------------------------------------------------------------------- 2. Conteudo do zip
 step "2. Conteudo do zip"
-expected_files="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/update-channel.ts goLiveBypass/stability.ts goLiveBypass/vpn-controller.ts goLiveBypass/vpn-proton.ts goLiveBypass/vpn-types.ts goLiveBypass/vpn-windows.ts goLiveBypass/manifest.json"
+expected_files="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/update-channel.ts goLiveBypass/update-security.ts goLiveBypass/stability.ts goLiveBypass/vpn-controller.ts goLiveBypass/vpn-proton.ts goLiveBypass/vpn-types.ts goLiveBypass/vpn-windows.ts goLiveBypass/manifest.json goLiveBypass/bin/win32-x64/proton-confgen.exe"
 content=$(list_zip_py "$ASSET" | sort)
 for f in $expected_files; do
     if printf '%s\n' "$content" | grep -qF "$f"; then
@@ -135,7 +157,7 @@ else
     bad "pasta $target NAO foi criada"
 fi
 # Validar arquivos extraidos
-for f in index.tsx native.ts update-channel.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
+for f in index.tsx native.ts update-channel.ts update-security.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json bin/win32-x64/proton-confgen.exe; do
     if [ -f "$target/$f" ]; then
         ok "extraido $f ($(stat -c%s "$target/$f" 2>/dev/null || stat -f%z "$target/$f") bytes)"
     else
@@ -170,10 +192,10 @@ if [ -f "$manifest" ]; then
     else
         bad "version do zip = $actual_version (esperado $VERSION)"
     fi
-    if grep -q "pdl-clay/GoLiveBypass" "$manifest"; then
-        ok "updater.id = pdl-clay/GoLiveBypass"
+    if grep -q "bezumiya/GoLiveBypass" "$manifest"; then
+        ok "updater.id = bezumiya/GoLiveBypass"
     else
-        bad "updater.id NAO e pdl-clay/GoLiveBypass"
+        bad "updater.id NAO e bezumiya/GoLiveBypass"
     fi
     if grep -q "vencord.zip" "$manifest"; then
         ok "updater.assetName termina com vencord.zip"
@@ -229,11 +251,13 @@ step "7. Hash dos arquivos extraidos confere com o repo"
 # Re-extrair para ter o estado novo
 rm -rf "$target"
 extract_zip_py "$ASSET" "$USERPLUGINS" >/dev/null
-for f in index.tsx native.ts update-channel.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json; do
-    if [ -f "$target/$f" ] && [ -f "$REPO/goLiveBypass/$f" ]; then
+for f in index.tsx native.ts update-channel.ts update-security.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json bin/win32-x64/proton-confgen.exe; do
+    source_file="$REPO/goLiveBypass/$f"
+    [ -f "$source_file" ] || source_file="$PLUGIN_SOURCE/$f"
+    if [ -f "$target/$f" ] && [ -f "$source_file" ]; then
         hash_target=$(sha256sum "$target/$f" | awk '{print $1}')
-        hash_repo=$(sha256sum "$REPO/goLiveBypass/$f" | awk '{print $1}')
-        if [ "$hash_target" = "$hash_repo" ]; then
+        hash_source=$(sha256sum "$source_file" | awk '{print $1}')
+        if [ "$hash_target" = "$hash_source" ]; then
             ok "$f: hash confere com o repo"
         else
             bad "$f: hash DIFERENTE (zip corrompido?)"

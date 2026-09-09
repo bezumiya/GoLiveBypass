@@ -40,8 +40,9 @@ abertura relatado.
 rotina de varredura. A rotina lista apenas entradas regulares cujo basename
 corresponda ao padrão estrito, ignora os caminhos protegidos e ignora arquivos
 recentes durante uma pequena janela de segurança. A remoção individual usa
-`lstat` e `fs.rmSync` com `maxRetries`/`retryDelay`; symlink, entrada não regular,
-path inválido ou arquivo ainda bloqueado não é removido nem seguido.
+`lstat` e três tentativas assíncronas limitadas, sem remoção recursiva; symlink,
+entrada não regular, path inválido ou arquivo ainda bloqueado não é removido
+nem seguido.
 
 O resultado da varredura informa contagens de removidos, protegidos, recentes,
 inválidos e ocupados para logging sanitizado. A API não contém credenciais,
@@ -65,11 +66,14 @@ como diagnóstico e não muda o resultado da operação de rede.
 
 ### Concorrência e segurança
 
-O owner atual é capturado antes da limpeza. A remoção do lock compara identidade
-completa do registro; respostas atrasadas não podem apagar o lock de uma nova
-geração. O `probePath` lido do owner só pode ser usado para execução ou remoção
-se estiver dentro do diretório de dados e obedecer ao padrão. O controlador não
-encerra processos por PID e não interfere em WireSock externo.
+O controlador guarda o token (`pid`, `generation`, `createdAt`) da sessão que
+registrou o probe. Antes de remover um caminho conhecido, a identidade do owner
+atual precisa coincidir; antes de uma varredura, a presença de outro token faz a
+rotina desistir. A remoção do lock compara identidade completa do registro;
+respostas atrasadas não podem apagar o lock de uma nova geração. O `probePath`
+lido do owner só pode ser usado para execução ou remoção se estiver dentro do
+diretório de dados e obedecer ao padrão. O controlador não encerra processos
+por PID e não interfere em WireSock externo.
 
 ## Validação
 

@@ -2,8 +2,10 @@
 package config
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -62,6 +64,7 @@ func Parse() (*Config, error) {
 
 	// Human verification
 	flag.StringVar(&cfg.HVToken, "hv-token", "", "Human verification token to replay after solving a CAPTCHA (see the code 9001 error)")
+	flag.BoolVar(&cfg.StdinSecrets, "stdin-secrets", false, "Read plugin authentication secrets from a private JSON object on stdin")
 
 	// Advanced configuration
 	flag.StringVar(&cfg.APIURL, "api-url", constants.DefaultAPIURL, "ProtonVPN API URL")
@@ -90,6 +93,7 @@ func Parse() (*Config, error) {
 	flag.BoolVar(&cfg.CheckSession, "check-session", false, "Check if cached session is valid and exit")
 	flag.BoolVar(&cfg.CheckPlan, "check-plan", false, "Check the cached account plan and exit (does not prompt for a password)")
 	flag.BoolVar(&cfg.LoginOnly, "login-only", false, "Authenticate, save session, and exit")
+	flag.BoolVar(&cfg.SessionUsername, "session-username", false, "Print the username stored in the cached session and exit")
 	flag.BoolVar(&cfg.RoutePool, "route-pool", false, "Generate a local pool of ping-validated routes")
 	flag.IntVar(&cfg.RoutePoolSize, "route-pool-size", 2, "Number of profiles to generate in route-pool mode")
 	flag.StringVar(&cfg.RoutePoolOutputDir, "route-pool-output-dir", "", "Directory for route-pool profiles")
@@ -167,6 +171,13 @@ func Parse() (*Config, error) {
 		return cfg, nil
 	}
 
+	// -session-username only reads the local cache and does not need any
+	// authentication or route-selection flags.
+	if cfg.SessionUsername {
+		cfg.Username = validation.CleanUsername(cfg.Username)
+		return cfg, nil
+	}
+
 	// Validate required flags: countries are needed unless -server or -auto-ping is specified
 	if cfg.SpeedTest {
 		cfg.AutoPing = true
@@ -197,6 +208,45 @@ func Parse() (*Config, error) {
 	cfg.Username = validation.CleanUsername(cfg.Username)
 
 	return cfg, nil
+}
+
+type stdinSecrets struct {
+	Password               string `json:"password"`
+	TwoFactorCode          string `json:"twoFactorCode"`
+	HumanVerificationToken string `json:"humanVerificationToken"`
+}
+
+// ReadStdinSecrets consumes the private credential envelope used by the Discord
+// plugin. Secrets are intentionally never accepted in diagnostics or printed.
+func ReadStdinSecrets(cfg *Config) error {
+	if !cfg.StdinSecrets {
+		return nil
+	}
+	return readStdinSecrets(os.Stdin, cfg)
+}
+
+func readStdinSecrets(reader io.Reader, cfg *Config) error {
+	data, err := io.ReadAll(io.LimitReader(reader, 32*1024))
+	if err != nil {
+		return fmt.Errorf("failed to read private authentication input: %w", err)
+	}
+	var input stdinSecrets
+	if err := json.Unmarshal(data, &input); err != nil {
+		return fmt.Errorf("private authentication input is invalid")
+	}
+	if cfg.Password == "" {
+		cfg.Password = input.Password
+	}
+	if cfg.TwoFactorCode == "" {
+		cfg.TwoFactorCode = input.TwoFactorCode
+	}
+	if cfg.HVToken == "" {
+		cfg.HVToken = input.HumanVerificationToken
+	}
+	if cfg.Password == "" {
+		return fmt.Errorf("private authentication input does not contain a password")
+	}
+	return nil
 }
 
 func validateFeatureFlags(cfg *Config) error {

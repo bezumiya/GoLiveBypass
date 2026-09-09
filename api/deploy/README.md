@@ -10,6 +10,7 @@ Internet ──443──> OpenLiteSpeed (TLS pelo CyberPanel)
                       ├──> api.github.com (cria as issues)
 GitHub ──webhook───────┘
 GUI ─────SSE /bugs/v1/updates/stream────> API
+site ────GET /bugs/v1/releases/latest───> API ────> api.github.com
 ```
 
 A porta 8091 fica publicada apenas em `127.0.0.1` — nenhum acesso direto externo.
@@ -20,6 +21,8 @@ A porta 8091 fica publicada apenas em `127.0.0.1` — nenhum acesso direto exter
 - Reports: `https://api.skyplaceia.com/bugs/v1/reports`
 - Webhook: `https://api.skyplaceia.com/bugs/v1/updates/github/webhook`
 - Update stream: `https://api.skyplaceia.com/bugs/v1/updates/stream`
+- Release catalog: `https://api.skyplaceia.com/bugs/v1/releases/latest`
+- Download alias: `https://api.skyplaceia.com/bugs/v1/releases/latest/download/windows`
 
 > Nota de integração dos apps clientes (GUI/standalone): a URL base passa a ser
 > `https://api.skyplaceia.com/bugs` (config `BASE_PATH=bugs` no servidor) e os
@@ -38,6 +41,7 @@ completo (`/bugs/...`) — por isso o container recebe o prefixo e a API usa
    - `API_TOKEN`: `openssl rand -hex 32` (compartilhado com os apps clientes).
    - `GITHUB_TOKEN`: PAT fine-grained no repo `bezumiya/GoLiveBypass`, permissão **Issues: Read and write**, sem acesso a código.
    - `GITHUB_WEBHOOK_SECRET`: `openssl rand -hex 32`; o mesmo valor será cadastrado no webhook de Release.
+   - `WEBSITE_ORIGINS`: domínio publicado do site e origens locais, separados por vírgula; não use `*`.
 
 ## Passos
 
@@ -102,6 +106,10 @@ curl -fsS -X POST https://api.skyplaceia.com/bugs/v1/reports \
 
 # stream SSE; deixe este comando aberto e publique uma release de teste para conferir o pulso
 curl -i -N https://api.skyplaceia.com/bugs/v1/updates/stream
+
+# catálogo stable e redirect do instalador Windows
+curl -fsS https://api.skyplaceia.com/bugs/v1/releases/latest
+curl -fsSI https://api.skyplaceia.com/bugs/v1/releases/latest/download/windows
 
 # sem token -> 401 | payload invalido -> 400 | rajada >10/min -> 429 + Retry-After
 

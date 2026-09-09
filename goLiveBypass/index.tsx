@@ -14,16 +14,18 @@ import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import type { RenderModalProps } from "@vencord/discord-types";
 import { findStoreLazy } from "@webpack";
-import { Button, Constants, MaskedLink, Modal, React, RestAPI, SearchableSelect, TextInput, openModal, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
+import { Button, Constants, MaskedLink, Modal, React, RestAPI, SearchableSelect, TextInput, closeModal as closeDiscordModal, openModal, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
 
 import {
     evaluateStreamObservation,
     evaluateStreamClaim,
     initialStreamClaimState,
+    normalizeStreamClaim,
     type StreamClaimState,
     type StreamObservation,
     type StreamObservationStatus,
 } from "./stability";
+import { protonUsernamesMatch } from "./vpn-types";
 
 type PluginUpdateChannel = "stable" | "beta";
 
@@ -33,6 +35,7 @@ interface PluginUpdateStatus {
     enabled: boolean;
     pending: boolean;
     pendingVersion?: string;
+    pendingChannel?: PluginUpdateChannel;
     lastCheckedAt: number | null;
     lastError: string | null;
 }
@@ -44,6 +47,7 @@ interface PluginUpdateCheckResult {
     latest?: string;
     available?: boolean;
     pending?: boolean;
+    pendingChannel?: PluginUpdateChannel;
     error?: string;
 }
 
@@ -54,6 +58,7 @@ interface PluginUpdateResult {
     latest?: string;
     channel?: PluginUpdateChannel;
     pending?: boolean;
+    pendingChannel?: PluginUpdateChannel;
     reloadRequired?: boolean;
     error?: string;
 }
@@ -61,6 +66,7 @@ interface PluginUpdateResult {
 interface PluginUpdateNative {
     configurePluginUpdates?: (input: unknown) => Promise<{ enabled: boolean; channel: PluginUpdateChannel }>;
     getPluginUpdateStatus?: () => Promise<PluginUpdateStatus>;
+    restartDiscord?: () => Promise<{ success: boolean; error?: string }>;
 }
 
 const Native = VencordNative?.pluginHelpers?.GoLiveBypass as unknown as (PluginNative<typeof import("./native")> & PluginUpdateNative) | undefined;
@@ -106,6 +112,10 @@ const VIDEO_GUARD = "2026-08-video-guard";
 
 const PLUGIN_VERSION = "2.0.0-beta.1";
 const PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS = 15_000;
+const PLUGIN_UPDATE_STATUS_TIMEOUT_MS = 10_000;
+const PLUGIN_UPDATE_OPERATION_TIMEOUT_MS = 45_000;
+const CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS = 30_000;
+const PLUGIN_UPDATE_DEFER_MS = 6 * 60 * 60 * 1_000;
 
 const AUTOMATIC = "";
 const VOICE_KEYS: "voiceRegion"[] = ["voiceRegion"];
@@ -115,6 +125,8 @@ let original: RegionStore | undefined;
 let streamClaimTimer: ReturnType<typeof setInterval> | null = null;
 let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let lastNotifiedPendingVersion: string | null = null;
+let lastNotifiedUpdateErrorKey: string | null = null;
+let lastSuppressedUpdateErrorKey: string | null = null;
 let streamClaimState: StreamClaimState = initialStreamClaimState();
 let streamClaimStatus = "idle";
 let streamClaimProbeFailed = false;
@@ -126,15 +138,249 @@ let lastStreamObservation: {
 } | null = null;
 let lastSelectedStreamRegion: string | null = null;
 let onboardingTimer: ReturnType<typeof setTimeout> | null = null;
+let onboardingOpen = false;
+let onboardingModalKey: string | null = null;
+let onboardingModalToken = 0;
+let pluginLifecycleGeneration = 0;
+let pluginUpdateStatusFlight: Promise<PluginUpdateStatus> | null = null;
+const pluginUpdateOverlayDismissers = new Set<() => void>();
 
 function normalizedUpdateChannel(value: unknown): PluginUpdateChannel {
     return value === "beta" ? "beta" : "stable";
 }
 
-function notifyPendingPluginUpdate(version: unknown): void {
+function pluginUpdateStatusMatchesPolicy(status: PluginUpdateStatus, policy: { enabled: boolean; channel: PluginUpdateChannel }): boolean {
+    return status.enabled === policy.enabled && status.channel === policy.channel;
+}
+
+function pluginUpdateStatusMatchesRendererPolicy(status: PluginUpdateStatus): boolean {
+    return pluginUpdateStatusMatchesPolicy(status, {
+        enabled: settings.store.autoUpdate !== false,
+        channel: normalizedUpdateChannel(settings.store.updateChannel),
+    });
+}
+
+function withTimeout<T>(operation: () => Promise<T> | T, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error(timeoutMessage));
+        }, timeoutMs);
+        const resolveOnce = (value: T) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(value);
+        };
+        const rejectOnce = (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
+        };
+        Promise.resolve().then(operation).then(resolveOnce, rejectOnce);
+    });
+}
+
+function readPluginUpdateStatus(): Promise<PluginUpdateStatus> | null {
+    const getStatus = Native?.getPluginUpdateStatus;
+    if (typeof getStatus !== "function") return null;
+    if (pluginUpdateStatusFlight) return pluginUpdateStatusFlight;
+
+    const flight = withTimeout(
+        () => getStatus(),
+        PLUGIN_UPDATE_STATUS_TIMEOUT_MS,
+        "A consulta do estado do updater excedeu o tempo limite.",
+    );
+    pluginUpdateStatusFlight = flight;
+    void flight.finally(() => {
+        if (pluginUpdateStatusFlight === flight) pluginUpdateStatusFlight = null;
+    }).catch(() => undefined);
+    return flight;
+}
+
+function dismissPluginUpdateOverlays(): void {
+    for (const dismiss of pluginUpdateOverlayDismissers) dismiss();
+}
+
+function dismissPluginUpdateToast(version: string): void {
+    // Permite que o polling do painel mostre novamente a mesma versão quando o
+    // adiamento expirar; enquanto isso, updateDeferredUntil faz a supressão.
+    lastNotifiedPendingVersion = null;
+    settings.store.updateDeferredVersion = version;
+    settings.store.updateDeferredUntil = String(Date.now() + PLUGIN_UPDATE_DEFER_MS);
+}
+
+function reloadForPreparedPluginUpdate(): void {
+    const restart = Native?.restartDiscord;
+    if (typeof restart !== "function") {
+        showToast("Reinicie o Discord manualmente para aplicar a atualização do GoLiveBypass.", Toasts.Type.FAILURE);
+        return;
+    }
+    void restart().then(result => {
+        if (result?.success === false) {
+            showToast(`GoLiveBypass não conseguiu reiniciar o Discord: ${result.error || "veja o log"}`, Toasts.Type.FAILURE);
+        }
+    }).catch(error => {
+        showToast(`GoLiveBypass não conseguiu reiniciar o Discord: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+    });
+}
+
+function PluginUpdateToast({ currentVersion, availableVersion, channel, lifecycleGeneration }: { currentVersion: string; availableVersion: string; channel: PluginUpdateChannel; lifecycleGeneration: number }) {
+    const [dismissed, setDismissed] = useState(false);
+    const dismiss = React.useCallback(() => setDismissed(true), []);
+
+    useEffect(() => {
+        pluginUpdateOverlayDismissers.add(dismiss);
+        return () => { pluginUpdateOverlayDismissers.delete(dismiss); };
+    }, [dismiss]);
+
+    if (dismissed || lifecycleGeneration !== pluginLifecycleGeneration) return null;
+
+    return (
+        <div
+            role="status"
+            aria-live="polite"
+            onClick={event => event.stopPropagation()}
+            style={{
+                width: "min(360px, calc(100vw - 32px))",
+                padding: "16px",
+                borderRadius: "8px",
+                background: "var(--background-floating)",
+                border: "1px solid var(--background-modifier-accent)",
+                boxShadow: "var(--elevation-high)",
+            }}
+        >
+            <Paragraph><strong>Atualização do GoLiveBypass pronta</strong></Paragraph>
+            <Paragraph>Atual: v{currentVersion} · disponível: v{availableVersion} · Canal: {channel}</Paragraph>
+            <Paragraph>A versão disponível foi baixada, verificada e preparada. O Discord não será reiniciado sozinho.</Paragraph>
+            <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                <Button onClick={() => { dismiss(); dismissPluginUpdateToast(availableVersion); }}>Depois</Button>
+                <Button onClick={() => { dismiss(); reloadForPreparedPluginUpdate(); }}>Recarregar Discord</Button>
+            </div>
+        </div>
+    );
+}
+
+function PluginUpdateFailureToast({ currentVersion, channel, error, lifecycleGeneration }: { currentVersion: string; channel: PluginUpdateChannel; error: string; lifecycleGeneration: number }) {
+    const [dismissed, setDismissed] = useState(false);
+    const dismiss = React.useCallback(() => setDismissed(true), []);
+
+    useEffect(() => {
+        pluginUpdateOverlayDismissers.add(dismiss);
+        return () => { pluginUpdateOverlayDismissers.delete(dismiss); };
+    }, [dismiss]);
+
+    if (dismissed || lifecycleGeneration !== pluginLifecycleGeneration) return null;
+
+    return (
+        <div
+            role="status"
+            aria-live="polite"
+            onClick={event => event.stopPropagation()}
+            style={{
+                width: "min(360px, calc(100vw - 32px))",
+                padding: "16px",
+                borderRadius: "8px",
+                background: "var(--background-floating)",
+                border: "1px solid var(--status-danger)",
+                boxShadow: "var(--elevation-high)",
+            }}
+        >
+            <Paragraph><strong>Falha ao atualizar o GoLiveBypass</strong></Paragraph>
+            <Paragraph>Atual: v{currentVersion} · Canal: {channel}</Paragraph>
+            <Paragraph>{error.slice(0, 240)}</Paragraph>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <Button onClick={dismiss}>Depois</Button>
+            </div>
+        </div>
+    );
+}
+
+interface PluginUpdateErrorContext {
+    key: string;
+    currentVersion: string;
+    channel: PluginUpdateChannel;
+    detail: string;
+}
+
+function pluginUpdateErrorContext(current: unknown, channel: unknown, error: unknown): PluginUpdateErrorContext | null {
+    if (typeof error !== "string" || !error.trim()) return null;
+    const currentVersion = typeof current === "string" && current ? current : PLUGIN_VERSION;
+    const normalizedChannel = normalizedUpdateChannel(channel);
+    const detail = error.trim().slice(0, 240);
+    return { key: `${normalizedChannel}:${currentVersion}:${detail}`, currentVersion, channel: normalizedChannel, detail };
+}
+
+function suppressPluginUpdateFailure(current: unknown, channel: unknown, error: unknown): void {
+    const context = pluginUpdateErrorContext(current, channel, error);
+    if (context) lastSuppressedUpdateErrorKey = context.key;
+}
+
+function notifyPluginUpdateFailure(current: unknown, channel: unknown, error: unknown): void {
+    const context = pluginUpdateErrorContext(current, channel, error);
+    if (!context) return;
+    if (context.key === lastSuppressedUpdateErrorKey) {
+        lastSuppressedUpdateErrorKey = null;
+        return;
+    }
+    lastSuppressedUpdateErrorKey = null;
+    if (context.key === lastNotifiedUpdateErrorKey) return;
+    lastNotifiedUpdateErrorKey = context.key;
+    showToast("Atualização do GoLiveBypass", Toasts.Type.CUSTOM, {
+        position: Toasts.Position.BOTTOM,
+        duration: 15_000,
+        component: <PluginUpdateFailureToast currentVersion={context.currentVersion} channel={context.channel} error={context.detail} lifecycleGeneration={pluginLifecycleGeneration} />,
+    });
+}
+
+function notifyPendingPluginUpdate(current: unknown, version: unknown, channel: unknown): void {
     if (typeof version !== "string" || !version || version === lastNotifiedPendingVersion) return;
+    const currentVersion = typeof current === "string" && current ? current : PLUGIN_VERSION;
+    const normalizedChannel = normalizedUpdateChannel(channel);
+    const deferredVersion = settings.store.updateDeferredVersion;
+    const deferredUntil = Number(settings.store.updateDeferredUntil);
+    if (deferredVersion === version && Number.isFinite(deferredUntil) && deferredUntil > Date.now()) return;
     lastNotifiedPendingVersion = version;
-    showToast(`GoLiveBypass v${version} pronto; recarregue o Discord para aplicar a atualização.`, Toasts.Type.SUCCESS);
+    showToast("Atualização do GoLiveBypass", Toasts.Type.CUSTOM, {
+        position: Toasts.Position.BOTTOM,
+        duration: 15_000,
+        component: <PluginUpdateToast currentVersion={currentVersion} availableVersion={version} channel={normalizedChannel} lifecycleGeneration={pluginLifecycleGeneration} />,
+    });
+}
+
+function schedulePluginUpdateStatusObservation(lifecycleGeneration: number): void {
+    if (updateCheckTimer !== null) clearTimeout(updateCheckTimer);
+
+    const observe = () => {
+        updateCheckTimer = null;
+        if (lifecycleGeneration !== pluginLifecycleGeneration) return;
+        const scheduleNext = () => {
+            if (lifecycleGeneration !== pluginLifecycleGeneration) return;
+            updateCheckTimer = setTimeout(observe, PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS);
+        };
+        const statusRequest = readPluginUpdateStatus();
+        if (!statusRequest) {
+            scheduleNext();
+            return;
+        }
+        statusRequest.then(status => {
+            if (lifecycleGeneration !== pluginLifecycleGeneration) return;
+            if (!pluginUpdateStatusMatchesRendererPolicy(status)) return;
+            if (status.lastError) notifyPluginUpdateFailure(status.current, status.channel, status.lastError);
+            else {
+                lastNotifiedUpdateErrorKey = null;
+                lastSuppressedUpdateErrorKey = null;
+            }
+            if (status.pending) notifyPendingPluginUpdate(status.current, status.pendingVersion, status.pendingChannel || status.channel);
+        }).catch(error => {
+            if (lifecycleGeneration === pluginLifecycleGeneration) logger.error("Falha ao consultar atualização pendente do plugin", error);
+        }).finally(scheduleNext);
+    };
+
+    updateCheckTimer = setTimeout(observe, 8_000);
 }
 
 interface RegionSelectProps {
@@ -203,7 +449,7 @@ interface ProtonSessionCheck {
     valid: boolean;
     username?: string;
     expiresIn?: string;
-    code?: "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "UNKNOWN";
+    code?: "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "SESSION_PERSISTENCE" | "UNKNOWN";
     error?: string;
 }
 
@@ -222,6 +468,22 @@ interface PluginOptimizationStatus {
     updatedAt: number | null;
 }
 
+function protonSessionStatusTitle(code: ProtonSessionCheck["code"]): string {
+    switch (code) {
+        case "NETWORK_ERROR":
+        case "TIMEOUT":
+            return "Rede indisponível para verificar a sessão";
+        case "MISSING_EXECUTABLE":
+            return "Componente ProtonVPN ausente";
+        case "SESSION_PERSISTENCE":
+            return "Armazenamento da sessão indisponível";
+        case "INVALID_SESSION":
+            return "Sessão precisa ser renovada";
+        default:
+            return "Não foi possível verificar a sessão";
+    }
+}
+
 type OnboardingPage = "account" | "route" | "ready";
 
 const onboardingBoxStyle = {
@@ -231,15 +493,19 @@ const onboardingBoxStyle = {
     padding: "16px",
 };
 
-function OnboardingSteps({ page }: { page: OnboardingPage }) {
+function OnboardingSteps({ page, customMode }: { page: OnboardingPage; customMode: boolean }) {
     const active = page === "account" ? 0 : 1;
+    const labels = customMode ? ["1  Configuração WireGuard", "2  Validação da rota"] : ["1  Conta Proton", "2  Rota WireGuard"];
     return (
-        <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }} aria-label="Etapas da configuração">
-            {["1  Conta Proton", "2  Rota WireGuard"].map((label, index) => (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }} aria-label="Etapas da configuração" role="list">
+            {labels.map((label, index) => (
                 <div
                     key={label}
+                    role="listitem"
+                    aria-current={index === active ? "step" : undefined}
                     style={{
-                        flex: 1,
+                        flex: "1 1 160px",
+                        minWidth: 0,
                         padding: "8px 10px",
                         borderRadius: "6px",
                         background: index <= active ? "var(--brand-experiment-560)" : "var(--background-tertiary)",
@@ -256,7 +522,9 @@ function OnboardingSteps({ page }: { page: OnboardingPage }) {
     );
 }
 
-function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps }) {
+function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderModalProps; onClosed: () => void }) {
+    const customMode = settings.store.vpnMode === "custom";
+    const requiredOnOpen = Boolean(Native && settings.store.onboardingCompleted !== true);
     const [page, setPage] = useState<OnboardingPage>("account");
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
@@ -267,40 +535,119 @@ function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps })
     const [error, setError] = useState<string | null>(null);
     const [optimization, setOptimization] = useState<PluginOptimizationStatus | null>(null);
     const [requestId, setRequestId] = useState<string | null>(null);
+    const disposedRef = React.useRef(false);
+    const accountRevisionRef = React.useRef(0);
+    const sessionCheckRef = React.useRef(0);
+    const closedRef = React.useRef(false);
+    const pageHeadingRef = React.useRef<HTMLHeadingElement | null>(null);
+    const loginRequestIdRef = React.useRef<string | null>(null);
+    const optimizationRequestRef = React.useRef<string | null>(null);
+    const optimizationAttemptRef = React.useRef(0);
+    const optimizationStatusRequestRef = React.useRef(0);
+    const requireFreshOptimizationRef = React.useRef(false);
+    const [loginCancelRequested, setLoginCancelRequested] = useState(false);
+
+    const cancelActiveOptimization = () => {
+        optimizationAttemptRef.current++;
+        optimizationStatusRequestRef.current++;
+        const activeRequestId = optimizationRequestRef.current;
+        optimizationRequestRef.current = null;
+        if (!activeRequestId || typeof Native?.cancelProtonOptimization !== "function") return;
+        void Promise.resolve(Native.cancelProtonOptimization(activeRequestId)).catch(error => logger.error("Falha ao cancelar otimização ao fechar o assistente", error));
+    };
+
+    const cancelActiveLogin = () => {
+        const activeRequestId = loginRequestIdRef.current;
+        if (!activeRequestId || typeof Native?.cancelProtonLogin !== "function") return;
+        loginRequestIdRef.current = null;
+        accountRevisionRef.current++;
+        sessionCheckRef.current++;
+        setPassword("");
+        setTwoFactorCode("");
+        if (!disposedRef.current) {
+            setLoginCancelRequested(true);
+            setError("Cancelando o login Proton…");
+        }
+        void Promise.resolve(Native.cancelProtonLogin(activeRequestId)).catch(error => logger.error("Falha ao cancelar login Proton", error));
+    };
+
+    useEffect(() => {
+        disposedRef.current = false;
+        return () => {
+            disposedRef.current = true;
+            accountRevisionRef.current++;
+            sessionCheckRef.current++;
+            cancelActiveLogin();
+            cancelActiveOptimization();
+            onClosed();
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!disposedRef.current) pageHeadingRef.current?.focus({ preventScroll: true });
+    }, [page]);
+
+    const closeModal = () => {
+        if (closedRef.current) return;
+        if (requiredOnOpen && settings.store.onboardingCompleted !== true && page !== "ready") return;
+        closedRef.current = true;
+        if (page === "account" && busy) cancelActiveLogin();
+        if (page === "route" && busy) cancelActiveOptimization();
+        disposedRef.current = true;
+        accountRevisionRef.current++;
+        sessionCheckRef.current++;
+        onClosed();
+        modalProps.onClose();
+    };
 
     const complete = () => {
         settings.store.onboardingCompleted = true;
-        modalProps.onClose();
+        closeModal();
     };
 
     const checkSession = async (value: string) => {
         if (!Native || !value.trim()) {
-            setSession({ valid: false, code: "INVALID_SESSION", error: "Informe o usuário Proton." });
+            if (!disposedRef.current) setSession({ valid: false, code: "INVALID_SESSION", error: "Informe o usuário Proton." });
             return null;
         }
+        const revision = accountRevisionRef.current;
+        const request = ++sessionCheckRef.current;
+        const isCurrent = () => !disposedRef.current
+            && revision === accountRevisionRef.current
+            && request === sessionCheckRef.current;
         setSessionLoading(true);
         try {
             const result = await Native.checkProtonSession(value.trim()) as ProtonSessionCheck;
+            if (!isCurrent()) return null;
             setSession(result);
             return result;
-        } catch (checkError) {
+        } catch {
+            if (!isCurrent()) return null;
             const result: ProtonSessionCheck = {
                 valid: false,
                 code: "NETWORK_ERROR",
-                error: checkError instanceof Error ? checkError.message : "Não foi possível verificar a sessão Proton.",
+                error: "Não foi possível verificar a sessão Proton por causa da rede.",
             };
             setSession(result);
             return result;
         } finally {
-            setSessionLoading(false);
+            if (isCurrent()) setSessionLoading(false);
         }
     };
 
     useEffect(() => {
         let disposed = false;
+        const loadRevision = accountRevisionRef.current;
         const load = async () => {
             if (!Native) {
                 if (!disposed) setSessionLoading(false);
+                return;
+            }
+            if (customMode) {
+                if (!disposed && !disposedRef.current) {
+                    setSession(null);
+                    setSessionLoading(false);
+                }
                 return;
             }
             try {
@@ -309,59 +656,96 @@ function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps })
                 const savedUsername = typeof record.sessionUsername === "string" && record.sessionUsername.trim()
                     ? record.sessionUsername.trim()
                     : typeof record.protonUsername === "string" ? record.protonUsername.trim() : "";
-                if (disposed) return;
+                if (disposed || disposedRef.current || loadRevision !== accountRevisionRef.current) return;
                 if (savedUsername) {
                     setUsername(savedUsername);
                     const result = await checkSession(savedUsername);
-                    if (!disposed && result?.valid) setError(null);
+                    if (!disposed && !disposedRef.current && result?.valid) setError(null);
                 } else {
                     setSessionLoading(false);
                 }
             } catch (loadError) {
-                if (!disposed) {
+                if (!disposed && !disposedRef.current && loadRevision === accountRevisionRef.current) {
                     setSessionLoading(false);
                     setError(loadError instanceof Error ? loadError.message : "Não foi possível ler a sessão Proton.");
                 }
             }
         };
         void load();
-        return () => { disposed = true; };
-    }, []);
+        return () => {
+            disposed = true;
+        };
+    }, [customMode]);
 
     useEffect(() => {
-        if (page !== "route" || !Native) return;
+        if (page !== "route" || customMode || !Native) return;
         let disposed = false;
         const refresh = async () => {
+            const request = ++optimizationStatusRequestRef.current;
             try {
                 const next = await Native.getProtonOptimizationStatus() as PluginOptimizationStatus;
-                if (!disposed) setOptimization(next);
+                const currentRequestId = optimizationRequestRef.current;
+                const belongsToCurrentAttempt = typeof currentRequestId === "string"
+                    && currentRequestId.length > 0
+                    && next.requestId === currentRequestId;
+                if (!disposed && !disposedRef.current && request === optimizationStatusRequestRef.current
+                    && !requireFreshOptimizationRef.current && belongsToCurrentAttempt) setOptimization(next);
             } catch (statusError) {
-                if (!disposed) logger.error("Falha ao ler progresso da otimização Proton", statusError);
+                if (!disposed && !disposedRef.current) logger.error("Falha ao ler progresso da otimização Proton", statusError);
             }
         };
         void refresh();
         const timer = setInterval(() => void refresh(), 750);
         return () => {
             disposed = true;
+            optimizationStatusRequestRef.current++;
             clearInterval(timer);
         };
-    }, [page]);
+    }, [page, customMode]);
+
+    const enterRoute = () => {
+        // O status nativo é global e pode refletir uma otimização anterior feita
+        // no painel da VPN. A página só deve aceitar dados da tentativa criada
+        // por este assistente.
+        requireFreshOptimizationRef.current = true;
+        optimizationRequestRef.current = null;
+        optimizationStatusRequestRef.current++;
+        setRequestId(null);
+        setOptimization(null);
+        setPage("route");
+    };
 
     const continueToRoute = async () => {
-        if (!Native || busy || sessionLoading || !username.trim()) return;
+        if (!Native || busy || sessionLoading || (!customMode && !username.trim())) return;
+        const revision = accountRevisionRef.current;
         setError(null);
         setBusy(true);
         try {
-            let verified = session?.valid && session.username?.toLowerCase() === username.trim().toLowerCase() ? session : null;
+            if (customMode) {
+                setSession(null);
+                enterRoute();
+                return;
+            }
+            let verified = session?.valid && typeof session.username === "string" && protonUsernamesMatch(session.username, username) ? session : null;
             if (!verified) {
+                if (session && !session.valid && session.code && session.code !== "INVALID_SESSION") {
+                    setError(session.error || protonSessionStatusTitle(session.code));
+                    return;
+                }
                 if (!password) {
                     setError("Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
                     return;
                 }
-                const loginResult = await Native.loginProton({ username: username.trim(), password, twoFactorCode });
+                const loginRequestId = `plugin-onboarding-login-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                loginRequestIdRef.current = loginRequestId;
+                setLoginCancelRequested(false);
+                const loginResult = await Native.loginProton({ username: username.trim(), password, twoFactorCode, requestId: loginRequestId });
+                if (loginRequestIdRef.current === loginRequestId) loginRequestIdRef.current = null;
+                if (disposedRef.current || revision !== accountRevisionRef.current) return;
                 if (!loginResult.success) {
                     const code = loginResult.code;
-                    if (code === "TWO_FACTOR_REQUIRED") setError("Esta conta exige o código 2FA.");
+                    if (code === "CANCELLED") setError("Login Proton cancelado. Você pode tentar novamente.");
+                    else if (code === "TWO_FACTOR_REQUIRED") setError("Esta conta exige o código 2FA.");
                     else if (code === "NETWORK_ERROR" || code === "TIMEOUT") setError("O login não conseguiu alcançar o Proton. Verifique a rede e tente novamente.");
                     else setError(loginResult.error || loginResult.message || "Não foi possível entrar no Proton.");
                     return;
@@ -369,10 +753,8 @@ function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps })
                 setPassword("");
                 setTwoFactorCode("");
                 const checked = await checkSession(username);
-                if (!checked) {
-                    setError("Não foi possível validar a sessão Proton.");
-                    return;
-                }
+                if (disposedRef.current || revision !== accountRevisionRef.current) return;
+                if (!checked) return;
                 if (!checked.valid) {
                     if (checked.code === "NETWORK_ERROR" || checked.code === "TIMEOUT") {
                         setError("Login concluído, mas a validação da sessão está temporariamente indisponível pela rede. Tente novamente antes de otimizar.");
@@ -384,22 +766,61 @@ function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps })
                 verified = checked;
             }
             if (!verified) return;
+            if (disposedRef.current || revision !== accountRevisionRef.current) return;
             setSession(verified);
-            setPage("route");
+            enterRoute();
         } catch (continueError) {
-            setError(continueError instanceof Error ? continueError.message : "Não foi possível concluir a etapa da conta Proton.");
+            if (!disposedRef.current && revision === accountRevisionRef.current) {
+                setError(continueError instanceof Error ? continueError.message : "Não foi possível concluir a etapa da conta Proton.");
+            }
         } finally {
-            setBusy(false);
+            loginRequestIdRef.current = null;
+            if (!disposedRef.current) setLoginCancelRequested(false);
+            if (!disposedRef.current) setBusy(false);
         }
     };
 
     const optimizeRoute = async () => {
         if (!Native || busy) return;
         const nextRequestId = `plugin-onboarding-${Date.now()}`;
+        const attempt = ++optimizationAttemptRef.current;
+        const isOptimizationCurrent = () => !disposedRef.current && attempt === optimizationAttemptRef.current;
+        optimizationStatusRequestRef.current++;
+        requireFreshOptimizationRef.current = false;
+        optimizationRequestRef.current = customMode ? null : nextRequestId;
         setRequestId(nextRequestId);
+        setOptimization({
+            active: true,
+            requestId: nextRequestId,
+            phase: "preparing",
+            total: 0,
+            tested: 0,
+            succeeded: 0,
+            updatedAt: Date.now(),
+        });
         setBusy(true);
         setError(null);
         try {
+            if (customMode) {
+                const result = await withTimeout(
+                    () => Native.testWireGuardConfig(settings.store.customConfigPath) as Promise<{ success?: boolean; error?: string }>,
+                    CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS,
+                    "A validação da configuração WireGuard excedeu o tempo limite. Cancele e tente novamente.",
+                );
+                if (!isOptimizationCurrent()) return;
+                if (result.success !== true) throw new Error(result.error || "A configuração WireGuard personalizada não passou na validação.");
+                setOptimization({
+                    active: false,
+                    requestId: nextRequestId,
+                    phase: "completed",
+                    total: 0,
+                    tested: 0,
+                    succeeded: 0,
+                    updatedAt: Date.now(),
+                });
+                setPage("ready");
+                return;
+            }
             const result = await Native.optimizeProtonRoute({
                 requestId: nextRequestId,
                 speedTest: true,
@@ -407,6 +828,21 @@ function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps })
                 freeOnly: settings.store.protonFreeOnly,
                 autoPing: settings.store.protonAutoPing,
             });
+            if (!isOptimizationCurrent()) return;
+            if (!result.success && "cancelled" in result && result.cancelled) {
+                setOptimization(current => current ? { ...current, active: false, phase: "cancelled", error: result.error, updatedAt: Date.now() } : {
+                    active: false,
+                    requestId: nextRequestId,
+                    phase: "cancelled",
+                    total: 0,
+                    tested: 0,
+                    succeeded: 0,
+                    error: result.error,
+                    updatedAt: Date.now(),
+                });
+                setError("Otimização cancelada. Você pode tentar novamente.");
+                return;
+            }
             if (!result.success) throw new Error(result.error || "Não foi possível otimizar a rota Proton.");
             setOptimization({
                 active: false,
@@ -423,106 +859,195 @@ function PluginOnboardingModal({ modalProps }: { modalProps: RenderModalProps })
             });
             setPage("ready");
         } catch (optimizeError) {
-            setError(optimizeError instanceof Error ? optimizeError.message : "A otimização Proton falhou.");
+            if (isOptimizationCurrent()) {
+                const detail = optimizeError instanceof Error ? optimizeError.message : "A otimização Proton falhou.";
+                setOptimization(current => ({
+                    active: false,
+                    requestId: nextRequestId,
+                    phase: "failed",
+                    total: current?.total ?? 0,
+                    tested: current?.tested ?? 0,
+                    succeeded: current?.succeeded ?? 0,
+                    server: current?.server,
+                    pingMs: current?.pingMs,
+                    downloadMbps: current?.downloadMbps,
+                    uploadMbps: current?.uploadMbps,
+                    error: detail,
+                    updatedAt: Date.now(),
+                }));
+                setError(detail);
+            }
         } finally {
-            setBusy(false);
+            if (isOptimizationCurrent()) {
+                optimizationRequestRef.current = null;
+                setBusy(false);
+            }
         }
     };
 
-    const cancelOptimization = async () => {
-        if (!Native || !requestId || !busy) return;
-        try {
-            await Native.cancelProtonOptimization(requestId);
-        } catch (cancelError) {
-            setError(cancelError instanceof Error ? cancelError.message : "Não foi possível cancelar a otimização.");
-        }
+    const cancelOptimization = () => {
+        if (!busy) return;
+        cancelActiveOptimization();
+        setRequestId(null);
+        setOptimization(current => current ? {
+            ...current,
+            active: false,
+            phase: "cancelled",
+            error: customMode ? "Validação cancelada." : "Otimização cancelada.",
+            updatedAt: Date.now(),
+        } : null);
+        setError(customMode ? "Validação cancelada. Você pode tentar novamente." : "Otimização cancelada. Você pode tentar novamente.");
+        setBusy(false);
     };
 
     const progress = optimization;
     const progressPercent = progress && progress.total > 0
         ? Math.min(100, Math.round((progress.tested / progress.total) * 100))
         : null;
-    const phaseLabel = progress?.phase === "ping" ? "medindo latência"
-        : progress?.phase === "testing" ? "testando servidores"
-            : progress?.phase === "finalizing" ? "finalizando a configuração"
-                : progress?.phase === "completed" ? "rota preparada"
-                    : progress?.phase === "failed" ? "otimização falhou"
-                        : progress?.phase === "cancelled" ? "otimização cancelada"
-                            : "preparando a seleção";
+    const progressIsIndeterminate = progress?.active === true && progressPercent === null;
+    const phaseLabel = customMode
+        ? progress?.phase === "preparing" ? "validando configuração"
+            : progress?.phase === "completed" ? "configuração validada"
+            : progress?.phase === "failed" ? "validação falhou"
+                : progress?.phase === "cancelled" ? "validação cancelada"
+                    : "pronto para validar"
+        : progress?.phase === "ping" ? "medindo latência"
+            : progress?.phase === "testing" ? "testando servidores"
+                : progress?.phase === "finalizing" ? "finalizando a configuração"
+                    : progress?.phase === "completed" ? "rota preparada"
+                        : progress?.phase === "failed" ? "otimização falhou"
+                            : progress?.phase === "cancelled" ? "otimização cancelada"
+                                : "preparando a seleção";
 
     const actions = page === "account" ? [
-        { text: "Fazer depois", variant: "secondary" as const, onClick: complete },
-        { text: busy ? "Entrando…" : "Continuar para rota", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || !username.trim() },
+        { text: busy ? (customMode ? "Validando…" : "Entrando…") : customMode ? "Continuar para validação" : "Continuar para rota", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || (!customMode && !username.trim()) },
+        ...(busy && !customMode ? [{ text: loginCancelRequested ? "Cancelando…" : "Cancelar login", variant: "danger" as const, onClick: cancelActiveLogin, disabled: loginCancelRequested }] : []),
     ] : page === "route" ? [
         { text: "Voltar", variant: "secondary" as const, onClick: () => { if (!busy) setPage("account"); }, disabled: busy },
         busy
-            ? { text: "Cancelar otimização", variant: "danger" as const, onClick: () => void cancelOptimization() }
-            : { text: progress?.phase === "completed" ? "Continuar" : "Otimizar rota", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
+            ? customMode
+                ? { text: "Cancelar validação", variant: "danger" as const, onClick: cancelOptimization }
+                : { text: "Cancelar otimização", variant: "danger" as const, onClick: () => void cancelOptimization() }
+            : { text: progress?.phase === "completed" ? "Continuar" : customMode ? "Validar configuração" : "Otimizar rota", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
     ] : [
         { text: "Concluir configuração", variant: "primary" as const, onClick: complete },
     ];
+    const pageHeading = page === "account"
+        ? customMode ? "Use sua configuração WireGuard" : "Conecte sua conta ProtonVPN"
+        : page === "route"
+            ? customMode ? "Valide sua rota personalizada" : "Prepare e otimize sua rota"
+            : customMode ? "Configuração personalizada validada" : "Configuração concluída";
 
     if (!Native) {
-        return <Modal {...modalProps} title="Configuração do GoLiveBypass" size="md" actions={[{ text: "Fechar", variant: "secondary", onClick: modalProps.onClose }]}>
+        return <Modal {...modalProps} onClose={closeModal} title="Configuração do GoLiveBypass" size="md" actions={[{ text: "Fechar", variant: "secondary", onClick: closeModal }]}>
             <Paragraph>O transporte WireGuard do plugin está disponível somente no Discord desktop Windows x64 nesta versão.</Paragraph>
         </Modal>;
     }
 
     return (
-        <Modal {...modalProps} title="Configurar o GoLiveBypass" size="md" actions={actions}>
-            <OnboardingSteps page={page} />
-            {page === "account" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <Paragraph><strong>Conecte sua conta ProtonVPN</strong></Paragraph>
-                    <Paragraph>A sessão é validada e fica somente na pasta privada do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
-                    <TextInput value={username} onChange={value => { setUsername(value); if (session?.username && session.username !== value.trim()) setSession(null); }} placeholder="Usuário ProtonVPN" disabled={busy} />
-                    <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" type="password" disabled={busy} />
-                    <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" disabled={busy} />
-                    {sessionLoading && <Paragraph>Verificando a sessão salva…</Paragraph>}
-                    {!sessionLoading && session?.valid && <Paragraph><strong>Sessão válida</strong>{session.expiresIn ? ` · expira ${session.expiresIn}` : ""}. Você pode continuar sem digitar a senha.</Paragraph>}
-                    {!sessionLoading && session && !session.valid && <Paragraph><strong>{session.code === "NETWORK_ERROR" || session.code === "TIMEOUT" ? "Rede indisponível para verificar a sessão" : "Sessão precisa ser renovada"}</strong>{session.error ? ` · ${session.error}` : ""}</Paragraph>}
-                    {error && <Paragraph><strong>{error}</strong></Paragraph>}
-                    {!!username.trim() && !sessionLoading && <Button onClick={() => void checkSession(username)} disabled={busy}>Verificar sessão novamente</Button>}
-                </div>
-            )}
-            {page === "route" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <Paragraph><strong>Prepare e otimize sua rota</strong></Paragraph>
-                    <Paragraph>O plugin vai selecionar uma configuração WireGuard e testar os servidores Proton elegíveis. O túnel continua isolado aos executáveis do Discord.</Paragraph>
-                    <div style={onboardingBoxStyle} role="status" aria-live="polite">
+        <Modal {...modalProps} onClose={closeModal} title="Configurar o GoLiveBypass" size="md" actions={actions}>
+            <div style={{ maxHeight: "min(60vh, 560px)", overflowY: "auto", overflowX: "hidden", paddingRight: "4px", minWidth: 0 }}>
+                <OnboardingSteps page={page} customMode={customMode} />
+                <h2 ref={pageHeadingRef} tabIndex={-1} style={{ margin: "0 0 12px", color: "var(--header-primary)" }}>{pageHeading}</h2>
+                {page === "account" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                    {customMode ? (
+                        <>
+                            <Paragraph>O modo personalizado não usa conta Proton nem solicita credenciais. Na etapa seguinte, o plugin validará o arquivo configurado antes de concluir.</Paragraph>
+                            <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={sessionLoading}>
+                                <Paragraph>{typeof settings.store.customConfigPath === "string" && settings.store.customConfigPath.trim() ? "Arquivo WireGuard personalizado configurado." : "Nenhum arquivo WireGuard personalizado foi configurado ainda."}</Paragraph>
+                            </div>
+                            {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
+                        </>
+                    ) : (
+                        <>
+                            <Paragraph>A sessão é validada e fica somente na pasta privada do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
+                            <TextInput value={username} onChange={value => {
+                                if (!protonUsernamesMatch(value, username)) {
+                                    accountRevisionRef.current++;
+                                    sessionCheckRef.current++;
+                                    setSession(null);
+                                    setPassword("");
+                                    setTwoFactorCode("");
+                                    setOptimization(null);
+                                    setRequestId(null);
+                                    optimizationRequestRef.current = null;
+                                    optimizationAttemptRef.current++;
+                                    optimizationStatusRequestRef.current++;
+                                    requireFreshOptimizationRef.current = true;
+                                    setSessionLoading(false);
+                                    setError(null);
+                                }
+                                setUsername(value);
+                            }} placeholder="Usuário ProtonVPN" aria-label="Usuário ProtonVPN" disabled={busy} />
+                            <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" aria-label="Senha ProtonVPN" type="password" disabled={busy} />
+                            <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" aria-label="Código 2FA (se solicitado)" disabled={busy} />
+                            {sessionLoading && <Paragraph>Verificando a sessão salva…</Paragraph>}
+                            {!sessionLoading && session?.valid && <Paragraph><strong>Sessão válida</strong>{session.expiresIn ? ` · expira ${session.expiresIn}` : ""}. Você pode continuar sem digitar a senha.</Paragraph>}
+                            {!sessionLoading && session && !session.valid && <Paragraph><strong>{protonSessionStatusTitle(session.code)}</strong>{session.error ? ` · ${session.error}` : ""}</Paragraph>}
+                            {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
+                            {!!username.trim() && !sessionLoading && <Button onClick={() => void checkSession(username)} disabled={busy}>Verificar sessão novamente</Button>}
+                        </>
+                    )}
+                    </div>
+                )}
+                {page === "route" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                    <Paragraph>{customMode ? "O plugin vai validar a configuração WireGuard escolhida nas opções. O túnel continua isolado aos executáveis do Discord." : "O plugin vai selecionar uma configuração WireGuard e testar os servidores Proton elegíveis. O túnel continua isolado aos executáveis do Discord."}</Paragraph>
+                    <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={busy}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><strong>Estado da rota</strong><span>{phaseLabel}</span></div>
-                        {progressPercent !== null && <progress value={progressPercent} max={100} style={{ width: "100%", marginTop: "12px" }} />}
+                        {(progressPercent !== null || progressIsIndeterminate) && <progress {...(progressPercent === null ? {} : { value: progressPercent })} max={100} aria-label="Progresso da validação da rota" aria-valuetext={progressPercent === null ? "Validação em andamento; total ainda não conhecido" : `${progressPercent}%`} style={{ width: "100%", marginTop: "12px" }} />}
                         {progress && progress.total > 0 && <Paragraph>{progress.tested} de {progress.total} servidores testados · {progress.succeeded} aprovados</Paragraph>}
                         {progress?.server && <Paragraph>Servidor selecionado: {progress.server}</Paragraph>}
                         {typeof progress?.pingMs === "number" && <Paragraph>Latência medida: {progress.pingMs} ms</Paragraph>}
-                        {progress?.phase === "completed" && <Paragraph>A configuração foi salva; a ativação da VPN continua sendo uma ação separada.</Paragraph>}
+                        {progress?.phase === "completed" && <Paragraph>{customMode ? "A configuração foi validada; a ativação da VPN continua sendo uma ação separada." : "A configuração foi salva; a ativação da VPN continua sendo uma ação separada."}</Paragraph>}
                     </div>
-                    {error && <Paragraph><strong>{error}</strong></Paragraph>}
-                </div>
-            )}
-            {page === "ready" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <Paragraph><strong>Configuração concluída</strong></Paragraph>
+                    {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
+                    </div>
+                )}
+                {page === "ready" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                     <div style={onboardingBoxStyle} role="status" aria-live="polite">
-                        <Paragraph>A rota Proton foi preparada com sucesso. Ative o túnel quando quiser pelo painel do plugin; o Discord não será reiniciado automaticamente.</Paragraph>
+                        <Paragraph>{customMode ? "A configuração WireGuard personalizada passou na validação. Ative o túnel quando quiser pelo painel do plugin; o Discord não será reiniciado automaticamente." : "A rota Proton foi preparada com sucesso. Ative o túnel quando quiser pelo painel do plugin; o Discord não será reiniciado automaticamente."}</Paragraph>
                         {progress?.server && <Paragraph>Servidor escolhido: {progress.server}</Paragraph>}
                         {typeof progress?.downloadMbps === "number" && typeof progress.uploadMbps === "number" && <Paragraph>Teste medido: {progress.downloadMbps} Mbps down · {progress.uploadMbps} Mbps up</Paragraph>}
                     </div>
-                </div>
-            )}
+                    </div>
+                )}
+            </div>
         </Modal>
     );
 }
 
 function openPluginOnboarding() {
-    openModal(props => <PluginOnboardingModal modalProps={props} />);
+    if (onboardingOpen) return;
+    if (onboardingTimer !== null) {
+        clearTimeout(onboardingTimer);
+        onboardingTimer = null;
+    }
+    onboardingOpen = true;
+    const modalToken = ++onboardingModalToken;
+    try {
+        const modalKey = openModal(props => <PluginOnboardingModal modalProps={props} onClosed={() => {
+            if (modalToken !== onboardingModalToken) return;
+            onboardingOpen = false;
+            onboardingModalKey = null;
+        }} />);
+        if (modalToken === onboardingModalToken && onboardingOpen) onboardingModalKey = modalKey;
+    } catch (error) {
+        onboardingOpen = false;
+        onboardingModalKey = null;
+        logger.error("Falha ao abrir o assistente do GoLiveBypass", error);
+    }
 }
 
 function AboutPlugin() {
+    const { vpnMode } = settings.use(["vpnMode"]);
+    const customMode = vpnMode === "custom";
     return (
         <>
             <section>
-                <Paragraph><strong>Assistente de configuração</strong> — configure sua conta Proton e prepare a rota WireGuard dentro do Discord.</Paragraph>
+                <Paragraph><strong>Assistente de configuração</strong> — {customMode ? "valide sua configuração WireGuard personalizada dentro do Discord." : "configure sua conta Proton e prepare a rota WireGuard dentro do Discord."}</Paragraph>
                 <Button onClick={openPluginOnboarding}>Abrir guia de configuração</Button>
             </section>
             <VpnPanel />
@@ -542,62 +1067,121 @@ function PluginUpdateSettings() {
     const [status, setStatus] = useState<PluginUpdateStatus | null>(null);
     const [busy, setBusy] = useState(false);
     const [operation, setOperation] = useState<"checking" | "updating" | null>(null);
+    const mountedRef = React.useRef(false);
+    const policyRevisionRef = React.useRef(0);
+    const statusRequestRef = React.useRef(0);
+    const operationIdRef = React.useRef(0);
+    const operationBusyRef = React.useRef(false);
+    const selectedUpdatePolicy = {
+        enabled: autoUpdate,
+        channel: normalizedUpdateChannel(updateChannel),
+    };
 
-    const refreshStatus = async () => {
-        const getStatus = Native?.getPluginUpdateStatus;
-        if (typeof getStatus !== "function") return;
+    const isCurrent = (revision: number) => mountedRef.current && revision === policyRevisionRef.current;
+
+    const refreshStatus = async (revision = policyRevisionRef.current): Promise<PluginUpdateStatus | null> => {
+        if (!isCurrent(revision)) return null;
+        const request = ++statusRequestRef.current;
+        const statusRequest = readPluginUpdateStatus();
+        if (!statusRequest) return null;
+        const isRequestCurrent = () => isCurrent(revision) && request === statusRequestRef.current;
         try {
-            const next = await getStatus();
+            const next = await statusRequest;
+            if (!isRequestCurrent()) return null;
+            if (!pluginUpdateStatusMatchesPolicy(next, selectedUpdatePolicy)) return null;
             setStatus(next);
+            if (next.lastError) {
+                notifyPluginUpdateFailure(next.current, next.channel, next.lastError);
+            } else {
+                lastNotifiedUpdateErrorKey = null;
+                lastSuppressedUpdateErrorKey = null;
+            }
             if (next.pending) {
-                notifyPendingPluginUpdate(next.pendingVersion);
+                notifyPendingPluginUpdate(next.current, next.pendingVersion, next.pendingChannel || next.channel);
                 const version = next.pendingVersion ? `v${next.pendingVersion}` : "a nova versão";
                 setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning" });
             } else if (next.lastError) {
                 setState({ label: `v${next.current || PLUGIN_VERSION} · atualização falhou`, tone: "neutral" });
             }
+            return next;
         } catch (error) {
-            logger.error("Falha ao consultar o estado do updater do plugin", error);
+            if (isRequestCurrent()) logger.error("Falha ao consultar o estado do updater do plugin", error);
+            return null;
         }
     };
 
-    const check = async () => {
-        if (!Native || busy) return;
+    const beginOperation = (nextOperation: "checking" | "updating") => {
+        if (!Native || busy || operationBusyRef.current) return null;
+        const operationRevision = policyRevisionRef.current;
+        const operationId = ++operationIdRef.current;
+        operationBusyRef.current = true;
         setBusy(true);
-        setOperation("checking");
+        setOperation(nextOperation);
+        return { operationRevision, operationId };
+    };
+
+    const check = async () => {
+        const native = Native;
+        if (!native) return;
+        const operation = beginOperation("checking");
+        if (!operation) return;
+        const { operationRevision, operationId } = operation;
+        const isOperationMounted = () => isCurrent(operationRevision) && operationId === operationIdRef.current;
         try {
-            const result = await Native.checkPluginUpdate() as PluginUpdateCheckResult;
+            const result = await withTimeout(
+                () => native.checkPluginUpdate(selectedUpdatePolicy),
+                PLUGIN_UPDATE_OPERATION_TIMEOUT_MS,
+                "A verificação de atualização excedeu o tempo limite.",
+            ) as PluginUpdateCheckResult;
+            if (!isOperationMounted()) return;
             const current = result.current || PLUGIN_VERSION;
             if (!result.ok) {
+                const detailText = result.error || "O updater recusou a verificação.";
+                suppressPluginUpdateFailure(result.current, result.channel || selectedUpdatePolicy.channel, detailText);
                 const detail = result.error ? ` · ${result.error.slice(0, 48)}` : "";
                 setState({ label: `v${current} · verificação falhou${detail}`, tone: "neutral" });
             } else if (result.pending) {
                 const version = result.latest ? `v${result.latest}` : "a nova versão";
-                notifyPendingPluginUpdate(result.latest);
+                notifyPendingPluginUpdate(result.current, result.latest, result.pendingChannel || result.channel || selectedUpdatePolicy.channel);
                 setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning" });
             } else if (result.available) {
                 setState({ label: `v${current} · v${result.latest || "nova"} disponível`, tone: "warning", available: true });
             } else {
                 setState({ label: `v${current} · sem atualização disponível`, tone: "success" });
             }
+            await refreshStatus(operationRevision);
+            if (!isOperationMounted()) return;
         } catch (error) {
-            // Native.checkPluginUpdate() em si nunca rejeita (o corpo inteiro do lado nativo
-            // ja esta em try/catch, sempre resolve com {ok:true|false,...}) -- mas a chamada
-            // IPC por baixo pode rejeitar sozinha (ex.: logo apos um self-update do plugin,
-            // com o handler ipcMain.handle temporariamente desalinhado). update(), a funcao
-            // irma logo abaixo, ja trata isso; check() nao tratava, deixando uma rejeicao sem
-            // dono no console do renderer (inofensivo aqui -- so o processo PRINCIPAL derruba
-            // tudo com promise sem tratamento -- mas inconsistente e sem feedback pra pessoa).
-            const detail = error instanceof Error ? ` · ${error.message.slice(0, 48)}` : "";
-            setState({ label: `v${PLUGIN_VERSION} · verificação falhou${detail}`, tone: "neutral" });
+            if (isOperationMounted()) {
+                const detailText = error instanceof Error ? error.message : String(error);
+                const currentVersion = status?.current || PLUGIN_VERSION;
+                suppressPluginUpdateFailure(currentVersion, status?.channel || selectedUpdatePolicy.channel, detailText);
+                const detail = error instanceof Error ? ` · ${error.message.slice(0, 48)}` : "";
+                setState({ label: `v${currentVersion} · verificação falhou${detail}`, tone: "neutral" });
+            }
         } finally {
-            setBusy(false);
-            setOperation(null);
+            if (operationId === operationIdRef.current) operationBusyRef.current = false;
+            if (isOperationMounted()) {
+                setBusy(false);
+                setOperation(null);
+            }
         }
     };
 
     useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            policyRevisionRef.current++;
+            operationIdRef.current++;
+            operationBusyRef.current = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        const revision = ++policyRevisionRef.current;
         let disposed = false;
+        const isRevisionCurrent = () => !disposed && isCurrent(revision);
         const configure = async () => {
             try {
                 const configureUpdates = Native?.configurePluginUpdates;
@@ -607,46 +1191,81 @@ function PluginUpdateSettings() {
                         channel: normalizedUpdateChannel(updateChannel)
                     });
                 }
-                if (!disposed) await refreshStatus();
+                if (isRevisionCurrent()) await refreshStatus(revision);
             } catch (error) {
-                if (!disposed) logger.error("Falha ao configurar o updater do plugin", error);
+                if (isRevisionCurrent()) logger.error("Falha ao configurar o updater do plugin", error);
             }
         };
         void configure();
 
         const timer = setInterval(() => {
-            if (!disposed) void refreshStatus();
+            if (isRevisionCurrent()) void refreshStatus(revision);
         }, PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS);
         return () => {
             disposed = true;
+            policyRevisionRef.current++;
+            statusRequestRef.current++;
+            operationIdRef.current++;
+            operationBusyRef.current = false;
+            if (mountedRef.current) {
+                setBusy(false);
+                setOperation(null);
+            }
             clearInterval(timer);
         };
     }, [updateChannel, autoUpdate]);
 
     const update = async () => {
-        if (!Native || busy) return;
-        setBusy(true);
-        setOperation("updating");
+        const native = Native;
+        if (!native) return;
+        const operation = beginOperation("updating");
+        if (!operation) return;
+        const { operationRevision, operationId } = operation;
+        const isOperationMounted = () => isCurrent(operationRevision) && operationId === operationIdRef.current;
+        let failureContext: { current?: string; channel: PluginUpdateChannel; detail: string } | null = null;
         try {
-            const result = await Native.updatePlugin() as PluginUpdateResult;
-            if (!result.ok) throw new Error(result.error || "O updater recusou a atualização.");
+            const result = await withTimeout(
+                () => native.updatePlugin(selectedUpdatePolicy),
+                PLUGIN_UPDATE_OPERATION_TIMEOUT_MS,
+                "A atualização do plugin excedeu o tempo limite.",
+            ) as PluginUpdateResult;
+            if (!isOperationMounted()) return;
+            if (!result.ok) {
+                const detail = result.error || "O updater recusou a atualização.";
+                failureContext = { current: result.current, channel: result.channel || selectedUpdatePolicy.channel, detail };
+                suppressPluginUpdateFailure(failureContext.current, failureContext.channel, failureContext.detail);
+                throw new Error(detail);
+            }
             if (result.updated || result.pending || result.reloadRequired) {
                 const version = result.latest || result.current;
-                notifyPendingPluginUpdate(version);
+                notifyPendingPluginUpdate(result.current, version, result.pendingChannel || result.channel || selectedUpdatePolicy.channel);
                 setState({
                     label: version ? `v${version} pronta; recarregue o Discord` : "Atualização pronta; recarregue o Discord",
                     tone: "warning"
                 });
-                await refreshStatus();
+                await refreshStatus(operationRevision);
+                if (!isOperationMounted()) return;
             } else {
                 setState({ label: `v${result.current || PLUGIN_VERSION} · sem atualização disponível`, tone: "success" });
             }
         } catch (error) {
-            setState({ label: `v${PLUGIN_VERSION} · atualização falhou`, tone: "warning" });
-            showToast(`GoLiveBypass não conseguiu atualizar: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+            if (isOperationMounted()) {
+                const detail = error instanceof Error ? error.message : String(error);
+                const currentVersion = failureContext?.current || status?.current || PLUGIN_VERSION;
+                suppressPluginUpdateFailure(
+                    currentVersion,
+                    failureContext?.channel || status?.channel || selectedUpdatePolicy.channel,
+                    failureContext?.detail || detail,
+                );
+                setState({ label: `v${currentVersion} · atualização falhou`, tone: "warning" });
+                showToast(`GoLiveBypass não conseguiu atualizar: ${detail}`, Toasts.Type.FAILURE);
+            }
         } finally {
-            setBusy(false);
-            setOperation(null);
+            if (operationId === operationIdRef.current) operationBusyRef.current = false;
+            if (isOperationMounted()) {
+                setBusy(false);
+                setOperation(null);
+            }
         }
     };
 
@@ -654,7 +1273,13 @@ function PluginUpdateSettings() {
     const checkedLabel = typeof status?.lastCheckedAt === "number"
         ? ` · última consulta ${new Date(status.lastCheckedAt).toLocaleTimeString()}`
         : "";
-    const cardVariant = busy ? "brand" : state.tone === "warning" ? "warning" : state.tone === "success" ? "success" : "primary";
+    const cardVariant: "normal" | "info" | "warning" | "success" = busy
+        ? "info"
+        : state.tone === "warning"
+            ? "warning"
+            : state.tone === "success"
+                ? "success"
+                : "normal";
     const operationLabel = operation === "checking"
         ? "Verificando atualizações…"
         : operation === "updating"
@@ -664,16 +1289,18 @@ function PluginUpdateSettings() {
     return (
         <Card variant={cardVariant} defaultPadding>
             <section aria-label="Estado das atualizações do GoLiveBypass">
+                <div role="status" aria-live="polite" aria-busy={busy} aria-atomic="true">
+                    <Paragraph>
+                        <strong>Atualizações do GoLiveBypass</strong> — canal {channelLabel}; automática {autoUpdate ? "ligada" : "desligada"}{checkedLabel}
+                    </Paragraph>
+                    <Paragraph><strong>{operationLabel}</strong></Paragraph>
+                    {status?.pending && <Paragraph>Atualização {status.pendingVersion ? `v${status.pendingVersion}` : "preparada"} pronta; recarregue o Discord manualmente para aplicar.</Paragraph>}
+                    {status?.lastError && <Paragraph>Último erro do updater: {status.lastError.slice(0, 240)}</Paragraph>}
+                </div>
                 <Paragraph>
-                    <strong>Atualizações do GoLiveBypass</strong> — canal {channelLabel}; automática {autoUpdate ? "ligada" : "desligada"}{checkedLabel}
-                </Paragraph>
-                <Paragraph>
-                    <strong>{operationLabel}</strong>{" "}
                     <Button onClick={() => void check()} disabled={busy}>{busy ? "Em andamento…" : "Verificar"}</Button>{" "}
                     {state.available && <Button onClick={() => void update()} disabled={busy}>Atualizar</Button>}
                 </Paragraph>
-                {status?.pending && <Paragraph>Atualização {status.pendingVersion ? `v${status.pendingVersion}` : "preparada"} pronta; recarregue o Discord manualmente para aplicar.</Paragraph>}
-                {status?.lastError && <Paragraph>Último erro do updater: {status.lastError.slice(0, 240)}</Paragraph>}
             </section>
         </Card>
     );
@@ -702,6 +1329,18 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Verificar, baixar e preparar atualizações em segundo plano. O Discord nunca é reiniciado automaticamente.",
         default: true
+    },
+    updateDeferredVersion: {
+        type: OptionType.STRING,
+        description: "Versão de atualização cujo aviso foi adiado.",
+        default: "",
+        hidden: true,
+    },
+    updateDeferredUntil: {
+        type: OptionType.STRING,
+        description: "Momento até o qual o aviso de atualização permanece adiado.",
+        default: "",
+        hidden: true,
     },
     onboardingCompleted: {
         type: OptionType.BOOLEAN,
@@ -755,32 +1394,56 @@ interface PluginVpnStatus {
 }
 
 function VpnPanel() {
+    const { vpnMode, customConfigPath } = settings.use(["vpnMode", "customConfigPath"]);
+    const customMode = vpnMode === "custom";
     const [status, setStatus] = useState<PluginVpnStatus | null>(null);
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
     const [twoFactorCode, setTwoFactorCode] = useState("");
     const [busy, setBusy] = useState(false);
     const [optimizing, setOptimizing] = useState(false);
+    const [loginActive, setLoginActive] = useState(false);
+    const [loginCancelRequested, setLoginCancelRequested] = useState(false);
+    const mountedRef = React.useRef(false);
+    const usernameRef = React.useRef("");
+    const refreshRequestRef = React.useRef(0);
+    const loginRequestIdRef = React.useRef<string | null>(null);
 
     const refresh = async () => {
         if (!Native) return;
+        const request = ++refreshRequestRef.current;
+        const isCurrent = () => mountedRef.current && request === refreshRequestRef.current;
         try {
             const [nextStatus, saved] = await Promise.all([Native.getVpnStatus(), Native.getProtonSettings()]);
+            if (!isCurrent()) return;
             setStatus(nextStatus as PluginVpnStatus);
             const savedRecord = saved as { protonUsername?: unknown; sessionUsername?: unknown };
             const savedUsername = typeof savedRecord.protonUsername === "string" && savedRecord.protonUsername
                 ? savedRecord.protonUsername
                 : savedRecord.sessionUsername;
-            if (!username && typeof savedUsername === "string" && savedUsername) setUsername(savedUsername);
+            if (!usernameRef.current && typeof savedUsername === "string" && savedUsername) {
+                usernameRef.current = savedUsername;
+                setUsername(savedUsername);
+            }
         } catch (error) {
-            logger.error("Falha ao ler o estado da VPN do plugin", error);
+            if (isCurrent()) logger.error("Falha ao ler o estado da VPN do plugin", error);
         }
     };
 
     useEffect(() => {
+        mountedRef.current = true;
         void refresh();
         const timer = setInterval(() => void refresh(), 5_000);
-        return () => clearInterval(timer);
+        return () => {
+            mountedRef.current = false;
+            refreshRequestRef.current++;
+            const activeRequestId = loginRequestIdRef.current;
+            loginRequestIdRef.current = null;
+            if (activeRequestId && typeof Native?.cancelProtonLogin === "function") {
+                void Promise.resolve(Native.cancelProtonLogin(activeRequestId)).catch(error => logger.error("Falha ao cancelar login Proton ao desmontar o painel", error));
+            }
+            clearInterval(timer);
+        };
     }, []);
 
     const call = async (operation: () => Promise<unknown>, successMessage?: string) => {
@@ -788,31 +1451,54 @@ function VpnPanel() {
         setBusy(true);
         try {
             const result = await operation() as { success?: boolean; error?: string; message?: string };
+            if (!mountedRef.current) return;
             if (result.success === false) throw new Error(result.error || result.message || "Operação VPN recusada.");
             if (successMessage) showToast(successMessage, Toasts.Type.SUCCESS);
             await refresh();
         } catch (error) {
-            showToast(`GoLiveBypass: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+            if (mountedRef.current) showToast(`GoLiveBypass: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
         } finally {
-            setBusy(false);
+            if (mountedRef.current) setBusy(false);
         }
     };
 
     const login = async () => {
         if (!Native || busy || optimizing) return;
+        const requestId = `plugin-panel-login-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        loginRequestIdRef.current = requestId;
+        setLoginActive(true);
+        setLoginCancelRequested(false);
         setBusy(true);
         try {
-            const result = await Native.loginProton({ username, password, twoFactorCode });
-            if (!result.success) throw new Error(result.error || result.message || "Login Proton recusado.");
+            const result = await Native.loginProton({ username, password, twoFactorCode, requestId });
+            if (!mountedRef.current) return;
+            if (!result.success) {
+                if (result.code === "CANCELLED") return;
+                throw new Error(result.error || result.message || "Login Proton recusado.");
+            }
             setPassword("");
             setTwoFactorCode("");
             showToast("Sessão Proton salva na pasta privada do plugin.", Toasts.Type.SUCCESS);
             await refresh();
         } catch (error) {
-            showToast(`Login Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+            if (mountedRef.current) showToast(`Login Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
         } finally {
-            setBusy(false);
+            if (loginRequestIdRef.current === requestId) loginRequestIdRef.current = null;
+            if (mountedRef.current) {
+                setLoginActive(false);
+                setLoginCancelRequested(false);
+            }
+            if (mountedRef.current) setBusy(false);
         }
+    };
+
+    const cancelLogin = () => {
+        const activeRequestId = loginRequestIdRef.current;
+        if (!activeRequestId || loginCancelRequested || typeof Native?.cancelProtonLogin !== "function") return;
+        setLoginCancelRequested(true);
+        setPassword("");
+        setTwoFactorCode("");
+        void Promise.resolve(Native.cancelProtonLogin(activeRequestId)).catch(error => logger.error("Falha ao cancelar login Proton", error));
     };
 
     const optimize = async () => {
@@ -826,13 +1512,14 @@ function VpnPanel() {
                 freeOnly: settings.store.protonFreeOnly,
                 autoPing: settings.store.protonAutoPing
             });
+            if (!mountedRef.current) return;
             if (!result.success) throw new Error(result.error || "Não foi possível otimizar a rota Proton.");
-            showToast("Rota Proton otimizada. O Discord será reiniciado para aplicar o túnel.", Toasts.Type.SUCCESS);
+            showToast("Rota Proton preparada; nenhuma reinicialização do Discord foi solicitada.", Toasts.Type.SUCCESS);
             await refresh();
         } catch (error) {
-            showToast(`Otimização Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+            if (mountedRef.current) showToast(`Otimização Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
         } finally {
-            setOptimizing(false);
+            if (mountedRef.current) setOptimizing(false);
         }
     };
 
@@ -845,18 +1532,24 @@ function VpnPanel() {
             {status?.state === "blocked_external" && <Paragraph>WireSock externo detectado. O plugin não vai pará-lo nem assumir seu túnel.</Paragraph>}
             {status?.state === "recovery_required" && <Paragraph>A última limpeza não foi confirmada. Verifique o log antes de tentar novamente.</Paragraph>}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                <TextInput value={username} onChange={setUsername} placeholder="Usuário ProtonVPN" disabled={busy || optimizing} />
-                <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" type="password" disabled={busy || optimizing} />
-                <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" disabled={busy || optimizing} />
-                <div>
-                    <Button onClick={() => void login()} disabled={busy || optimizing || !username.trim()}>Entrar no Proton</Button>{" "}
-                    <Button onClick={() => void optimize()} disabled={busy || optimizing || !username.trim()}>{optimizing ? "Otimizando…" : "Otimizar rota"}</Button>{" "}
-                    <Button onClick={() => void call(() => Native.logoutProton(), "Sessão Proton removida.")} disabled={busy || optimizing}>Sair</Button>
-                </div>
+                {customMode ? (
+                    <Paragraph>{typeof customConfigPath === "string" && customConfigPath.trim() ? "Modo personalizado: arquivo WireGuard configurado; nenhum login Proton é necessário." : "Modo personalizado: configure um arquivo WireGuard nas opções do plugin para continuar."}</Paragraph>
+                ) : (
+                    <>
+                        <TextInput value={username} onChange={value => { usernameRef.current = value; setUsername(value); }} placeholder="Usuário ProtonVPN" aria-label="Usuário ProtonVPN" disabled={busy || optimizing} />
+                        <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" aria-label="Senha ProtonVPN" type="password" disabled={busy || optimizing} />
+                        <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" aria-label="Código 2FA (se solicitado)" disabled={busy || optimizing} />
+                        <div>
+                            {loginActive ? <Button onClick={cancelLogin} disabled={loginCancelRequested}>{loginCancelRequested ? "Cancelando…" : "Cancelar login"}</Button> : <Button onClick={() => void login()} disabled={busy || optimizing || !username.trim()}>Entrar no Proton</Button>}{" "}
+                            <Button onClick={() => void optimize()} disabled={busy || optimizing || !username.trim()}>{optimizing ? "Otimizando…" : "Otimizar rota"}</Button>{" "}
+                            <Button onClick={() => void call(() => Native.logoutProton(), "Sessão Proton removida.")} disabled={busy || optimizing}>Sair</Button>
+                        </div>
+                    </>
+                )}
                 <div>
                     <Button onClick={() => void call(() => Native.enable())} disabled={busy || optimizing}>Ativar agora</Button>{" "}
                     <Button onClick={() => void call(() => Native.restoreNetwork(), "Rede restaurada.")} disabled={busy || optimizing}>Restaurar rede</Button>{" "}
-                    <Button onClick={() => void call(() => Native.testWireGuardConfig(settings.store.customConfigPath))} disabled={busy || optimizing}>Testar .conf</Button>
+                    <Button onClick={() => void call(() => Native.testWireGuardConfig(customConfigPath))} disabled={busy || optimizing}>Testar .conf</Button>
                 </div>
             </div>
             <Paragraph>
@@ -936,9 +1629,11 @@ function videoIsBlocked() {
 // historia inteira num lugar so.
 function record(message: string) {
     logger.info(message);
-    Native?.logFromRenderer(message).catch(() => {
-        // Sem o registro em arquivo ainda resta o console; nao vale quebrar o fluxo por isso.
-    });
+    if (typeof Native?.logFromRenderer === "function") {
+        void Native.logFromRenderer(message).catch(() => {
+            // Sem o registro em arquivo ainda resta o console; nao vale quebrar o fluxo por isso.
+        });
+    }
 }
 
 // O que so o renderer enxerga. Sem isto o arquivo mostraria qual saida subiu, mas nunca se o
@@ -1042,9 +1737,7 @@ function pollStreamClaimOnce() {
     const visibleStreams = readStore(ApplicationStreamingStore, "getAllActiveStreams");
     const nativeKeys = readStore(StreamRTCConnectionStore, "getAllActiveStreamKeys");
 
-    const senderClaimed = !claimed.known || claimed.value === undefined
-        ? null
-        : claimed.value !== null;
+    const senderClaimed = !claimed.known ? null : normalizeStreamClaim(claimed.value);
     if (senderClaimed === false) lastSelectedStreamRegion = null;
     const now = Date.now();
     const observation: StreamObservation = {
@@ -1237,14 +1930,17 @@ export default definePlugin({
     },
 
     start() {
+        const lifecycleGeneration = ++pluginLifecycleGeneration;
+        const isLifecycleCurrent = () => lifecycleGeneration === pluginLifecycleGeneration;
         forceRegion();
         startStreamClaimWatch();
 
+        const onboardingRequired = Native && settings.store.onboardingCompleted !== true;
         if (onboardingTimer !== null) clearTimeout(onboardingTimer);
-        if (Native && settings.store.onboardingCompleted !== true) {
+        if (onboardingRequired) {
             onboardingTimer = setTimeout(() => {
                 onboardingTimer = null;
-                if (settings.store.onboardingCompleted !== true) openPluginOnboarding();
+                if (isLifecycleCurrent() && settings.store.onboardingCompleted !== true) openPluginOnboarding();
             }, 2_500);
         }
 
@@ -1253,28 +1949,35 @@ export default definePlugin({
             void configure({
                 enabled: settings.store.autoUpdate !== false,
                 channel: normalizedUpdateChannel(settings.store.updateChannel)
-            }).catch(error => logger.error("Falha ao configurar o updater do plugin", error));
+            }).catch(error => {
+                if (isLifecycleCurrent()) logger.error("Falha ao configurar o updater do plugin", error);
+            });
         }
 
         // O aviso aparece mesmo para quem nunca abre a aba de configuração. O processo
-        // principal faz a checagem/download; o renderer só observa se há reload pendente.
-        if (updateCheckTimer !== null) clearTimeout(updateCheckTimer);
-        updateCheckTimer = setTimeout(() => {
-            updateCheckTimer = null;
-            const getStatus = Native?.getPluginUpdateStatus;
-            if (typeof getStatus !== "function") return;
-            getStatus().then(status => {
-                if (status.pending) notifyPendingPluginUpdate(status.pendingVersion);
-            }).catch(error => logger.error("Falha ao consultar atualização pendente do plugin", error));
-        }, 8_000);
+        // principal faz a checagem/download; o renderer observa continuamente se há
+        // reload pendente ou uma falha nova, inclusive depois da primeira consulta.
+        schedulePluginUpdateStatusObservation(lifecycleGeneration);
 
-        Native?.enable().then(result => {
-            if (result?.success === false)
-                showToast(`GoLiveBypass não conseguiu ativar a VPN: ${result.error || result.message || "veja o log"}`, Toasts.Type.FAILURE);
-        }).catch(error => logger.error("Failed to reach the desktop process", error));
+        // A primeira execução precisa deixar o usuário atravessar as duas etapas do
+        // assistente antes de qualquer ativação que possa relançar o Discord.
+        if (!onboardingRequired && typeof Native?.enable === "function") {
+            void Native.enable().then(result => {
+                if (!isLifecycleCurrent()) return;
+                if (result?.success === false)
+                    showToast(`GoLiveBypass não conseguiu ativar a VPN: ${result.error || result.message || "veja o log"}`, Toasts.Type.FAILURE);
+            }).catch(error => {
+                if (isLifecycleCurrent()) logger.error("Failed to reach the desktop process", error);
+            });
+        }
     },
 
     stop() {
+        dismissPluginUpdateOverlays();
+        pluginLifecycleGeneration++;
+        lastNotifiedPendingVersion = null;
+        lastNotifiedUpdateErrorKey = null;
+        lastSuppressedUpdateErrorKey = null;
         if (onboardingTimer !== null) {
             clearTimeout(onboardingTimer);
             onboardingTimer = null;
@@ -1283,8 +1986,20 @@ export default definePlugin({
             clearTimeout(updateCheckTimer);
             updateCheckTimer = null;
         }
+        if (onboardingModalKey !== null) {
+            const modalKey = onboardingModalKey;
+            onboardingModalToken++;
+            onboardingModalKey = null;
+            onboardingOpen = false;
+            closeDiscordModal(modalKey);
+        } else {
+            onboardingModalToken++;
+            onboardingOpen = false;
+        }
         stopStreamClaimWatch();
         restoreRegion();
-        Native?.shutdown().catch(error => logger.error("Failed to reach the desktop process", error));
+        if (typeof Native?.shutdown === "function") {
+            void Native.shutdown().catch(error => logger.error("Failed to reach the desktop process", error));
+        }
     }
 });

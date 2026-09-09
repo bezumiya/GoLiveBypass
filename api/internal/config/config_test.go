@@ -24,6 +24,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Errorf("Port = %q, want 8080", cfg.Port)
 	}
+	if !reflect.DeepEqual(cfg.WebsiteOrigins, []string{"https://golivebypass.dev", "http://localhost:3000", "http://127.0.0.1:3000"}) {
+		t.Errorf("WebsiteOrigins = %v", cfg.WebsiteOrigins)
+	}
 	if cfg.RateLimitPerMin != 10 {
 		t.Errorf("RateLimitPerMin = %v, want 10 (agressivo)", cfg.RateLimitPerMin)
 	}
@@ -89,6 +92,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("BLOCK_SECONDS", "60")
 	t.Setenv("PORT", "9090")
 	t.Setenv("MAX_LOG_BYTES", "1000")
+	t.Setenv("WEBSITE_ORIGINS", "https://example.com, http://localhost:4173")
 
 	cfg, err := Load()
 	if err != nil {
@@ -114,6 +118,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.MaxLogBytes != 1000 {
 		t.Errorf("MaxLogBytes = %d, want 1000", cfg.MaxLogBytes)
+	}
+	if !reflect.DeepEqual(cfg.WebsiteOrigins, []string{"https://example.com", "http://localhost:4173"}) {
+		t.Errorf("WebsiteOrigins = %v", cfg.WebsiteOrigins)
 	}
 }
 
@@ -168,5 +175,16 @@ func TestLoadInvalidBasePath(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() esperava erro com BASE_PATH invalida")
+	}
+}
+
+func TestLoadRejectsWildcardWebsiteOrigin(t *testing.T) {
+	t.Setenv("API_TOKEN", "app-secret")
+	t.Setenv("GITHUB_TOKEN", "gh-secret")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "webhook-secret")
+	t.Setenv("WEBSITE_ORIGINS", "*")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() esperava rejeitar wildcard em WEBSITE_ORIGINS")
 	}
 }

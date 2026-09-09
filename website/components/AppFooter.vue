@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { githubRepositoryUrl, release } from '~/data/release'
+import { githubRepositoryUrl } from '~/data/release'
+
+const { catalog } = useRelease()
 </script>
 
 <template>
@@ -38,7 +40,7 @@ import { githubRepositoryUrl, release } from '~/data/release'
     </div>
 
     <div class="site-container footer-bottom">
-      <span>GoLiveBypass {{ release.version }} · canal {{ release.channel }}</span>
+      <span>GoLiveBypass {{ catalog.version }} · canal {{ catalog.channel }}</span>
       <span>Open source. Feito para a comunidade.</span>
     </div>
   </footer>

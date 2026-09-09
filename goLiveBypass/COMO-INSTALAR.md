@@ -79,6 +79,17 @@ ação do Toolbox do Vencord/Equicord.
    configurações de plugins. Ao ativar, a VPN WireGuard sobe automaticamente; ao desativar,
    o plugin para somente o WireSock que ele próprio iniciou e restaura a rede.
 
+No Windows, a beta também pode ser instalada pelo PowerShell do repositório:
+
+```powershell
+irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile $env:TEMP\glb-beta.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb-beta.ps1" -Mode Install -Mod Vencord -Yes
+```
+
+O instalador mostra explicitamente o aviso de beta, copia todas as fontes do plugin e
+baixa o helper Proton x64 da beta mais recente com validação SHA-256. O standalone não é
+alterado por esse caminho.
+
 Para usar o modo Proton, informe o usuário e a senha na seção da VPN. O CAPTCHA, quando
 solicitado, abre em uma janela isolada e a sessão fica em `%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn`.
 Para um perfil próprio, escolha **Arquivo WireGuard personalizado** e informe o caminho do

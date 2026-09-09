@@ -18,6 +18,8 @@ Confirme que a distribuição afetada executa o legado. Os caminhos principais, 
 
 ## Referência e validação
 
+Localize símbolo/sintoma com `rg` e leia apenas funções chamadas e regressões correspondentes. Para lógica pura, não encerre Discord nem toque em instalações. Em teste real, registre versão, instalação-alvo e backup antes de agir; confirme restauração ao terminar. Encerre a validação quando o comportamento alterado estiver coberto e não restar falha relacionada.
+
 Leia [o histórico técnico](references/history.md) apenas para o subsistema relevante: seções 3–5 para injeção, paridade e modos; seção 6 para Tor, gateway zumbi e RTC; seções 7–8 para Windows e 3proxy. Datas, issues e conclusões descrevem observações históricas, não garantias sobre o cliente Discord atual.
 
 Selecione regressões existentes em `tests/` pelo comportamento alterado e examine seus efeitos antes de executar. Relate separadamente a validação standalone, a sincronização da GUI e a cobertura do plugin. Não declare paridade total quando uma arquitetura não suporta a mitigação.

@@ -6,6 +6,16 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Atualizações do plugin Vencord/Equicord
+
+- Mantém o canal estável padrão, com beta opt-in e atualização automática
+  controlada pelo usuário.
+- Reativa o instalador PowerShell do plugin no canal beta: ele deixa claro que a
+  instalação é experimental, distribui todas as fontes WireGuard e valida o
+  `proton-confgen.exe` x64 por SHA-256 antes de copiar o helper.
+- Usa validação SHA-256, origem e compatibilidade antes de preparar a troca;
+  a aplicação exige reload manual e permanece separada da GUI e do standalone.
+
 ### Regressão do updater portable e caminhos Windows
 
 - Assets auxiliares Proton deixam o prefixo `GoLiveBypass-`: versões antigas que selecionam o primeiro `GoLiveBypass-*.exe` não podem confundir o confgen com a GUI nas próximas releases. O manifesto continua informando o nome exato do helper.

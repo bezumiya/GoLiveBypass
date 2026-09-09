@@ -35,18 +35,7 @@ func main() {
 			}
 		}
 		if isJSON {
-			response := map[string]any{
-				"success": false,
-				"error":   err.Error(),
-			}
-			var hvErr auth.HumanVerificationError
-			if errors.As(err, &hvErr) {
-				response["code"] = hvErr.Code
-				response["retryable"] = hvErr.Retryable
-				if hvErr.CaptchaURL != "" {
-					response["captchaUrl"] = hvErr.CaptchaURL
-				}
-			}
+			response := jsonErrorResponse(err)
 			data, _ := json.Marshal(response)
 			fmt.Println(string(data))
 		} else {
@@ -54,6 +43,42 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func jsonErrorResponse(err error) map[string]any {
+	response := map[string]any{
+		"success": false,
+		"error":   err.Error(),
+	}
+	var hvErr auth.HumanVerificationError
+	if errors.As(err, &hvErr) {
+		response["code"] = hvErr.Code
+		response["retryable"] = hvErr.Retryable
+		if hvErr.CaptchaURL != "" {
+			response["captchaUrl"] = hvErr.CaptchaURL
+		}
+		return response
+	}
+	if errors.Is(err, auth.ErrTwoFactorRequired) {
+		response["code"] = "TWO_FACTOR_REQUIRED"
+		response["retryable"] = false
+		return response
+	}
+	if auth.IsTwoFactorError(err) {
+		response["code"] = "TWO_FACTOR_INVALID"
+		response["retryable"] = false
+		return response
+	}
+	if auth.IsInvalidCredentials(err) {
+		response["code"] = "INVALID_CREDENTIALS"
+		response["retryable"] = false
+		return response
+	}
+	if auth.IsTemporarySessionError(err) {
+		response["code"] = "NETWORK_ERROR"
+		response["retryable"] = true
+	}
+	return response
 }
 
 func run() error {
@@ -69,22 +94,52 @@ func run() error {
 		config.PrintUsage()
 		return err
 	}
+	if err := config.ReadStdinSecrets(cfg); err != nil {
+		return err
+	}
 
 	authClient := auth.NewClient(cfg)
+
+	if cfg.SessionUsername {
+		username, usernameErr := authClient.SessionUsername()
+		if cfg.JSONOutput {
+			data, _ := json.Marshal(map[string]any{
+				"success":  usernameErr == nil,
+				"username": username,
+				"error": func() string {
+					if usernameErr != nil {
+						return "Não foi possível ler a sessão Proton."
+					}
+					return ""
+				}(),
+			})
+			fmt.Println(string(data))
+			return nil
+		}
+		if usernameErr != nil {
+			return fmt.Errorf("failed to read cached session username: %w", usernameErr)
+		}
+		fmt.Println(username)
+		return nil
+	}
 
 	if cfg.CheckSession {
 		session, timeUntilExpiry, err := authClient.CheckSession()
 		if err != nil || session == nil {
+			errorMessage := "Sessão expirada ou não encontrada"
+			if auth.IsTemporarySessionError(err) {
+				errorMessage = "Não foi possível verificar a sessão Proton temporariamente"
+			}
 			if cfg.JSONOutput {
 				data, _ := json.Marshal(map[string]any{
 					"success": false,
 					"valid":   false,
-					"error":   "Sessão expirada ou não encontrada",
+					"error":   errorMessage,
 				})
 				fmt.Println(string(data))
 				return nil
 			}
-			return fmt.Errorf("sessão expirada ou não encontrada")
+			return errors.New(errorMessage)
 		}
 		if cfg.JSONOutput {
 			data, _ := json.Marshal(map[string]any{
@@ -103,16 +158,20 @@ func run() error {
 	if cfg.CheckPlan {
 		session, _, sessionErr := authClient.CheckSession()
 		if sessionErr != nil || session == nil {
+			errorMessage := "Sessão Proton expirada ou não encontrada."
+			if auth.IsTemporarySessionError(sessionErr) {
+				errorMessage = "Não foi possível verificar a sessão Proton temporariamente."
+			}
 			if cfg.JSONOutput {
 				data, _ := json.Marshal(map[string]any{
 					"success": false,
 					"status":  "unknown",
-					"error":   "Sessão Proton expirada ou não encontrada.",
+					"error":   errorMessage,
 				})
 				fmt.Println(string(data))
 				return nil
 			}
-			return fmt.Errorf("sessão Proton expirada ou não encontrada")
+			return errors.New(errorMessage)
 		}
 
 		plan, planErr := vpn.NewClient(cfg, session).GetAccountPlan()
