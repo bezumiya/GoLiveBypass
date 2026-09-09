@@ -78,6 +78,94 @@ describe("preflight Linux", () => {
     expect(source).toContain("let linuxStatusInFlight: Promise<string> | null = null");
   });
 
+  it("autoriza a elevacao antes de fechar o Discord no fluxo de instalacao", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const installStart = source.indexOf('FOUND="$(escolher_alvos patchear)"');
+    const installEnd = source.indexOf("\nwhile IFS='|' read", installStart);
+    expect(installStart).toBeGreaterThanOrEqual(0);
+    expect(installEnd).toBeGreaterThan(installStart);
+
+    const install = source.slice(installStart, installEnd);
+    const authorizeIndex = install.indexOf("\nauthorize_install_elevation");
+    const stopIndex = install.indexOf("\nstop_discord");
+    expect(authorizeIndex).toBeGreaterThanOrEqual(0);
+    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(authorizeIndex).toBeLessThan(stopIndex);
+    expect(install).toMatch(/authorize_install_elevation\s+\|\|\s+fail/);
+  });
+
+  it("não chama a barreira nos modos status, preflight e ensure-dependencies", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const ensureStart = source.indexOf('[ "$MODE" = "ensure-dependencies" ] && {');
+    const preflightStart = source.indexOf('[ "$MODE" = "preflight" ] && {');
+    const foundStart = source.indexOf('FOUND="$(discord_dirs)"');
+    const preflightEnd = source.indexOf('[ -n "$FOUND" ] || fail', preflightStart);
+    const statusStart = source.indexOf('if [ "$MODE" = "status" ]');
+    const cleanupStart = source.indexOf('if [ "$CLEANUP_LEGACY"');
+    expect(ensureStart).toBeGreaterThanOrEqual(0);
+    expect(foundStart).toBeGreaterThan(ensureStart);
+    expect(preflightStart).toBeGreaterThan(foundStart);
+    expect(preflightEnd).toBeGreaterThan(preflightStart);
+    expect(statusStart).toBeGreaterThan(preflightEnd);
+    expect(cleanupStart).toBeGreaterThan(statusStart);
+
+    const modeBlocks = [
+      source.slice(ensureStart, foundStart),
+      source.slice(preflightStart, preflightEnd),
+      source.slice(statusStart, cleanupStart),
+    ];
+    for (const block of modeBlocks) {
+      expect(block).not.toMatch(/^\s*authorize_install_elevation\b/m);
+    }
+  });
+
+  it("não fecha o Discord quando a autorização falha e mantém a ordem quando aceita", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const authorizeMatch = source.match(/authorize_install_elevation\(\) \{[\s\S]*?\n\}\n\n# Variante somente-leitura/);
+    const callMatch = source.match(/^authorize_install_elevation \|\| fail "[^\n]*"$/m);
+    if (!authorizeMatch || !callMatch) {
+      throw new Error("O standalone não contém a barreira de autorização esperada");
+    }
+
+    const runGuard = (outcome: "accepted" | "rejected") => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-auth-order-"));
+      tempRoots.push(root);
+      const harness = path.join(root, "authorization.sh");
+      fs.writeFileSync(harness, [
+        "#!/bin/sh",
+        "id() { if [ \"$1\" = \"-u\" ]; then printf '1000\\n'; return 0; fi; return 1; }",
+        "elevation_event() { :; }",
+        "elevate() { printf '%s\\n' authorize >> \"$ORDER\"; [ \"$AUTH_OUTCOME\" = accepted ]; }",
+        "ELEVATION_PROVIDER=none",
+        "ELEVATION_RESULT=not_attempted",
+        authorizeMatch[0],
+        "fail() { printf '%s\\n' \"$1\" >&2; exit 1; }",
+        "stop_discord() { printf '%s\\n' stop >> \"$ORDER\"; }",
+        callMatch[0],
+        "stop_discord",
+        "exit 0",
+      ].join("\n"));
+      fs.chmodSync(harness, 0o755);
+      const order = path.join(root, "order");
+      const run = spawnSync("/bin/sh", [harness], {
+        env: { ...process.env, AUTH_OUTCOME: outcome, ORDER: order },
+        encoding: "utf8",
+      });
+      const orderLog = fs.existsSync(order) ? fs.readFileSync(order, "utf8") : "";
+      return { orderLog, run };
+    };
+
+    const rejected = runGuard("rejected");
+    expect(rejected.run.status).toBe(1);
+    expect(rejected.orderLog).toBe("authorize\n");
+    expect(rejected.orderLog).not.toContain("stop");
+    expect(rejected.run.stderr).toContain("Discord nao foi encerrado");
+
+    const accepted = runGuard("accepted");
+    expect(accepted.run.status).toBe(0);
+    expect(accepted.orderLog).toBe("authorize\nstop\n");
+  });
+
   it("instala apenas comandos ausentes com argv pacman fixo e verifica o resultado", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-deps-"));
     tempRoots.push(root);
