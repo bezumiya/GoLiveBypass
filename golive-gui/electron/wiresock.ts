@@ -77,6 +77,7 @@ export type WireSockActivationFailureKind =
   | "permission"
   | "driver"
   | "timeout"
+  | "process"
   | "profile"
   | "service"
   | "unknown";
@@ -85,6 +86,36 @@ export interface WireSockActivationFailure {
   kind: WireSockActivationFailureKind;
   code: string;
   message: string;
+}
+
+export type WireSockDirectResult =
+  | { kind: "running"; pid: number; detail: string }
+  | { kind: "unsupported"; code: string; detail: string }
+  | { kind: "failed"; code: string; detail: string };
+
+/**
+ * O serviço só é compatibilidade para versões do WireSock que não conhecem o
+ * comando oficial run. Falhas de UAC, driver, perfil ou processo encerrado
+ * não podem cair silenciosamente no serviço global: esse era o caminho que
+ * marcava a GUI como ativa sem capturar o Discord.
+ */
+export function classifyWireSockDirectResult(detail: string): WireSockDirectResult {
+  const normalized = detalheErro(detail);
+  const running = normalized.match(/DIRECT_RUNNING:\s*pid=(\d+)/i);
+  if (running) {
+    return { kind: "running", pid: Number(running[1]), detail: normalized };
+  }
+  if (/DIRECT_UNSUPPORTED|RUN_NOT_SUPPORTED|UNKNOWN_COMMAND|unknown\s+(?:command|option)|unrecognized\s+(?:command|option)|(?:run|application mode).{0,24}(?:not supported|unsupported)|comando\s+desconhecido|op[cç][aã]o\s+n[aã]o\s+reconhecida|par[aâ]metro\s+n[aã]o\s+reconhecido|not\s+recognized/i.test(normalized)) {
+    return { kind: "unsupported", code: "WIRESOCK_DIRECT_UNSUPPORTED", detail: normalized };
+  }
+  if (/DIRECT_EXITED:\s*codigo=0\b/i.test(normalized)) {
+    return { kind: "failed", code: "WIRESOCK_DIRECT_EXITED_0", detail: normalized };
+  }
+  return { kind: "failed", code: "WIRESOCK_DIRECT_FAILED", detail: normalized };
+}
+
+export function mayUseServiceCompatibility(result: WireSockDirectResult): boolean {
+  return result.kind === "unsupported";
 }
 
 /**
@@ -109,11 +140,18 @@ export function classifyWireSockActivationFailure(error: unknown): WireSockActiv
       message: "O componente de rede do WireSock ainda não está pronto. Reinicie o Windows e tente ativar novamente.",
     };
   }
-  if (/stop_timeout|start_failed|timeout|timed out|tempo limite|stop_pending|pendente|1053/.test(raw)) {
+  if (/stop_timeout|timeout|timed out|tempo limite|stop_pending|pendente|1053/.test(raw)) {
     return {
       kind: "timeout",
       code: "WIRESOCK_TIMEOUT",
       message: "O serviço WireSock não respondeu a tempo. Feche outros clientes VPN e tente ativar novamente.",
+    };
+  }
+  if (/direct_exited|direct_failed|wiresock_direct|processo direto|process.*exited|process.*encerr/.test(raw)) {
+    return {
+      kind: "process",
+      code: "WIRESOCK_PROCESS",
+      message: "O WireSock encerrou durante a ativação. Verifique o perfil e tente novamente; os detalhes foram registrados no diagnóstico.",
     };
   }
   if (/config_failed|profile|perfil|wireguard|allowedapps|caminho|path|invalid|inv[aá]lid/.test(raw)) {
@@ -304,6 +342,28 @@ function isWireSockProcessAlive(): boolean {
   } catch {
     return false;
   }
+}
+
+function isWireSockProcessPidAlive(pid: number): boolean {
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    const out = execSync('tasklist /FI "PID eq ' + pid + '"', {
+      stdio: ["pipe", "pipe", "ignore"],
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    return new RegExp("wiresock-client\\.exe\\s+" + pid + "\\b", "i").test(out);
+  } catch {
+    return false;
+  }
+}
+
+async function esperarProcessoWireSock(pid: number, tentativas: number, intervaloMs: number): Promise<boolean> {
+  for (let i = 0; i < tentativas; i++) {
+    if (isWireSockProcessPidAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, intervaloMs));
+  }
+  return isWireSockProcessPidAlive(pid);
 }
 
 // Fonte de verdade de "o tunel esta de pe", pro getStatus() da GUI usar -- ao contrario de
@@ -650,15 +710,24 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
     newLines.push(`#@ws:AllowedApps = ${allowedApps}`);
   }
   fs.writeFileSync(targetConf, newLines.join("\r\n"), "utf8");
+  const profileBytes = fs.readFileSync(targetConf);
+  const profileContext = {
+    config_file: path.basename(targetConf),
+    profile_fingerprint: crypto.createHash("sha256").update(profileBytes).digest("hex").slice(0, 16),
+    config_size: profileBytes.byteLength,
+    allowed_apps_count: allowedApps.split(",").filter(Boolean).length,
+  };
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wiresock-"));
   const serviceScriptPath = path.join(tempDir, "activate-service.ps1");
   const serviceResultPath = path.join(tempDir, "service-result.txt");
   const directScriptPath = path.join(tempDir, "activate-direct.ps1");
   const directResultPath = path.join(tempDir, "direct-result.txt");
+  const operationId = logger.createOperationId("wiresock-activation");
+  const directAttemptId = logger.createOperationId("wiresock-direct");
   const readResult = (resultPath: string): string => {
     try {
-      return fs.readFileSync(resultPath, "utf8").replace(/^\d+\s*/, "").trim();
+      return logger.clipLogText(fs.readFileSync(resultPath, "utf8").replace(/^\d+\s*/, "").trim(), 4000);
     } catch {
       return "";
     }
@@ -674,6 +743,13 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
       wireSockDirectScript(wsExe, targetConf, directResultPath),
       { encoding: "utf8", mode: 0o600 },
     );
+    logger.logEvent("info", "wiresock", "activation.attempt", {
+      operation_id: operationId,
+      attempt_id: directAttemptId,
+      phase: "direct-starting",
+      mode: "direct",
+    }, profileContext);
+    const directStartedAt = Date.now();
     let directError: unknown = null;
     try {
       execFileSync("powershell.exe", elevatedPowerShellFileArgs(directScriptPath), {
@@ -687,20 +763,72 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
     // state, DIRECT_RUNNING means that the exact application-mode process
     // stayed alive after parsing this profile.
     const directDetail = readResult(directResultPath);
-    const directStarted = directDetail.startsWith("DIRECT_RUNNING") && await esperarTunel(12, 250);
+    const directResult = classifyWireSockDirectResult(
+      directDetail || (directError ? detalheErro(directError) : ""),
+    );
+    logger.logEvent(directResult.kind === "running" ? "info" : "warn", "wiresock", "process.result", {
+      operation_id: operationId,
+      attempt_id: directAttemptId,
+      phase: "process",
+      mode: "direct",
+    }, {
+      result: directResult.kind,
+      code: directResult.kind === "running" ? null : directResult.code,
+      pid: directResult.kind === "running" ? directResult.pid : null,
+      duration_ms: Date.now() - directStartedAt,
+      detail: directResult.detail,
+    });
+    const directStarted = directResult.kind === "running" &&
+      await esperarProcessoWireSock(directResult.pid, 12, 250);
+    const directFailure = directResult.detail || "o processo direto não permaneceu ativo";
     if (!directStarted) {
-      const directFailure = directDetail || (directError ? detalheErro(directError) : "o processo direto não permaneceu ativo");
-      logger.warn("wiresock", "modo direto oficial indisponivel; tentando servico", {
-        erro: directFailure,
-      });
-      // Keep the detailed service orchestration on disk. Nesting the whole
-      // script in an encoded UAC wrapper caused ENAMETOOLONG on Windows before
-      // PowerShell could execute any of it.
+      if (!mayUseServiceCompatibility(directResult)) {
+        const failure = classifyWireSockActivationFailure(directFailure);
+        logger.logEvent("error", "wiresock", "activation.failed", {
+          operation_id: operationId,
+          attempt_id: directAttemptId,
+          phase: "direct-starting",
+          mode: "direct",
+        }, {
+          codigo: failure.code,
+          tipo: failure.kind,
+          detalhe: directFailure,
+        });
+        throw new Error(failure.message + " [" + failure.code + "]");
+      }
+
+      logger.logEvent("warn", "wiresock", "activation.compatibility_fallback", {
+        operation_id: operationId,
+        attempt_id: directAttemptId,
+        phase: "service-compatibility",
+        mode: "direct",
+      }, { detalhe: directFailure });
+      const compatibilityCleanup = await stopWireSockService();
+      if (!compatibilityCleanup.stopped) {
+        logger.logEvent("error", "wiresock", "cleanup.recovery_required", {
+          operation_id: operationId,
+          attempt_id: directAttemptId,
+          phase: "cleanup",
+        }, {
+          stopped: compatibilityCleanup.stopped,
+          attempts: compatibilityCleanup.attempts,
+          residual: compatibilityCleanup.residual.join(", "),
+        });
+        throw new Error("A tentativa anterior deixou um processo WireSock ativo. Use Restaurar internet antes de tentar novamente. [WIRESOCK_RECOVERY_REQUIRED]");
+      }
       fs.writeFileSync(
         serviceScriptPath,
         wireSockServiceScript(wsExe, targetConf, serviceResultPath),
         { encoding: "utf8", mode: 0o600 },
       );
+      const serviceAttemptId = logger.createOperationId("wiresock-service");
+      logger.logEvent("info", "wiresock", "activation.attempt", {
+        operation_id: operationId,
+        attempt_id: serviceAttemptId,
+        phase: "service-compatibility",
+        mode: "service",
+      }, profileContext);
+      const serviceStartedAt = Date.now();
       let serviceError: unknown = null;
       try {
         execFileSync("powershell.exe", elevatedPowerShellFileArgs(serviceScriptPath), {
@@ -710,40 +838,61 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
         serviceError = error;
       }
 
-      // PowerShell can return a non-zero wrapper status while the elevated
-      // child already left the service running. Preserve that route only if it
-      // is genuinely active; otherwise expose the combined actionable cause.
-      if (serviceError && !(await esperarTunel(6, 250))) {
-        const serviceDetail = readResult(serviceResultPath) || detalheErro(serviceError);
-        const failure = classifyWireSockActivationFailure(`${directFailure} ${serviceDetail}`);
-        logger.error("wiresock", "modo direto e servico falharam", {
+      const serviceDetail = readResult(serviceResultPath) || (serviceError ? detalheErro(serviceError) : "");
+      logger.logEvent(serviceDetail.startsWith("SERVICE_RUNNING") ? "info" : "warn", "wiresock", "process.result", {
+        operation_id: operationId,
+        attempt_id: serviceAttemptId,
+        phase: "process",
+        mode: "service",
+      }, {
+        result: serviceDetail.startsWith("SERVICE_RUNNING") ? "running" : "failed",
+        duration_ms: Date.now() - serviceStartedAt,
+        detail: serviceDetail,
+      });
+      const serviceMatch = serviceDetail.match(/^SERVICE_RUNNING:\s+name=([^\s]+)\s+pid=(\d+)/i);
+      const serviceName = serviceMatch?.[1] || "";
+      const servicePid = Number(serviceMatch?.[2] || 0);
+      const serviceStarted = Boolean(
+        serviceMatch &&
+        WIRESOCK_SERVICE_NAMES.includes(serviceName as typeof WIRESOCK_SERVICE_NAMES[number]) &&
+        isServiceRunning(serviceName) &&
+        await esperarProcessoWireSock(servicePid, 6, 250),
+      );
+      if (!serviceStarted) {
+        const failure = classifyWireSockActivationFailure(directFailure + " " + serviceDetail);
+        logger.logEvent("error", "wiresock", "activation.failed", {
+          operation_id: operationId,
+          attempt_id: serviceAttemptId,
+          phase: "service-compatibility",
+          mode: "service",
+        }, {
           codigo: failure.code,
           tipo: failure.kind,
           direto: directFailure,
-          servico: serviceDetail,
+          servico: serviceDetail || "serviço não confirmou o processo próprio",
         });
-        throw new Error(`${failure.message} [${failure.code}]`);
-      }
-      if (!serviceError && !(await esperarTunel(6, 250))) {
-        const serviceDetail = readResult(serviceResultPath) || "serviço encerrou logo após iniciar";
-        const failure = classifyWireSockActivationFailure(`${directFailure} ${serviceDetail}`);
-        logger.error("wiresock", "servico nao confirmou processo ativo", {
-          codigo: failure.code,
-          tipo: failure.kind,
-          direto: directFailure,
-          servico: serviceDetail,
-        });
-        throw new Error(`${failure.message} [${failure.code}]`);
+        throw new Error(failure.message + " [" + failure.code + "]");
       }
       activationMode = "service";
-      if (serviceError) {
-        logger.warn("wiresock", "wrapper do servico retornou erro, mas o processo foi confirmado ativo", {
-          erro: readResult(serviceResultPath) || detalheErro(serviceError),
-        });
-      }
-    } else if (directError) {
-      logger.warn("wiresock", "wrapper do modo direto retornou erro, mas o processo foi confirmado ativo", {
-        erro: directDetail || detalheErro(directError),
+      logger.logEvent("info", "wiresock", "activation.accepted", {
+        operation_id: operationId,
+        attempt_id: serviceAttemptId,
+        phase: "active",
+        mode: "service",
+      }, {
+        serviceName,
+        pid: servicePid,
+        wrapperError: serviceError ? detalheErro(serviceError) : null,
+      });
+    } else {
+      logger.logEvent("info", "wiresock", "activation.accepted", {
+        operation_id: operationId,
+        attempt_id: directAttemptId,
+        phase: "active",
+        mode: "direct",
+      }, {
+        pid: directResult.pid,
+        wrapperError: directError ? detalheErro(directError) : null,
       });
     }
   } finally {
@@ -752,7 +901,11 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
     }
   }
   limparDnsDoAdaptadorWireSock();
-  logger.info("wiresock", "WireSock ativo com perfil selecionado", { config: targetConf, mode: activationMode });
+  logger.logEvent("info", "wiresock", "activation.completed", {
+    operation_id: operationId,
+    phase: "active",
+    mode: activationMode,
+  }, profileContext);
 }
 
 export async function startWireSockService(installDir: string, customConf?: string, allowedAppPaths: string[] = []): Promise<void> {

@@ -3,7 +3,7 @@ import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockServiceScript
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { classifyWireSockActivationFailure, findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
+import { classifyWireSockActivationFailure, classifyWireSockDirectResult, findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, mayUseServiceCompatibility, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
 
 describe("WireSock no Windows", () => {
   it("classifica cancelamento e reboot do instalador sem permitir retry silencioso", () => {
@@ -25,6 +25,10 @@ describe("WireSock no Windows", () => {
     expect(classifyWireSockActivationFailure({ stderr: "STOP_TIMEOUT: estado=StopPending" })).toMatchObject({
       kind: "timeout",
       code: "WIRESOCK_TIMEOUT",
+    });
+    expect(classifyWireSockActivationFailure({ stderr: "DIRECT_EXITED: codigo=0" })).toMatchObject({
+      kind: "process",
+      code: "WIRESOCK_PROCESS",
     });
     expect(classifyWireSockActivationFailure({ stderr: "CONFIG_FAILED: AllowedApps inválido" })).toMatchObject({
       kind: "profile",
@@ -54,11 +58,14 @@ describe("WireSock no Windows", () => {
 
   it("torna a configuração do serviço idempotente e preserva detalhes do SCM no log", () => {
     const script = wireSockServiceScript("C:\\WireSock\\client.exe", "C:\\GoLive\\wg.conf", "C:\\Temp\\result.txt");
-    expect(script).toContain("Wait-WireSockState 'Stopped' 45");
+    expect(script).toContain("Wait-WireSockState $serviceName 'Stopped' 45");
     expect(script).toContain("for ($attempt = 1; $attempt -le 2; $attempt++)");
     expect(script).toContain("GOLIVE_WIRESOCK_ERROR");
     expect(script).toContain("ServiceSpecificExitCode");
     expect(script).toContain("SERVICE_RUNNING");
+    expect(script).toContain("wiresock-pro-client-service");
+    expect(script).toContain("$name = [string]$serviceInfo.Name");
+    expect(script).toContain("pid=$($running.ProcessId)");
     expect(script).toContain("[IO.File]::WriteAllText");
   });
 
@@ -73,18 +80,37 @@ describe("WireSock no Windows", () => {
     expect(script).toContain("wiresock-pro-client-service");
     expect(script).toContain("Stop-Process -Force");
     expect(script).toContain("-network-lock', 'disabled'");
+    expect(script).toContain("-RedirectStandardOutput");
+    expect(script).toContain("-RedirectStandardError");
+    expect(script).toContain("Read-Captured");
+    expect(script).toContain("DIRECT_EXITED: codigo=");
   });
 
-  it("prioriza o modo direto oficial e usa o serviço apenas como fallback", () => {
+  it("aceita somente o processo próprio e reserva o serviço para incompatibilidade explícita", () => {
+    expect(classifyWireSockDirectResult("DIRECT_RUNNING: pid=1234")).toMatchObject({ kind: "running", pid: 1234 });
+    expect(classifyWireSockDirectResult("DIRECT_EXITED: codigo=0")).toMatchObject({
+      kind: "failed",
+      code: "WIRESOCK_DIRECT_EXITED_0",
+    });
+    const unsupported = classifyWireSockDirectResult("GOLIVE_WIRESOCK_DIRECT_ERROR: unknown command run");
+    expect(unsupported).toMatchObject({ kind: "unsupported", code: "WIRESOCK_DIRECT_UNSUPPORTED" });
+    expect(mayUseServiceCompatibility(unsupported)).toBe(true);
+    expect(mayUseServiceCompatibility(classifyWireSockDirectResult("DIRECT_EXITED: codigo=1"))).toBe(false);
+  });
+
+  it("prioriza o modo direto oficial e não usa fallback genérico do serviço", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
     expect(src).toContain("wireSockDirectScript(wsExe, targetConf, directResultPath)");
-    expect(src).toContain("modo direto oficial indisponivel; tentando servico");
+    expect(src).toContain("classifyWireSockDirectResult");
+    expect(src).toContain("mayUseServiceCompatibility(directResult)");
+    expect(src).toContain("activation.compatibility_fallback");
     expect(src).toContain("wireSockServiceScript(wsExe, targetConf, serviceResultPath)");
     expect(src.indexOf("wireSockDirectScript(wsExe, targetConf, directResultPath)")).toBeLessThan(
       src.indexOf("wireSockServiceScript(wsExe, targetConf, serviceResultPath)"),
     );
-    expect(src).toContain('directDetail.startsWith("DIRECT_RUNNING")');
-    expect(src).toContain("await esperarTunel(12, 250)");
+    expect(src).toContain('directResult.kind === "running"');
+    expect(src).toContain("await esperarProcessoWireSock(directResult.pid, 12, 250)");
+    expect(src).not.toContain("directDetail.startsWith(\"DIRECT_RUNNING\")");
     expect(src).toContain('activationMode = "service"');
   });
 

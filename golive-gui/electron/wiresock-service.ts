@@ -16,35 +16,38 @@ function Complete-WireSock([int]$code, [string]$detail) {
   exit $code
 }
 try {
-  $name = 'wiresock-client-service'
+  $serviceNames = @('wiresock-client-service', 'wiresock-pro-client-service')
   $expected = ${literal(command)}
   function Get-WireSockInfo {
-    return Get-CimInstance Win32_Service -Filter "Name='$name'" -ErrorAction SilentlyContinue
+    foreach ($candidate in $serviceNames) {
+      $info = Get-CimInstance Win32_Service -Filter "Name='$candidate'" -ErrorAction SilentlyContinue
+      if ($info) { return $info }
+    }
+    return $null
   }
-  function Wait-WireSockState([string]$state, [int]$seconds) {
+  function Wait-WireSockState([string]$serviceName, [string]$state, [int]$seconds) {
     $deadline = (Get-Date).AddSeconds($seconds)
     do {
-      $current = Get-Service -Name $name -ErrorAction SilentlyContinue
+      $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
       if ($current -and $current.Status -eq $state) { return $true }
       Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     return $false
   }
-  function Stop-WireSockService {
-    $current = Get-Service -Name $name -ErrorAction SilentlyContinue
+  function Stop-WireSockService([string]$serviceName) {
+    $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     if (-not $current -or $current.Status -eq 'Stopped') { return }
-    try { Stop-Service -Name $name -Force -ErrorAction Stop } catch {
+    try { Stop-Service -Name $serviceName -Force -ErrorAction Stop } catch {
       # A service in STOP_PENDING can reject a second Stop-Service. The state
       # poll below is authoritative and avoids starting over a live WFP child.
-      $current = Get-Service -Name $name -ErrorAction SilentlyContinue
+      $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     }
-    if (-not (Wait-WireSockState 'Stopped' 45)) {
-      $info = Get-WireSockInfo
-      throw "STOP_TIMEOUT: estado=$($info.State) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
+    if (-not (Wait-WireSockState $serviceName 'Stopped' 45)) {
+      $info = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+      throw "STOP_TIMEOUT: servico=$serviceName estado=$($info.State) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
     }
   }
 
-  Stop-WireSockService
   $serviceInfo = Get-WireSockInfo
   if (-not $serviceInfo) {
     & ${literal(executable)} install -start-type 3 -config ${literal(config)} -log-level info -network-lock disabled
@@ -53,6 +56,8 @@ try {
     if ($installCode -ne 0 -and -not $serviceInfo) { throw "INSTALL_FAILED: codigo=$installCode" }
   }
   if (-not $serviceInfo) { throw 'SERVICE_MISSING: Serviço WireSock não encontrado após instalação' }
+  $name = [string]$serviceInfo.Name
+  Stop-WireSockService $name
 
   $change = Invoke-CimMethod -InputObject $serviceInfo -MethodName Change -Arguments @{PathName=$expected; StartMode='Manual'}
   if ($change.ReturnValue -ne 0) { throw "CONFIG_FAILED: codigo=$($change.ReturnValue)" }
@@ -63,13 +68,16 @@ try {
   for ($attempt = 1; $attempt -le 2; $attempt++) {
     try {
       Start-Service -Name $name -ErrorAction Stop
-      if (Wait-WireSockState 'Running' 45) { Complete-WireSock 0 'SERVICE_RUNNING' }
+      if (Wait-WireSockState $name 'Running' 45) {
+        $running = Get-WireSockInfo
+        Complete-WireSock 0 "SERVICE_RUNNING: name=$name pid=$($running.ProcessId) win32=$($running.ExitCode) service=$($running.ServiceSpecificExitCode) path=$($running.PathName)"
+      }
       $info = Get-WireSockInfo
-      $lastStartError = "estado=$($info.State) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
+      $lastStartError = "name=$name estado=$($info.State) pid=$($info.ProcessId) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
     } catch {
-      $lastStartError = $_.Exception.Message
+      $lastStartError = "name=$name erro=$($_.Exception.Message)"
     }
-    if ($attempt -lt 2) { Start-Sleep -Seconds 2; Stop-WireSockService }
+    if ($attempt -lt 2) { Start-Sleep -Seconds 2; Stop-WireSockService $name }
   }
   throw "START_FAILED: $lastStartError"
 } catch {
@@ -91,9 +99,20 @@ export function wireSockDirectScript(executable: string, config: string, resultP
   const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
   return `$ErrorActionPreference = 'Stop'
 $resultPath = ${literal(resultPath)}
+$stdoutPath = ${literal(resultPath + '.stdout')}
+$stderrPath = ${literal(resultPath + '.stderr')}
 function Complete-WireSock([int]$code, [string]$detail) {
   try { [IO.File]::WriteAllText($resultPath, "$code\n$detail", [Text.UTF8Encoding]::new($false)) } catch {}
   exit $code
+}
+function Read-Captured([string]$path) {
+  try {
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    $text = [IO.File]::ReadAllText($path)
+    $text = [regex]::Replace($text, '\s+', ' ').Trim()
+    if ($text.Length -gt 1200) { return $text.Substring(0, 1200) + '…' }
+    return $text
+  } catch { return '' }
 }
 function Wait-ServiceStopped([string]$name, [int]$seconds) {
   $service = Get-Service -Name $name -ErrorAction SilentlyContinue
@@ -114,14 +133,22 @@ try {
   Get-Process -Name 'wiresock-client' -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
+  Remove-Item -LiteralPath $resultPath, $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
   $arguments = @('run', '-config', ('"' + ${literal(config)} + '"'), '-log-level', 'info', '-network-lock', 'disabled')
-  $child = Start-Process -FilePath ${literal(executable)} -ArgumentList $arguments -WindowStyle Hidden -PassThru -ErrorAction Stop
+  $child = Start-Process -FilePath ${literal(executable)} -ArgumentList $arguments -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru -ErrorAction Stop
   Start-Sleep -Seconds 3
   $child.Refresh()
-  if ($child.HasExited) { throw "DIRECT_EXITED: codigo=$($child.ExitCode)" }
+  if ($child.HasExited) {
+    $stdout = Read-Captured $stdoutPath
+    $stderr = Read-Captured $stderrPath
+    throw "DIRECT_EXITED: codigo=$($child.ExitCode) stdout=$stdout stderr=$stderr"
+  }
   Complete-WireSock 0 "DIRECT_RUNNING: pid=$($child.Id)"
 } catch {
+  $stdout = Read-Captured $stdoutPath
+  $stderr = Read-Captured $stderrPath
   $detail = "GOLIVE_WIRESOCK_DIRECT_ERROR: $($_.Exception.Message)"
+  if ($stdout -or $stderr) { $detail += " stdout=$stdout stderr=$stderr" }
   [Console]::Error.WriteLine($detail)
   Complete-WireSock 1 $detail
 }`;

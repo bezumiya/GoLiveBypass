@@ -2396,6 +2396,23 @@ export interface WindowsRouteReadiness {
 // chegaram ao peer. Esta rotina observa as fontes disponiveis para diagnostico;
 // ela nunca bloqueia nem reprova uma ativacao que ja iniciou o WireSock.
 async function waitForWindowsWgReady(timeoutMs = 20_000): Promise<WindowsRouteReadiness> {
+  const operationId = logger.createOperationId("windows-readiness");
+  const finish = (result: WindowsRouteReadiness): WindowsRouteReadiness => {
+    logger.logEvent("info", "wiresock", "readiness.complete", {
+      operation_id: operationId,
+      phase: "readiness",
+      source: result.source,
+      state: result.state,
+    }, {
+      verified: result.verified,
+      detail: result.detail || null,
+    });
+    return result;
+  };
+  logger.logEvent("info", "wiresock", "readiness.start", {
+    operation_id: operationId,
+    phase: "readiness",
+  }, { timeout_ms: timeoutMs });
   const deadline = Date.now() + timeoutMs;
   let last: WgTunnelStats | undefined;
   let lastWireSock: WireSockConnectionStatus = getWireSockConnectionStatus();
@@ -2405,17 +2422,17 @@ async function waitForWindowsWgReady(timeoutMs = 20_000): Promise<WindowsRouteRe
   while (Date.now() < deadline) {
     lastWireSock = getWireSockConnectionStatus();
     if (lastWireSock.source === "cli" && lastWireSock.state === "disconnected") {
-      return {
+      return finish({
         verified: false,
         state: "disconnected",
         source: "cli",
         detail: "WireSock informou que a rota está desconectada",
-      };
+      });
     }
     last = getWgStats();
     const readiness = classifyWgReadiness(last, true);
     if (readiness.ready) {
-      return { verified: true, state: "connected", source: "wg", detail: "handshake recente e tráfego WireGuard bidirecional confirmados" };
+      return finish({ verified: true, state: "connected", source: "wg", detail: "handshake recente e tráfego WireGuard bidirecional confirmados" });
     }
     // Instalações oficiais nem sempre incluem wg.exe. Dois estados Connected
     // consecutivos com endereço externo são a confirmação funcional da CLI;
@@ -2423,7 +2440,7 @@ async function waitForWindowsWgReady(timeoutMs = 20_000): Promise<WindowsRouteRe
     if (lastWireSock.source === "cli" && lastWireSock.state === "connected" && lastWireSock.externalAddress) {
       cliFlowSamples++;
       if (cliFlowSamples >= 2) {
-        return { verified: true, state: "connected", source: "cli", detail: `túnel conectado; endereço externo ${lastWireSock.externalAddress}` };
+        return finish({ verified: true, state: "connected", source: "cli", detail: `túnel conectado; endereço externo ${lastWireSock.externalAddress}` });
       }
     } else {
       cliFlowSamples = 0;
@@ -2442,7 +2459,7 @@ async function waitForWindowsWgReady(timeoutMs = 20_000): Promise<WindowsRouteRe
           sent_bytes: traffic.sentBytes,
           samples: adapterFlowSamples,
         });
-        return { verified: true, state: "connected", source: "service", detail: `ProTUN ativo com tráfego RX/TX (${traffic.receivedBytes}/${traffic.sentBytes})` };
+        return finish({ verified: true, state: "connected", source: "service", detail: `ProTUN ativo com tráfego RX/TX (${traffic.receivedBytes}/${traffic.sentBytes})` });
       }
     } else {
       adapterFlowSamples = 0;
@@ -2452,12 +2469,12 @@ async function waitForWindowsWgReady(timeoutMs = 20_000): Promise<WindowsRouteRe
   const motivo = last?.handshakeAgoS === null
     ? "nenhum handshake WireGuard foi confirmado"
     : (last?.error || "o peer WireGuard não ficou pronto");
-  return {
+  return finish({
     verified: false,
     state: lastWireSock.state === "disconnected" ? "disconnected" : "unverified",
     source: lastWireSock.source === "none" ? "none" : lastWireSock.source,
     detail: motivo,
-  };
+  });
 }
 
 function linuxStatus(): Promise<string> {
