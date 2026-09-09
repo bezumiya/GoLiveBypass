@@ -4,7 +4,7 @@
 
 **Goal:** Fazer a GUI Linux comprovar a autorização sudo/pkexec antes de fechar o Discord e registrar, sem segredos, se o prompt foi aberto, recebeu entrada e foi aceito ou recusado.
 
-**Architecture:** O standalone continuará sendo o único dono da elevação Linux. Uma transação efêmera de elevação registra provedor e resultado no stderr que a GUI já encaminha aos logs, valida a autorização com `sudo -S -k -v` ou `pkexec`, e só depois libera o fluxo que encerra o Discord e cria o namespace WireGuard. Probes de status/saúde permanecem em `elevate_readonly` e não recebem nenhuma capacidade interativa.
+**Architecture:** O standalone continuará sendo o único dono da elevação Linux. Uma transação efêmera de elevação registra provedor e resultado no stderr; a GUI encaminha as linhas ao canal público e persiste somente eventos aprovados por whitelist no `gui.log`. O standalone valida a autorização com `sudo -S -k -v` ou `pkexec`, e só depois libera o fluxo que encerra o Discord e cria o namespace WireGuard. Probes de status/saúde permanecem em `elevate_readonly` e não recebem nenhuma capacidade interativa.
 
 **Tech Stack:** Shell POSIX (`standalone/golivebypass-standalone.sh`), Electron/TypeScript existente, Vitest, `bash -n` e Vite.
 
@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Nunca registrar senha, comprimento da senha, conteúdo do stderr do prompt ou token de sessão.
+- O parser Electron só pode persistir eventos, provedores, resultados e detalhes pertencentes à whitelist; stderr bruto nunca entra no `gui.log`.
 - A autenticação interativa só pode ocorrer no caminho explícito de ativação; `--status`, watchdogs e probes usam `NONINTERACTIVE=1`.
 - O preflight continua somente leitura e não abre prompt.
 - A autorização precisa terminar antes de `stop_discord`, remoção de Singleton ou alteração do namespace.
@@ -59,8 +60,8 @@
     const result = runElevation({ prompt: "zenity-accepted", sudoValidation: "accepted" });
     expect(result.log).toContain("prompt:zenity");
     expect(result.stderr).toContain("prompt.requested provider=zenity");
-    expect(result.stderr).toContain("prompt.finished provider=zenity input=nonempty");
-    expect(result.stderr).toContain("sudo.validation result=accepted");
+    expect(result.stderr).toContain("prompt.finished provider=zenity result=not_attempted input=nonempty code=0");
+    expect(result.stderr).toContain("sudo.validation provider=zenity result=accepted code=0");
     expect(result.log).toContain("sudo_validate:nonempty");
     expect(result.stderr).not.toMatch(/test|password|senha=/i);
   });
@@ -71,8 +72,8 @@
     expect(cancelled.stderr).not.toContain("sudo.validation result=accepted");
 
     const rejected = runElevation({ prompt: "zenity-accepted", sudoValidation: "rejected" });
-    expect(rejected.stderr).toContain("prompt.finished provider=zenity input=nonempty");
-    expect(rejected.stderr).toContain("sudo.validation result=rejected");
+    expect(rejected.stderr).toContain("prompt.finished provider=zenity result=not_attempted input=nonempty code=0");
+    expect(rejected.stderr).toContain("sudo.validation provider=zenity result=rejected code=1");
   });
 
   it("mantém modo readonly sem prompt e informa provedor pkexec", () => {
@@ -128,13 +129,13 @@
 
 - [ ] **Step 2: Tornar a escolha de provedor explícita**
 
-  Criar `sudo_prompt_provider()` retornando `zenity`, `kdialog` ou vazio, nessa ordem. Fazer `sudo_pass_get` definir `ELEVATION_PROVIDER` antes de executar o diálogo; quando nenhum provedor existir, definir `ELEVATION_RESULT=prompt_unavailable`, emitir `elevation.prompt.finished provider=none result=unavailable` e retornar falha.
+  Criar `sudo_prompt_provider()` retornando os provedores disponíveis na ordem `zenity`, `kdialog`. Fazer `sudo_pass_get` definir `ELEVATION_PROVIDER` antes de executar cada diálogo; quando nenhum provedor existir, definir `ELEVATION_RESULT=unavailable`, emitir `elevation.prompt.unavailable provider=none` e permitir o fallback polkit.
 
 - [ ] **Step 3: Registrar início e fim do prompt sem vazar stderr**
 
   Reescrever a chamada de `zenity`/`kdialog` para capturar código de saída sem deixar `set -e` encerrar o shell prematuramente. Redirecionar stderr do provedor para um arquivo temporário `mktemp`, usar somente `[ -s "$prompt_error" ]` como indicador e removê-lo imediatamente.
 
-  A sequência observável deve ser implementada com captura explícita do código de saída:
+  A sequência observável deve ser implementada com captura explícita do código de saída. Texto não vazio significa apenas entrada recebida; `accepted` só pode ser usado depois da validação real do `sudo`:
 
   ```sh
   elevation_event "prompt.requested" "phase=dialog"
@@ -147,18 +148,18 @@
   prompt_error_present=false
   [ -s "$prompt_error" ] && prompt_error_present=true
   rm -f "$prompt_error"
-  elevation_event "prompt.finished" "input=nonempty"
+  elevation_event "prompt.finished" "input=nonempty" "code=0"
   ```
 
   Para `prompt_exit != 0` e stderr vazio, registrar `input=empty result=cancelled`; para stderr presente, registrar `input=empty result=failed`; para código 0 com resposta vazia, registrar `input=empty result=empty`. Só executar `sudo -S -k -v` quando `pass` não estiver vazio. Aplicar a mesma sequência à chamada `kdialog`.
 
 - [ ] **Step 4: Registrar validação aceita/recusada e manter o segredo efêmero**
 
-  Em `sudo_authenticate_once`, registrar o resultado de `sudo -n true` como `sudo.cached`, registrar `sudo.validation result=accepted` após `sudo -S -k -v` bem-sucedido e `sudo.validation result=rejected` após falha. Manter `SUDO_PASS_FILE`, `chmod 600`, `cleanup_sudo_pass` e o `trap` existentes; não adicionar senha em ambiente, argumento, log ou arquivo persistente.
+  Em `sudo_authenticate_once`, registrar o resultado de `sudo -n true` como `sudo.cached`, registrar `sudo.validation result=accepted code=0` após `sudo -S -k -v` bem-sucedido e `sudo.validation result=rejected` com código sanitizado após falha. Manter `SUDO_PASS_FILE`, `chmod 600`, `cleanup_sudo_pass` e o `trap` existentes; não adicionar senha em ambiente, argumento, log ou arquivo persistente.
 
 - [ ] **Step 5: Instrumentar o fallback pkexec sem alterar probes**
 
-  No ramo GUI que usa `pkexec`, emitir `elevation.prompt.requested provider=pkexec`, executar o comando, emitir `result=accepted` ou `result=failed` e retornar o mesmo código. O ramo só poderá ser alcançado quando `NONINTERACTIVE != 1`; `elevate_readonly` deve continuar sem esses eventos.
+  No ramo GUI que usa `pkexec`, emitir `elevation.pkexec.invoked provider=pkexec`, executar o comando e emitir `result=authorized` ou `result=failed` com código sanitizado. O evento não afirma que uma janela foi exibida. O ramo só poderá ser alcançado quando `NONINTERACTIVE != 1`; `elevate_readonly` deve continuar sem esses eventos.
 
 - [ ] **Step 6: Executar os testes do contrato especificado**
 
@@ -333,10 +334,10 @@
 Ao clicar em ativar na GUI Linux, os logs mostrarão uma sequência sanitizada semelhante a:
 
 ```text
-[elevation] prompt.requested provider=zenity result=not_attempted phase=dialog
-[elevation] prompt.finished provider=zenity result=accepted input=nonempty
-[elevation] sudo.validation provider=zenity result=accepted
-[elevation] authorization provider=zenity result=accepted phase=pre_activation
+[elevation] prompt.requested provider=zenity result=not_attempted input=unknown phase=dialog
+[elevation] prompt.finished provider=zenity result=not_attempted input=nonempty code=0 stderr=empty
+[elevation] sudo.validation provider=zenity result=accepted code=0 phase=password
+[elevation] authorization provider=zenity result=authorized phase=pre_activation
 ```
 
 Se o diálogo não abrir ou for cancelado, a sequência terminará com `prompt_unavailable`,
@@ -344,3 +345,10 @@ Se o diálogo não abrir ou for cancelado, a sequência terminará com `prompt_u
 for preenchida mas incorreta, o log registrará `input=nonempty` seguido de
 `sudo.validation result=rejected`; o segredo nunca aparecerá. Os probes automáticos continuarão
 sem eventos interativos e sem alteração da sessão.
+
+## Hardening aplicado após a revisão
+
+- A autorização também valida `sudo`/`runuser`/`setpriv` para iniciar o cliente como o usuário da sessão quando o ambiente só oferece `pkexec`.
+- `cleanup_legacy_tor` foi movido para depois da autorização; falhas após `stop_discord` armam rollback do namespace e reabertura host-only somente quando a rota foi removida.
+- Falha técnica de `zenity`/`kdialog` tenta o próximo provedor e, se necessário, `pkexec`; cancelamento, entrada vazia e senha recusada não fazem fallback.
+- `main.ts` agora consome chunks fragmentados e persiste os eventos sanitizados; o contrato real está coberto por `linux-elevation-logger.test.ts`.
