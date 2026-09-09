@@ -6,6 +6,13 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Correção da ativação Linux e diagnóstico de elevação
+
+- Corrige o caso da issue #258 em que o Discord era encerrado antes de o script conseguir obter ou validar a senha do `sudo`; a autorização e o executor do usuário agora são validados antes de qualquer encerramento ou limpeza legada.
+- Registra no diagnóstico da GUI, sem senha, tamanho de segredo, token ou stderr bruto, se o provedor gráfico foi solicitado, recebeu entrada, foi validado pelo `sudo` ou falhou; `pkexec` é identificado como delegação ao polkit, sem afirmar que uma janela foi exibida.
+- Mantém `--status`, preflight, watchdogs e probes não interativos; prompts gráficos têm fallback seguro entre provedores e o cancelamento/recusa não dispara pedidos repetidos.
+- Em falhas após o fechamento, o namespace parcial é removido quando possível e o Discord é reaberto fora do bypass somente após confirmar que não há namespace ativo.
+
 ### Correções de ativação Windows e runtime Proton
 
 - O helper Proton agora é validado por SHA-256, copiado atomicamente para a pasta de dados e reparado automaticamente a partir de assets autenticados da mesma release quando a extração da GUI estiver incompleta.
