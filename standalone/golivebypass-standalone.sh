@@ -1009,7 +1009,13 @@ sudo_authenticate_once() {
 
     if have sudo && [ "${GOLIVE_GUI:-0}" = "1" ]; then
         if ! sudo_pass_get; then
-            printf '%s\n' "Falha: nao foi possivel autorizar o sudo (resultado ${ELEVATION_RESULT}). A ativacao foi cancelada sem alterar o sistema." >&2
+            # Quando o provedor grafico falhou, elevate ainda pode tentar
+            # pkexec. Nao anuncie cancelamento antes desse segundo caminho;
+            # para cancelamento, senha vazia ou falha sem fallback, preserve a
+            # mensagem sanitizada deste fluxo.
+            if [ "${SUDO_PROMPT_FALLBACK_PKEXEC:-0}" -ne 1 ]; then
+                printf '%s\n' "Falha: nao foi possivel autorizar o sudo (resultado ${ELEVATION_RESULT}). A ativacao foi cancelada sem alterar o sistema." >&2
+            fi
             return 1
         fi
         if sudo -S -k -v < "$SUDO_PASS_FILE" >/dev/null 2>&1; then
