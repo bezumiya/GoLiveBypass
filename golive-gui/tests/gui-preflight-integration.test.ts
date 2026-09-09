@@ -57,7 +57,10 @@ function makeLinuxPreflight() {
   const statements = [...fn.body.statements];
   const end = statements.findIndex((s) => s.getText(file).includes("if (!preflight.ok)"));
   if (end < 0) throw new Error("bloco de validação Linux não encontrado");
-  const body = statements.slice(0, end + 1).map((s) => s.getText(file)).join("\n");
+  const bodySource = statements.slice(0, end + 1).map((s) => s.getText(file)).join("\n");
+  const body = ts.transpileModule(bodySource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
+  }).outputText;
   return new Function(`return async function(ctx) {
     const { linuxPreflight, runScript, onChunk, linuxPreflightMessage, linuxPreflightRepairable, tailErroScript } = ctx;
     ${body}
