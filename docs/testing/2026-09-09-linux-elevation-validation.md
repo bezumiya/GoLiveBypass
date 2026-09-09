@@ -29,7 +29,7 @@ senha aceita.
 |---|---|
 | `bash -n standalone/golivebypass-standalone.sh` | passou |
 | `/bin/sh -n standalone/golivebypass-standalone.sh` | passou |
-| `npm test -- tests/linux-elevation.test.ts tests/linux-preflight.test.ts tests/linux-sudo.test.ts tests/linux-elevation-logger.test.ts tests/gui-preflight-integration.test.ts` | 5 arquivos, 41 testes passaram |
+| `npm test -- tests/linux-elevation.test.ts tests/linux-preflight.test.ts tests/linux-sudo.test.ts tests/linux-elevation-logger.test.ts tests/gui-preflight-integration.test.ts` | 5 arquivos, 43 testes passaram |
 | `npm run compile` em `golive-gui/` | passou; sync-bypass em dia, helper Proton, TypeScript e Vite concluídos |
 | `GOLIVE_GUI=1 bash standalone/golivebypass-standalone.sh --preflight --json` | `ok=true`; CachyOS, dependências presentes, sudo/netns disponíveis, WireGuard disponível, 8 instalações detectadas |
 | `git diff --check` | passou |
