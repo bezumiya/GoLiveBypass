@@ -9,9 +9,10 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ### Correções de ativação Windows e runtime Proton
 
 - O helper Proton agora é validado por SHA-256, copiado atomicamente para a pasta de dados e reparado automaticamente a partir de assets autenticados da mesma release quando a extração da GUI estiver incompleta.
-- A ativação WireSock no Windows passa a usar primeiro o modo oficial por aplicativo (`run`), evitando perfis globais de serviço que podem aparecer como ativos sem capturar o Discord. O serviço permanece apenas como fallback idempotente quando o modo direto não pode iniciar.
-- A rotina elevada devolve um resultado próprio em arquivo temporário; mensagens CLIXML do PowerShell não são mais confundidas com falhas do serviço nem provocam rollback de uma rota que já iniciou.
+- A ativação WireSock no Windows usa primeiro o modo oficial por aplicativo (`run`), preservando a correção que removeu a dependência do serviço global. O serviço só é considerado para incompatibilidade explícita do comando `run`; `DIRECT_EXITED`, UAC, driver, perfil e timeout não ativam fallback cego.
+- A rotina elevada devolve um resultado próprio em arquivo temporário, captura stdout/stderr do processo direto e confirma o PID pertencente à operação; mensagens CLIXML ou um serviço residual não são mais confundidos com uma rota válida.
 - Falhas comuns do Windows passaram a orientar o usuário sobre permissão, reinicialização, timeout do serviço ou perfil WireGuard, enquanto o rollback da rota continua obrigatório.
+- Logs de ativação, preflight e Proton agora têm `operation_id`/`attempt_id`, fase, duração, PID, códigos do SCM, fingerprint do perfil e fontes de diagnóstico; saídas são limitadas e segredos são redigidos.
 
 ### Atualizações do plugin Vencord/Equicord
 

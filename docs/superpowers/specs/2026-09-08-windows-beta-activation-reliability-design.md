@@ -207,6 +207,19 @@ O lançamento só será considerado aprovado quando a imagem reproduzida deixar 
 gerar o popup `[WIRESOCK_SERVICE]`, ou quando o log e a mensagem da GUI
 mostrarem a causa real e o rollback comprovadamente restaurar a rede.
 
+## Implementação registrada em 2026-09-08
+
+Foram implementadas as primitivas de log correlacionado em
+golive-gui/electron/logger.ts, a seleção exata do portable no updater, a
+classificação WireSockDirectResult, a descoberta dos dois nomes de serviço e a
+captura limitada de stdout/stderr do modo direto. A readiness Windows agora
+registra início e conclusão como diagnóstico assíncrono.
+
+Os testes unitários cobrem o caso DIRECT_EXITED: codigo=0, incompatibilidade
+explícita, PID próprio, redaction, preflight, runtime Proton e asset do
+updater. A compilação Linux foi validada; a matriz Windows permanece um gate
+separado porque a VM estava ocupada durante esta sessão.
+
 ## Decisão registrada
 
 A recomendação anterior de voltar ao serviço como caminho principal foi revisada

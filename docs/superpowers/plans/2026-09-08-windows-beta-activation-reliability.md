@@ -22,6 +22,22 @@
 - Betas continuam prereleases e não podem alterar latest da estável.
 - Preservar todas as alterações não relacionadas já presentes no worktree; cada commit deve conter apenas os arquivos da tarefa correspondente.
 
+## Estado de execução em 2026-09-08
+
+- Base Proton e pipeline de assets: preservados na árvore atual e validados
+  pelos testes de empacotamento/runtime e pelo compile.
+- Updater: concluído; a seleção exige somente o portable exato da versão.
+- Logger: concluído; eventos correlacionados, clipping e redaction estão
+  disponíveis e usados no fluxo Windows/Proton/preflight.
+- WireSock: concluído no transporte e na decisão de fallback; o modo direto
+  valida o PID próprio, e o serviço só é compatibilidade explícita.
+- Readiness: instrumentada como diagnóstico assíncrono, sem bloquear uma
+  ativação já aceita.
+- Documentação: changelog, especificação e relatório de validação atualizados.
+- Gate pendente: build Windows/Linux sem publicação, inspeção de artefatos e
+  matriz Windows real. A VM estava ocupada nesta sessão, portanto nenhuma
+  publicação foi autorizada.
+
 ---
 
 ### Task 1: Restaurar a base Proton e blindar o empacotamento
