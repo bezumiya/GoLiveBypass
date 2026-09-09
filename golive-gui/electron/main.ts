@@ -2710,16 +2710,22 @@ async function optimizeProtonRouteAtStartup(
 type LinuxElevationEventName =
   | "prompt.requested"
   | "prompt.finished"
+  | "prompt.unavailable"
+  | "prompt.failed"
   | "sudo.cached"
   | "sudo.validation"
+  | "sudo.credential_store"
+  | "pkexec.invoked"
   | "pkexec.result"
   | "authorization.requested"
   | "authorization";
 type LinuxElevationProvider = "none" | "root" | "sudo" | "zenity" | "kdialog" | "pkexec" | "tty" | "unknown";
-type LinuxElevationResult = "not_attempted" | "requested" | "accepted" | "rejected" | "cancelled" | "unavailable" | "failed" | "cached" | "empty" | "unknown";
+type LinuxElevationResult = "not_attempted" | "requested" | "accepted" | "rejected" | "cancelled" | "unavailable" | "failed" | "cached" | "empty" | "authorized" | "unknown";
 type LinuxElevationDetails = {
+  input?: "nonempty" | "empty" | "unknown" | "not_applicable";
+  code?: "0" | "1" | "2" | "126" | "127" | "other";
+  reason?: "provider_missing" | "temporary_file";
   phase?: "dialog" | "polkit" | "password" | "tty" | "pre_activation";
-  input?: "nonempty" | "empty" | "unknown";
   stderr?: "present" | "empty";
 };
 type LinuxElevationRecord = {
@@ -2735,8 +2741,12 @@ const LINUX_ELEVATION_MAX_LINE_LENGTH = 256;
 const LINUX_ELEVATION_LOG_EVENTS: Record<LinuxElevationEventName, string> = {
   "prompt.requested": "elevation.prompt.requested",
   "prompt.finished": "elevation.prompt.finished",
+  "prompt.unavailable": "elevation.prompt.unavailable",
+  "prompt.failed": "elevation.prompt.failed",
   "sudo.cached": "elevation.sudo.cached",
   "sudo.validation": "elevation.sudo.validation",
+  "sudo.credential_store": "elevation.sudo.credential_store",
+  "pkexec.invoked": "elevation.pkexec.invoked",
   "pkexec.result": "elevation.pkexec.result",
   "authorization.requested": "elevation.authorization.requested",
   authorization: "elevation.authorization",
@@ -2745,22 +2755,28 @@ const LINUX_ELEVATION_PROVIDERS = new Set<LinuxElevationProvider>([
   "none", "root", "sudo", "zenity", "kdialog", "pkexec", "tty", "unknown",
 ]);
 const LINUX_ELEVATION_RESULTS = new Set<LinuxElevationResult>([
-  "not_attempted", "requested", "accepted", "rejected", "cancelled", "unavailable", "failed", "cached", "empty", "unknown",
+  "not_attempted", "requested", "accepted", "rejected", "cancelled", "unavailable", "failed", "cached", "empty", "authorized", "unknown",
 ]);
 const LINUX_ELEVATION_DETAIL_RULES: Record<LinuxElevationEventName, readonly (keyof LinuxElevationDetails)[]> = {
-  "prompt.requested": ["phase"],
-  "prompt.finished": ["input", "stderr"],
+  "prompt.requested": ["input", "phase"],
+  "prompt.finished": ["input", "code", "stderr"],
+  "prompt.unavailable": ["input", "reason"],
+  "prompt.failed": ["input", "reason"],
   "sudo.cached": ["phase"],
-  "sudo.validation": ["phase"],
-  "pkexec.result": ["phase"],
+  "sudo.validation": ["code", "phase"],
+  "sudo.credential_store": ["reason", "phase"],
+  "pkexec.invoked": ["phase"],
+  "pkexec.result": ["code", "phase"],
   "authorization.requested": ["phase"],
   authorization: ["phase"],
 };
 const LINUX_ELEVATION_DETAIL_VALUES: {
   [K in keyof LinuxElevationDetails]-?: readonly NonNullable<LinuxElevationDetails[K]>[];
 } = {
+  input: ["nonempty", "empty", "unknown", "not_applicable"],
+  code: ["0", "1", "2", "126", "127", "other"],
+  reason: ["provider_missing", "temporary_file"],
   phase: ["dialog", "polkit", "password", "tty", "pre_activation"],
-  input: ["nonempty", "empty", "unknown"],
   stderr: ["present", "empty"],
 };
 
@@ -2781,6 +2797,7 @@ function parseLinuxElevationLine(line: string): LinuxElevationRecord | null {
   if (!LINUX_ELEVATION_PROVIDERS.has(provider) || !LINUX_ELEVATION_RESULTS.has(result)) return null;
 
   const details: LinuxElevationDetails = {};
+  const detailKeys: (keyof LinuxElevationDetails)[] = [];
   for (const field of fields.slice(4)) {
     const separator = field.indexOf("=");
     if (separator <= 0 || separator !== field.lastIndexOf("=")) return null;
@@ -2790,10 +2807,11 @@ function parseLinuxElevationLine(line: string): LinuxElevationRecord | null {
     const allowed = LINUX_ELEVATION_DETAIL_VALUES[key] as readonly string[];
     if (!allowed.includes(value)) return null;
     details[key] = value as never;
+    detailKeys.push(key);
   }
 
   const expected = LINUX_ELEVATION_DETAIL_RULES[event];
-  if (Object.keys(details).length !== expected.length || expected.some((key) => details[key] === undefined)) return null;
+  if (detailKeys.length !== expected.length || expected.some((key, index) => details[key] === undefined || detailKeys[index] !== key)) return null;
   return { event, provider, result, details };
 }
 
@@ -2805,6 +2823,8 @@ function persistLinuxElevationEvent(record: LinuxElevationRecord): void {
   };
   if (record.details.phase !== undefined) data.phase = record.details.phase;
   if (record.details.input !== undefined) data.input = record.details.input;
+  if (record.details.code !== undefined) data.code = record.details.code;
+  if (record.details.reason !== undefined) data.reason = record.details.reason;
   if (record.details.stderr !== undefined) data.stderr = record.details.stderr;
   try {
     logger.logEvent("info", "linux", LINUX_ELEVATION_LOG_EVENTS[record.event], data);
