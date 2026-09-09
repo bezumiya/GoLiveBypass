@@ -34,9 +34,9 @@
 - Readiness: instrumentada como diagnóstico assíncrono, sem bloquear uma
   ativação já aceita.
 - Documentação: changelog, especificação e relatório de validação atualizados.
-- Gate pendente: build Windows/Linux sem publicação, inspeção de artefatos e
-  matriz Windows real. A VM estava ocupada nesta sessão, portanto nenhuma
-  publicação foi autorizada.
+- Gate pendente: matriz Windows real. Os builds Windows/Linux sem publicação e
+  a inspeção de artefatos/hashes foram concluídos; a VM estava ocupada nesta
+  sessão, portanto nenhuma publicação foi autorizada.
 
 ---
 

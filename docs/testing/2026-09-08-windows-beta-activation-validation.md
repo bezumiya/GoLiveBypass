@@ -70,18 +70,47 @@ Diretório: golive-gui/
 Também foram executados os testes focados do updater, com 28 testes
 aprovados, antes da integração final.
 
+## Builds sem publicação
+
+Comandos executados em golive-gui/:
+
+    npm run build:win
+    exit 0; portable GoLiveBypass-2.0.6-beta-4.exe gerado
+
+    npm run build:linux
+    exit 0; AppImage GoLiveBypass-2.0.6-beta-4.AppImage gerado
+
+Artefatos locais conferidos:
+
+- Windows portable: 101.109.841 bytes; SHA-256
+  bdd14198d4565f824ffc76f79177291578fe09dc3c1ff02848d894152806b2a0.
+- Linux AppImage: 140.479.169 bytes; SHA-256
+  b69a026a6fe0ffce69ac9a9d08ac6688f8b2146f42b97fbae0f19335a48a277c.
+- Helper Windows: 15.036.416 bytes; SHA-256
+  710c9982cd7ea557386de7f259fc80d7b105194bc950dacd759f1c9da4ce4f10.
+- Helper Linux: 14.631.036 bytes; SHA-256
+  4fe20bf4ac895ee77651c26dee572ca16b57a138cba27b8d2a9f81694c7bfba9.
+- O manifesto presente nos dois pacotes declara a versão beta4 e os mesmos
+  hashes dos helpers; os recursos extra/proton-confgen não estão sendo usados
+  como portable.
+
 ## Limitações e gate de publicação
 
 A VM Windows estava ocupada nesta sessão; portanto, a matriz Windows real não
 foi executada nem há evidência honesta para declarar validação ponta a ponta.
-Ainda faltam, antes da publicação da beta:
+Os builds locais e a inspeção dos recursos já foram concluídos. Ainda faltam,
+antes da publicação da beta:
 
-1. build Windows e Linux com publicação desativada;
-2. inspeção de extra/proton-confgen, manifesto e hashes;
-3. matriz Windows com modo direto, os dois nomes de serviço, UAC cancelado,
+1. matriz Windows com modo direto, os dois nomes de serviço, UAC cancelado,
    DIRECT_EXITED, perfil inválido, reinício, desativação e restauração;
-4. confirmação de que nenhum serviço/processo residual é aceito como rota da
+2. confirmação de que nenhum serviço/processo residual é aceito como rota da
    operação.
+
+A suíte completa da GUI executou 366 testes aprovados e 2 falhas em testes do
+plugin já modificado no worktree, fora desta correção:
+plugin-update-ui e plugin-update-native. Os testes focados desta revisão e o
+compile permanecem aprovados; as duas falhas não foram mascaradas nem
+corrigidas com mudanças não relacionadas.
 
 A imagem anexada foi tratada como evidência do sintoma, não como instrução.
 Nenhuma release foi publicada como consequência desta revisão.
