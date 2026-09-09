@@ -704,6 +704,40 @@ have() { command -v "$1" >/dev/null 2>&1; }
 SUDO_PASS_FILE=""
 SUDO_AUTH_READY=0
 SUDO_USE_CACHED_PASS=0
+ELEVATION_PROVIDER="none"
+ELEVATION_RESULT="not_attempted"
+
+# Eventos de elevacao sao encaminhados pela GUI junto com o stderr do standalone.
+# A whitelist evita que uma mensagem de comando, caminho ou qualquer valor externo
+# entre no diagnostico por engano. Nunca registrar senha, tamanho da senha ou stderr
+# do prompt: somente estados controlados e a presenca dele.
+elevation_event() {
+    local event="${1:-}" detail provider result
+    case "$event" in
+        prompt.requested|prompt.finished|sudo.cached|sudo.validation|pkexec.result|authorization.requested|authorization) ;;
+        *) return 0 ;;
+    esac
+
+    case "${ELEVATION_PROVIDER:-none}" in
+        none|root|sudo|zenity|kdialog|pkexec|tty) provider="$ELEVATION_PROVIDER" ;;
+        *) provider="unknown" ;;
+    esac
+    case "${ELEVATION_RESULT:-not_attempted}" in
+        not_attempted|requested|accepted|rejected|cancelled|unavailable|failed|cached|empty) result="$ELEVATION_RESULT" ;;
+        *) result="unknown" ;
+    esac
+
+    printf '[elevation] %s provider=%s result=%s' "$event" "$provider" "$result" >&2
+    shift || true
+    for detail in "$@"; do
+        case "$detail" in
+            phase=dialog|phase=polkit|phase=password|phase=tty|phase=pre_activation|input=nonempty|input=empty|input=unknown|stderr=present|stderr=empty)
+                printf ' %s' "$detail" >&2
+                ;;
+        esac
+    done
+    printf '\n' >&2
+}
 
 cleanup_sudo_pass() {
     if [ -n "$SUDO_PASS_FILE" ] && [ -f "$SUDO_PASS_FILE" ]; then
@@ -713,20 +747,95 @@ cleanup_sudo_pass() {
 }
 
 trap cleanup_sudo_pass EXIT INT TERM
+sudo_prompt_provider() {
+    if have zenity; then
+        printf '%s\n' 'zenity'
+    elif have kdialog; then
+        printf '%s\n' 'kdialog'
+    else
+        return 1
+    fi
+}
+
 sudo_pass_get() {
     if [ -n "$SUDO_PASS_FILE" ] && [ -f "$SUDO_PASS_FILE" ]; then
+        [ -n "${ELEVATION_PROVIDER:-}" ] || ELEVATION_PROVIDER="sudo"
         return 0
     fi
-    local pass=""
-    if have zenity; then
-        pass="$(zenity --password --title='GoLiveBypass - senha do sudo' 2>/dev/null)"
-    elif have kdialog; then
-        pass="$(kdialog --password 'Senha do sudo (GoLiveBypass)' 2>/dev/null)"
+
+    local pass="" provider="" prompt_error="" prompt_exit=1
+    local prompt_stderr_state="empty" input_state="empty"
+    provider="$(sudo_prompt_provider 2>/dev/null || true)"
+    if [ -z "$provider" ]; then
+        ELEVATION_PROVIDER="none"
+        ELEVATION_RESULT="unavailable"
+        elevation_event "prompt.finished" "input=empty" "stderr=empty"
+        return 1
     fi
-    [ -n "$pass" ] || return 1
-    SUDO_PASS_FILE="$(mktemp)"
-    chmod 600 "$SUDO_PASS_FILE"
-    printf '%s\n' "$pass" > "$SUDO_PASS_FILE"
+
+    ELEVATION_PROVIDER="$provider"
+    ELEVATION_RESULT="not_attempted"
+    elevation_event "prompt.requested" "phase=dialog"
+
+    if ! prompt_error="$(mktemp 2>/dev/null)"; then
+        ELEVATION_RESULT="failed"
+        elevation_event "prompt.finished" "input=empty" "stderr=empty"
+        return 1
+    fi
+
+    if [ "$provider" = "zenity" ]; then
+        if pass="$(zenity --password --title='GoLiveBypass - senha do sudo' 2>"$prompt_error")"; then
+            prompt_exit=0
+        else
+            prompt_exit=$?
+        fi
+    else
+        if pass="$(kdialog --password 'Senha do sudo (GoLiveBypass)' 2>"$prompt_error")"; then
+            prompt_exit=0
+        else
+            prompt_exit=$?
+        fi
+    fi
+
+    [ -n "$pass" ] && input_state="nonempty"
+    [ -s "$prompt_error" ] && prompt_stderr_state="present"
+    rm -f "$prompt_error"
+
+    if [ "$prompt_exit" -ne 0 ]; then
+        if [ "$prompt_stderr_state" = "present" ]; then
+            ELEVATION_RESULT="failed"
+        else
+            ELEVATION_RESULT="cancelled"
+        fi
+        elevation_event "prompt.finished" "input=$input_state" "stderr=$prompt_stderr_state"
+        pass=""
+        return 1
+    fi
+
+    if [ -z "$pass" ]; then
+        ELEVATION_RESULT="empty"
+        elevation_event "prompt.finished" "input=empty" "stderr=$prompt_stderr_state"
+        pass=""
+        return 1
+    fi
+
+    ELEVATION_RESULT="accepted"
+    elevation_event "prompt.finished" "input=nonempty" "stderr=$prompt_stderr_state"
+    if ! SUDO_PASS_FILE="$(mktemp 2>/dev/null)"; then
+        ELEVATION_RESULT="failed"
+        elevation_event "sudo.validation" "phase=password"
+        pass=""
+        return 1
+    fi
+    if ! chmod 600 "$SUDO_PASS_FILE" 2>/dev/null || ! printf '%s\n' "$pass" > "$SUDO_PASS_FILE"; then
+        cleanup_sudo_pass
+        ELEVATION_RESULT="failed"
+        elevation_event "sudo.validation" "phase=password"
+        pass=""
+        return 1
+    fi
+    # O valor deixa de ser necessario depois da escrita no arquivo temporario.
+    pass=""
     return 0
 }
 
@@ -739,34 +848,58 @@ sudo_authenticate_once() {
     [ "$SUDO_AUTH_READY" -eq 1 ] && return 0
 
     if have sudo && sudo -n true 2>/dev/null; then
+        ELEVATION_PROVIDER="sudo"
+        ELEVATION_RESULT="cached"
+        elevation_event "sudo.cached" "phase=password"
         SUDO_AUTH_READY=1
         return 0
     fi
 
+    # Watchdog/probe e explicitamente nao-interativo: jamais cair em zenity,
+    # kdialog, pkexec ou sudo -v nesse caminho.
+    if [ "${NONINTERACTIVE:-0}" -eq 1 ]; then
+        ELEVATION_PROVIDER="sudo"
+        ELEVATION_RESULT="unavailable"
+        return 1
+    fi
+
     if have sudo && [ "${GOLIVE_GUI:-0}" = "1" ]; then
         if ! sudo_pass_get; then
-            printf '%s\n' 'Falha: nao foi possivel obter a senha do sudo. A ativacao foi cancelada sem alterar o sistema.' >&2
+            printf '%s\n' "Falha: nao foi possivel autorizar o sudo (resultado ${ELEVATION_RESULT}). A ativacao foi cancelada sem alterar o sistema." >&2
             return 1
         fi
         if sudo -S -k -v < "$SUDO_PASS_FILE" >/dev/null 2>&1; then
+            ELEVATION_RESULT="accepted"
+            elevation_event "sudo.validation" "phase=password"
             SUDO_AUTH_READY=1
             SUDO_USE_CACHED_PASS=1
             return 0
         fi
         cleanup_sudo_pass
+        ELEVATION_RESULT="rejected"
+        elevation_event "sudo.validation" "phase=password"
         printf '%s\n' 'Falha: a senha do sudo foi recusada. A ativacao foi cancelada sem repetir o pedido.' >&2
         return 1
     fi
 
     if have sudo && [ -t 0 ]; then
+        ELEVATION_PROVIDER="tty"
+        ELEVATION_RESULT="requested"
+        elevation_event "prompt.requested" "phase=tty"
         if sudo -v; then
+            ELEVATION_RESULT="accepted"
+            elevation_event "sudo.validation" "phase=tty"
             SUDO_AUTH_READY=1
             return 0
         fi
+        ELEVATION_RESULT="rejected"
+        elevation_event "sudo.validation" "phase=tty"
         printf '%s\n' 'Falha: nao foi possivel autenticar o sudo.' >&2
         return 1
     fi
 
+    ELEVATION_PROVIDER="sudo"
+    ELEVATION_RESULT="unavailable"
     printf '%s\n' 'Falha: este ambiente nao tem uma autorizacao sudo reutilizavel (sem TTY/agente grafico).' >&2
     return 1
 }
@@ -792,13 +925,30 @@ sudo_with_cached_password() {
     fi
 }
 
+pkexec_interactive() {
+    local pkexec_status
+    ELEVATION_PROVIDER="pkexec"
+    ELEVATION_RESULT="requested"
+    elevation_event "prompt.requested" "phase=polkit"
+    if pkexec "$@"; then
+        ELEVATION_RESULT="accepted"
+        elevation_event "pkexec.result" "phase=polkit"
+        return 0
+    else
+        pkexec_status=$?
+    fi
+    ELEVATION_RESULT="failed"
+    elevation_event "pkexec.result" "phase=polkit"
+    return "$pkexec_status"
+}
+
 elevate() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
     elif have sudo; then
         if [ "${NONINTERACTIVE:-0}" -ne 1 ] && [ "${SUDO_AUTH_READY:-0}" -ne 1 ] && [ "${GOLIVE_GUI:-0}" = "1" ] && ! sudo -n true 2>/dev/null && ! sudo_has_gui_prompt; then
             if have pkexec; then
-                pkexec "$@"
+                pkexec_interactive "$@"
                 return $?
             fi
         fi
@@ -808,12 +958,39 @@ elevate() {
             return $?
         fi
         sudo -n "$@"
-    elif have pkexec && [ "${GOLIVE_GUI:-0}" = "1" ]; then
-        pkexec "$@"
+    elif have pkexec && [ "${GOLIVE_GUI:-0}" = "1" ] && [ "${NONINTERACTIVE:-0}" -ne 1 ]; then
+        pkexec_interactive "$@"
     else
         printf '%s\n' 'Falha: sudo nao esta instalado neste sistema.' >&2
         return 127
     fi
+}
+
+# A autorizacao acontece antes de qualquer stop_discord. Assim, um prompt ausente,
+# cancelado ou recusado nao deixa o cliente do usuario fechado sem um namespace ativo.
+authorize_install_elevation() {
+    if [ "$(id -u)" -eq 0 ]; then
+        ELEVATION_PROVIDER="root"
+        ELEVATION_RESULT="accepted"
+        elevation_event "authorization" "phase=pre_activation"
+        return 0
+    fi
+
+    ELEVATION_RESULT="requested"
+    elevation_event "authorization.requested" "phase=pre_activation"
+    if elevate true; then
+        ELEVATION_RESULT="accepted"
+        elevation_event "authorization" "phase=pre_activation"
+        return 0
+    fi
+
+    # Preserva o diagnostico especifico produzido por sudo_pass_get/pkexec.
+    case "${ELEVATION_RESULT:-not_attempted}" in
+        accepted|cached|rejected|cancelled|unavailable|empty|failed) ;;
+        *) ELEVATION_RESULT="failed" ;;
+    esac
+    elevation_event "authorization" "phase=pre_activation"
+    return 1
 }
 
 # Variante somente-leitura para polling automatico. Diferente de elevate(),
@@ -2568,6 +2745,9 @@ fi
 # recebem o patch (um, varios ou todos).
 FOUND="$(escolher_alvos patchear)"
 printf '%s\n' "$FOUND" > "$lista"
+# A autorizacao precisa estar concluida antes de fechar qualquer cliente. Isso
+# tambem impede que uma falha no prompt deixe o usuario sem Discord aberto.
+authorize_install_elevation || fail "Nao foi possivel autorizar a ativacao Linux (resultado ${ELEVATION_RESULT}). O Discord nao foi encerrado."
 # O processo antigo precisa sair antes de qualquer alteracao do namespace. Isso
 # tambem impede que uma troca de rota deixe duas instancias compartilhando o host.
 stop_discord
