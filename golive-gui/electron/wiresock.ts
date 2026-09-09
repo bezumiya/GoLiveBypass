@@ -140,7 +140,8 @@ export function classifyWireSockActivationFailure(error: unknown): WireSockActiv
       message: "O componente de rede do WireSock ainda não está pronto. Reinicie o Windows e tente ativar novamente.",
     };
   }
-  if (/stop_timeout|timeout|timed out|tempo limite|stop_pending|pendente|1053/.test(raw)) {
+  if (!/wiresock_direct|direct_exited|direct_failed|processo direto/.test(raw) &&
+    /stop_timeout|timeout|timed out|tempo limite|stop_pending|pendente|1053/.test(raw)) {
     return {
       kind: "timeout",
       code: "WIRESOCK_TIMEOUT",

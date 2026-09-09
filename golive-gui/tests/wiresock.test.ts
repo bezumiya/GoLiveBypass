@@ -30,6 +30,10 @@ describe("WireSock no Windows", () => {
       kind: "process",
       code: "WIRESOCK_PROCESS",
     });
+    expect(classifyWireSockActivationFailure({ stderr: "GOLIVE_WIRESOCK_DIRECT_ERROR: timeout" })).toMatchObject({
+      kind: "process",
+      code: "WIRESOCK_PROCESS",
+    });
     expect(classifyWireSockActivationFailure({ stderr: "CONFIG_FAILED: AllowedApps inválido" })).toMatchObject({
       kind: "profile",
       code: "WIRESOCK_PROFILE",
