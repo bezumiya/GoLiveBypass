@@ -34,6 +34,12 @@ senha aceita.
 | `GOLIVE_GUI=1 bash standalone/golivebypass-standalone.sh --preflight --json` | `ok=true`; CachyOS, dependências presentes, sudo/netns disponíveis, WireGuard disponível, 8 instalações detectadas |
 | `git diff --check` | passou |
 
+`npm test` completo também foi executado: 377 de 380 testes passaram. Os 3 testes que
+falharam pertencem ao updater/UI do plugin (`plugin-update-native.test.ts` e
+`plugin-update-ui.test.ts`), arquivos que já estavam modificados no worktree antes desta
+correção e que não foram tocados pelos commits Linux. As cinco suítes Linux acima passam
+integralmente.
+
 ## Limitações
 
 Os testes de prompt usam executores falsos para cobrir aceitação, cancelamento, falha do
