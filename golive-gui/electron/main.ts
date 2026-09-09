@@ -2707,10 +2707,141 @@ async function optimizeProtonRouteAtStartup(
   return { success: true, server: generated.server };
 }
 
+type LinuxElevationEventName =
+  | "prompt.requested"
+  | "prompt.finished"
+  | "sudo.cached"
+  | "sudo.validation"
+  | "pkexec.result"
+  | "authorization.requested"
+  | "authorization";
+type LinuxElevationProvider = "none" | "root" | "sudo" | "zenity" | "kdialog" | "pkexec" | "tty" | "unknown";
+type LinuxElevationResult = "not_attempted" | "requested" | "accepted" | "rejected" | "cancelled" | "unavailable" | "failed" | "cached" | "empty" | "unknown";
+type LinuxElevationDetails = {
+  phase?: "dialog" | "polkit" | "password" | "tty" | "pre_activation";
+  input?: "nonempty" | "empty" | "unknown";
+  stderr?: "present" | "empty";
+};
+type LinuxElevationRecord = {
+  event: LinuxElevationEventName;
+  provider: LinuxElevationProvider;
+  result: LinuxElevationResult;
+  details: LinuxElevationDetails;
+};
+type LinuxElevationParserState = { pending: string };
+
+const LINUX_ELEVATION_PREFIX = "[elevation]";
+const LINUX_ELEVATION_MAX_LINE_LENGTH = 256;
+const LINUX_ELEVATION_LOG_EVENTS: Record<LinuxElevationEventName, string> = {
+  "prompt.requested": "elevation.prompt.requested",
+  "prompt.finished": "elevation.prompt.finished",
+  "sudo.cached": "elevation.sudo.cached",
+  "sudo.validation": "elevation.sudo.validation",
+  "pkexec.result": "elevation.pkexec.result",
+  "authorization.requested": "elevation.authorization.requested",
+  authorization: "elevation.authorization",
+};
+const LINUX_ELEVATION_PROVIDERS = new Set<LinuxElevationProvider>([
+  "none", "root", "sudo", "zenity", "kdialog", "pkexec", "tty", "unknown",
+]);
+const LINUX_ELEVATION_RESULTS = new Set<LinuxElevationResult>([
+  "not_attempted", "requested", "accepted", "rejected", "cancelled", "unavailable", "failed", "cached", "empty", "unknown",
+]);
+const LINUX_ELEVATION_DETAIL_RULES: Record<LinuxElevationEventName, readonly (keyof LinuxElevationDetails)[]> = {
+  "prompt.requested": ["phase"],
+  "prompt.finished": ["input", "stderr"],
+  "sudo.cached": ["phase"],
+  "sudo.validation": ["phase"],
+  "pkexec.result": ["phase"],
+  "authorization.requested": ["phase"],
+  authorization: ["phase"],
+};
+const LINUX_ELEVATION_DETAIL_VALUES: {
+  [K in keyof LinuxElevationDetails]-?: readonly NonNullable<LinuxElevationDetails[K]>[];
+} = {
+  phase: ["dialog", "polkit", "password", "tty", "pre_activation"],
+  input: ["nonempty", "empty", "unknown"],
+  stderr: ["present", "empty"],
+};
+
+function parseLinuxElevationLine(line: string): LinuxElevationRecord | null {
+  // O parser recebe dados de stderr, mas nunca confia no canal nem no conteúdo:
+  // somente uma linha completa, curta e com a gramática fixa abaixo pode gerar log.
+  if (line.length === 0 || line.length > LINUX_ELEVATION_MAX_LINE_LENGTH || !line.startsWith(`${LINUX_ELEVATION_PREFIX} `)) {
+    return null;
+  }
+  const fields = line.split(" ");
+  if (fields.length < 5 || fields[0] !== LINUX_ELEVATION_PREFIX) return null;
+
+  const event = fields[1] as LinuxElevationEventName;
+  if (!Object.prototype.hasOwnProperty.call(LINUX_ELEVATION_LOG_EVENTS, event)) return null;
+  if (!fields[2].startsWith("provider=") || !fields[3].startsWith("result=")) return null;
+  const provider = fields[2].slice("provider=".length) as LinuxElevationProvider;
+  const result = fields[3].slice("result=".length) as LinuxElevationResult;
+  if (!LINUX_ELEVATION_PROVIDERS.has(provider) || !LINUX_ELEVATION_RESULTS.has(result)) return null;
+
+  const details: LinuxElevationDetails = {};
+  for (const field of fields.slice(4)) {
+    const separator = field.indexOf("=");
+    if (separator <= 0 || separator !== field.lastIndexOf("=")) return null;
+    const key = field.slice(0, separator) as keyof LinuxElevationDetails;
+    const value = field.slice(separator + 1);
+    if (!Object.prototype.hasOwnProperty.call(LINUX_ELEVATION_DETAIL_VALUES, key) || details[key] !== undefined) return null;
+    const allowed = LINUX_ELEVATION_DETAIL_VALUES[key] as readonly string[];
+    if (!allowed.includes(value)) return null;
+    details[key] = value as never;
+  }
+
+  const expected = LINUX_ELEVATION_DETAIL_RULES[event];
+  if (Object.keys(details).length !== expected.length || expected.some((key) => details[key] === undefined)) return null;
+  return { event, provider, result, details };
+}
+
+function persistLinuxElevationEvent(record: LinuxElevationRecord): void {
+  const data: logger.LogContext = {
+    source: "standalone",
+    provider: record.provider,
+    result: record.result,
+  };
+  if (record.details.phase !== undefined) data.phase = record.details.phase;
+  if (record.details.input !== undefined) data.input = record.details.input;
+  if (record.details.stderr !== undefined) data.stderr = record.details.stderr;
+  try {
+    logger.logEvent("info", "linux", LINUX_ELEVATION_LOG_EVENTS[record.event], data);
+  } catch {
+    // Diagnostico nunca pode transformar uma falha de logging em falha de ativacao.
+  }
+}
+
+function consumeLinuxElevationEvents(chunk: string, state: LinuxElevationParserState): void {
+  if (typeof chunk !== "string") return;
+  const input = state.pending + chunk;
+  state.pending = "";
+  const lines = input.split("\n");
+  const tail = lines.pop() ?? "";
+  for (const rawLine of lines) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const record = parseLinuxElevationLine(line);
+    if (record) persistLinuxElevationEvent(record);
+  }
+
+  // Nunca acumula stderr arbitrario: só retém um prefixo que ainda pode virar uma
+  // linha de elevacao valida, e sempre dentro de um limite pequeno.
+  const isElevationPrefix = LINUX_ELEVATION_PREFIX.startsWith(tail) || tail.startsWith(`${LINUX_ELEVATION_PREFIX} `);
+  if (tail.length > 0 && tail.length <= LINUX_ELEVATION_MAX_LINE_LENGTH && isElevationPrefix) {
+    state.pending = tail;
+  }
+}
+
 async function linuxActivate(onChunk: (c: string) => void) {
+  const elevationParserState: LinuxElevationParserState = { pending: "" };
+  const forwardLinuxChunk = (chunk: string) => {
+    consumeLinuxElevationEvents(chunk, elevationParserState);
+    onChunk(chunk);
+  };
   let preflight = await linuxPreflight();
   if (!preflight.ok && linuxPreflightRepairable(preflight)) {
-    const ensured = await runScript(["--ensure-dependencies"], onChunk);
+    const ensured = await runScript(["--ensure-dependencies"], forwardLinuxChunk);
     if (ensured.code !== 0) {
       throw new Error(tailErroScript(ensured.stderr, 4) || "Não foi possível preparar as dependências do Linux.");
     }
@@ -2730,7 +2861,7 @@ async function linuxActivate(onChunk: (c: string) => void) {
   }
   await ensureProtonActivationProfile();
   updateSharedSettings({ routeMode: "wireguard" });
-  const { code, stderr } = await runScript(["--yes", "--cleanup-legacy"], onChunk);
+  const { code, stderr } = await runScript(["--yes", "--cleanup-legacy"], forwardLinuxChunk);
   if (code !== 0) {
     throw new Error(
       tailErroScript(stderr, 3) ||
