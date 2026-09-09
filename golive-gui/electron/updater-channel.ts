@@ -18,6 +18,33 @@ export interface ReleaseCandidata {
   prerelease: boolean;
 }
 
+export interface AssetWindows {
+  name: string;
+  browser_download_url?: string;
+  digest?: string;
+}
+
+// O portable tem o nome exato da tag sem o prefixo "v". Não aceite apenas o
+// prefixo "GoLiveBypass-": a mesma release também carrega o proton-confgen.exe.
+export function escolherAssetWindows(tag: string, assets: AssetWindows[]): AssetWindows | null {
+  const semV = tag.replace(/^v/, "");
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(semV)) return null;
+
+  const esperado = "GoLiveBypass-" + semV + ".exe";
+  return assets.find((asset) => {
+    if (!asset || typeof asset.name !== "string" || asset.name !== esperado) return false;
+    if (asset.browser_download_url === undefined) return true;
+    if (typeof asset.browser_download_url !== "string") return false;
+    try {
+      const url = new URL(asset.browser_download_url);
+      const filename = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+      return url.protocol === "https:" && filename === esperado;
+    } catch {
+      return false;
+    }
+  }) ?? null;
+}
+
 function partir(versao: string): { base: number[]; pre: string[] | null } {
   const limpa = versao.trim().replace(/^v/, "");
   const hifen = limpa.indexOf("-");

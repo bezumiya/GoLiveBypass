@@ -24,7 +24,14 @@ import { basename, join, resolve, sep } from "path";
 import { autoUpdater } from "electron-updater";
 import { request } from "https";
 import { cleanupOldExe, spawnWindowsUpdateHelper } from "./updater-replace";
-import { compararVersoes, escolherRelease, type Canal, type ReleaseCandidata } from "./updater-channel";
+import {
+  compararVersoes,
+  escolherAssetWindows,
+  escolherRelease,
+  type AssetWindows,
+  type Canal,
+  type ReleaseCandidata,
+} from "./updater-channel";
 import {
   createUpdatePulseClient,
   UPDATE_STREAM_URL,
@@ -36,7 +43,6 @@ import {
 // Releases de teste usam uma build/configuracao separada e nunca devem chegar ao
 // executavel distribuido neste canal.
 const REPO = "bezumiya/GoLiveBypass";
-const EXE_PREFIX = "GoLiveBypass-";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // fallback de seguranca: uma vez por hora
 const CHECK_MIN_INTERVAL_MS = 60_000;
 const PUSH_RETRY_DELAYS_MS = [30_000, 120_000] as const;
@@ -128,17 +134,8 @@ function githubReleases(): Promise<ReleaseCandidata[]> {
             const releases: ReleaseCandidata[] = [];
             for (const item of data) {
               if (item.draft === true) continue;
-              const assets = (item.assets || []) as Array<{
-                name: string;
-                browser_download_url?: string;
-                digest?: string;
-              }>;
-              const asset = assets.find(
-                (a) =>
-                  typeof a?.name === "string" &&
-                  a.name.startsWith(EXE_PREFIX) &&
-                  a.name.endsWith(".exe"),
-              );
+              const assets = (item.assets || []) as AssetWindows[];
+              const asset = escolherAssetWindows(String(item.tag_name), assets);
               if (!asset || !asset.browser_download_url) continue;
               releases.push({
                 tag: String(item.tag_name),

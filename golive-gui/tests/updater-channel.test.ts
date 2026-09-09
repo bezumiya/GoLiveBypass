@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import fs from "fs";
 import path from "path";
-import { compararVersoes, escolherRelease, type ReleaseCandidata } from "../electron/updater-channel";
+import {
+  compararVersoes,
+  escolherAssetWindows,
+  escolherRelease,
+  type ReleaseCandidata,
+} from "../electron/updater-channel";
 
 // O canal beta e o opt-in dos testadores (regra §9): prereleases nunca viram
 // "latest", o canal estavel nunca as ve, e NENHUM canal faz downgrade — pelo
@@ -81,6 +86,32 @@ describe("escolherRelease (candidata de update por canal)", () => {
     expect(escolherRelease(releases, "1.1.11", "stable")?.tag).toBe("v1.1.12"); // estavel filtra a beta
     expect(escolherRelease(releases, "1.1.12", "stable")).toBeNull(); // ja esta na estavel: nada
     expect(escolherRelease([estavel113, estavel112], "1.1.12", "stable")?.tag).toBe("v1.1.13");
+  });
+});
+
+describe("escolherAssetWindows (portable da release)", () => {
+  it("não escolhe proton-confgen como executável da GUI", () => {
+    const assets = [
+      {
+        name: "GoLiveBypass-2.0.6-beta-4-proton-confgen-win-x64.exe",
+        browser_download_url: "https://github.com/x/y/releases/download/v/GoLiveBypass-2.0.6-beta-4-proton-confgen-win-x64.exe",
+      },
+      {
+        name: "GoLiveBypass-2.0.6-beta-4.exe",
+        browser_download_url: "https://github.com/x/y/releases/download/v/GoLiveBypass-2.0.6-beta-4.exe",
+      },
+    ];
+    expect(escolherAssetWindows("v2.0.6-beta-4", assets)?.name).toBe("GoLiveBypass-2.0.6-beta-4.exe");
+  });
+
+  it("recusa nome ou URL que só compartilha o prefixo", () => {
+    const assets = [
+      {
+        name: "GoLiveBypass-2.0.6-beta-4-helper.exe",
+        browser_download_url: "https://github.com/x/y/releases/download/v/GoLiveBypass-2.0.6-beta-4-helper.exe",
+      },
+    ];
+    expect(escolherAssetWindows("v2.0.6-beta-4", assets)).toBeNull();
   });
 });
 
