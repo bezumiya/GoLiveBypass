@@ -82,10 +82,10 @@ Comandos executados em golive-gui/:
 
 Artefatos locais conferidos:
 
-- Windows portable: 101.109.841 bytes; SHA-256
-  bdd14198d4565f824ffc76f79177291578fe09dc3c1ff02848d894152806b2a0.
+- Windows portable: 101.107.139 bytes; SHA-256
+  c8a2327ebe5023f02c3f098136fae705a83022b67d1ca81554300e0a1cd637be.
 - Linux AppImage: 140.479.169 bytes; SHA-256
-  b69a026a6fe0ffce69ac9a9d08ac6688f8b2146f42b97fbae0f19335a48a277c.
+  7d776c6106876d6deb8b46ad942b0aac2c2c19ebd55117bf2fdea9ac63837c08.
 - Helper Windows: 15.036.416 bytes; SHA-256
   710c9982cd7ea557386de7f259fc80d7b105194bc950dacd759f1c9da4ce4f10.
 - Helper Linux: 14.631.036 bytes; SHA-256
