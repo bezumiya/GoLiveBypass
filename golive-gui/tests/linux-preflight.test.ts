@@ -290,6 +290,90 @@ describe("preflight Linux", () => {
     );
   });
 
+  it("seleciona runuser ou setpriv sem sudo e preserva a entrada no namespace", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const haveMatch = source.match(/^have\(\) \{[^\n]*\}$/m);
+    const prepareStart = source.indexOf("prepare_run_user() {");
+    const prepareBoundary = source.indexOf("\n}\n\n# Executa o comando dentro do namespace", prepareStart);
+    const runUserStart = source.indexOf("run_user_netns_command() {");
+    const runUserBoundary = source.indexOf("\n}\n\n# systemd-run", runUserStart);
+    expect(haveMatch).not.toBeNull();
+    expect(prepareStart).toBeGreaterThanOrEqual(0);
+    expect(prepareBoundary).toBeGreaterThan(prepareStart);
+    expect(runUserStart).toBeGreaterThanOrEqual(0);
+    expect(runUserBoundary).toBeGreaterThan(runUserStart);
+
+    const prepareFunction = source.slice(prepareStart, prepareBoundary + 2).trim();
+    const runUserFunction = source.slice(runUserStart, runUserBoundary + 2).trim();
+
+    const runExecutor = (executor?: "runuser" | "setpriv") => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-user-executor-"));
+      tempRoots.push(root);
+      const bin = path.join(root, "bin");
+      fs.mkdirSync(bin);
+      if (executor) {
+        const executable = path.join(bin, executor);
+        fs.writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+        fs.chmodSync(executable, 0o755);
+      }
+
+      const harness = path.join(root, "user-executor.sh");
+      fs.writeFileSync(harness, [
+        "#!/bin/sh",
+        "id() {",
+        "  if [ \"$1\" = \"-u\" ] && [ \"$2\" = \"testuser\" ]; then printf '1001\\n'; return 0; fi",
+        "  if [ \"$1\" = \"-g\" ] && [ \"$2\" = \"testuser\" ]; then printf '1001\\n'; return 0; fi",
+        "  return 1",
+        "}",
+        haveMatch![0],
+        prepareFunction,
+        runUserFunction,
+        "elevate() { printf 'elevate:%s\\n' \"$*\" >> \"$TRACE\"; return 0; }",
+        "NETNS_NAME=discord-vpn",
+        "if prepare_run_user testuser; then",
+        "  printf 'method=%s\\n' \"$RUN_USER_METHOD\" >> \"$TRACE\"",
+        "  run_user_netns_command foreground env TEST=value /usr/bin/true",
+        "  printf 'rc=%s\\n' \"$?\" >> \"$TRACE\"",
+        "else",
+        "  printf 'prepare_rc=%s\\n' \"$?\" >> \"$TRACE\"",
+        "fi",
+        "exit 0",
+      ].join("\n"));
+      fs.chmodSync(harness, 0o755);
+
+      const trace = path.join(root, "trace");
+      const run = spawnSync("/bin/sh", [harness], {
+        env: { ...process.env, PATH: bin, TRACE: trace },
+        encoding: "utf8",
+      });
+      const traceLog = fs.existsSync(trace) ? fs.readFileSync(trace, "utf8") : "";
+      return { run, traceLog };
+    };
+
+    const runuser = runExecutor("runuser");
+    expect(runuser.run.status, runuser.run.stderr).toBe(0);
+    expect(runuser.traceLog).toContain("method=runuser\n");
+    expect(runuser.traceLog).toContain(
+      "elevate:ip netns exec discord-vpn runuser -u testuser -- env TEST=value /usr/bin/true",
+    );
+    expect(runuser.traceLog).toContain("rc=0\n");
+    expect(runuser.traceLog).not.toContain("sudo");
+
+    const setpriv = runExecutor("setpriv");
+    expect(setpriv.run.status, setpriv.run.stderr).toBe(0);
+    expect(setpriv.traceLog).toContain("method=setpriv\n");
+    expect(setpriv.traceLog).toContain(
+      "elevate:ip netns exec discord-vpn setpriv --reuid 1001 --regid 1001 --init-groups -- env TEST=value /usr/bin/true",
+    );
+    expect(setpriv.traceLog).toContain("rc=0\n");
+    expect(setpriv.traceLog).not.toContain("sudo");
+
+    const unavailable = runExecutor();
+    expect(unavailable.run.status, unavailable.run.stderr).toBe(0);
+    expect(unavailable.traceLog).toBe("prepare_rc=127\n");
+    expect(unavailable.run.stderr).toContain("nenhum executor seguro");
+  });
+
   it("instala apenas comandos ausentes com argv pacman fixo e verifica o resultado", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-deps-"));
     tempRoots.push(root);
