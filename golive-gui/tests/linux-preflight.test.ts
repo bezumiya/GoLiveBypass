@@ -101,18 +101,18 @@ describe("preflight Linux", () => {
     const foundStart = source.indexOf('FOUND="$(discord_dirs)"');
     const preflightEnd = source.indexOf('[ -n "$FOUND" ] || fail', preflightStart);
     const statusStart = source.indexOf('if [ "$MODE" = "status" ]');
-    const cleanupStart = source.indexOf('if [ "$CLEANUP_LEGACY"');
+    const statusEnd = source.indexOf('if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]', statusStart);
     expect(ensureStart).toBeGreaterThanOrEqual(0);
     expect(foundStart).toBeGreaterThan(ensureStart);
     expect(preflightStart).toBeGreaterThan(foundStart);
     expect(preflightEnd).toBeGreaterThan(preflightStart);
     expect(statusStart).toBeGreaterThan(preflightEnd);
-    expect(cleanupStart).toBeGreaterThan(statusStart);
+    expect(statusEnd).toBeGreaterThan(statusStart);
 
     const modeBlocks = [
       source.slice(ensureStart, foundStart),
       source.slice(preflightStart, preflightEnd),
-      source.slice(statusStart, cleanupStart),
+      source.slice(statusStart, statusEnd),
     ];
     for (const block of modeBlocks) {
       expect(block).not.toMatch(/^\s*authorize_install_elevation\b/m);
@@ -164,6 +164,130 @@ describe("preflight Linux", () => {
     const accepted = runGuard("accepted");
     expect(accepted.run.status).toBe(0);
     expect(accepted.orderLog).toBe("authorize\nstop\n");
+  });
+
+  it("limpa recursos legados depois da autorizacao e antes de fechar o Discord", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const installStart = source.indexOf('FOUND="$(escolher_alvos patchear)"');
+    const installEnd = source.indexOf("\nwhile IFS='|' read", installStart);
+    expect(installStart).toBeGreaterThanOrEqual(0);
+    expect(installEnd).toBeGreaterThan(installStart);
+    const install = source.slice(installStart, installEnd);
+
+    const authorizeIndex = install.indexOf("\nauthorize_install_elevation");
+    const cleanupIndex = install.indexOf('\nif [ "$CLEANUP_LEGACY" -eq 1 ]; then');
+    const stopIndex = install.indexOf("\nstop_discord");
+    expect(authorizeIndex).toBeGreaterThanOrEqual(0);
+    expect(cleanupIndex).toBeGreaterThan(authorizeIndex);
+    expect(stopIndex).toBeGreaterThan(cleanupIndex);
+
+    const authorizeFunction = source.match(/authorize_install_elevation\(\) \{[\s\S]*?\n\}\n\n# Variante somente-leitura/);
+    const authorizeCall = install.match(/^authorize_install_elevation \|\| fail "[^\n]*"$/m);
+    const cleanupBlock = install.match(/^if \[ "\$CLEANUP_LEGACY" -eq 1 \]; then\n    cleanup_legacy_tor\nfi$/m);
+    if (!authorizeFunction || !authorizeCall || !cleanupBlock) {
+      throw new Error("O fluxo de instalacao nao contem as barreiras de limpeza esperadas");
+    }
+
+    const runInstallOrder = (outcome: "accepted" | "rejected") => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-cleanup-order-"));
+      tempRoots.push(root);
+      const harness = path.join(root, "install-order.sh");
+      fs.writeFileSync(harness, [
+        "#!/bin/sh",
+        "id() { if [ \"$1\" = \"-u\" ]; then printf '1000\\n'; return 0; fi; return 1; }",
+        "elevation_event() { :; }",
+        "elevate() { printf '%s\\n' authorize >> \"$ORDER\"; [ \"$AUTH_OUTCOME\" = accepted ]; }",
+        "cleanup_legacy_tor() { printf '%s\\n' cleanup >> \"$ORDER\"; }",
+        "stop_discord() { printf '%s\\n' stop >> \"$ORDER\"; }",
+        "fail() { printf '%s\\n' \"$1\" >&2; exit 1; }",
+        "ELEVATION_PROVIDER=none",
+        "ELEVATION_RESULT=not_attempted",
+        "CLEANUP_LEGACY=1",
+        authorizeFunction[0],
+        authorizeCall[0],
+        cleanupBlock[0],
+        "stop_discord",
+        "exit 0",
+      ].join("\n"));
+      fs.chmodSync(harness, 0o755);
+      const order = path.join(root, "order");
+      const run = spawnSync("/bin/sh", [harness], {
+        env: { ...process.env, AUTH_OUTCOME: outcome, ORDER: order },
+        encoding: "utf8",
+      });
+      const orderLog = fs.existsSync(order) ? fs.readFileSync(order, "utf8") : "";
+      return { orderLog, run };
+    };
+
+    const rejected = runInstallOrder("rejected");
+    expect(rejected.run.status).toBe(1);
+    expect(rejected.orderLog).toBe("authorize\n");
+    expect(rejected.orderLog).not.toContain("cleanup");
+    expect(rejected.orderLog).not.toContain("stop");
+
+    const accepted = runInstallOrder("accepted");
+    expect(accepted.run.status).toBe(0);
+    expect(accepted.orderLog).toBe("authorize\ncleanup\nstop\n");
+  });
+
+  it("mantem o rollback pendente ate o Discord iniciar e o limpa depois da confirmacao", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    expect(source).toMatch(/^ACTIVATION_ROLLBACK_PENDING=0$/m);
+    expect(source).toMatch(/^ACTIVATION_ROLLBACK_REOPEN=0$/m);
+    expect(source).toMatch(/^rollback_activation\(\) \{/m);
+
+    const rollbackStart = source.indexOf("rollback_activation() {");
+    const rollbackBoundary = source.indexOf("\n}\n\ntrap cleanup_sudo_pass EXIT INT TERM", rollbackStart);
+    const rollbackFunction = rollbackStart >= 0 && rollbackBoundary > rollbackStart
+      ? source.slice(rollbackStart, rollbackBoundary + 2)
+      : null;
+    const startIndex = source.indexOf('start_discord "$(printf');
+    const completionEnd = source.indexOf("\nprintf '\\n  %sDiscord aberto", startIndex);
+    expect(rollbackFunction).not.toBeNull();
+    expect(startIndex).toBeGreaterThanOrEqual(0);
+    expect(completionEnd).toBeGreaterThan(startIndex);
+    const completion = source.slice(startIndex, completionEnd);
+    const waitIndex = completion.indexOf("wait_discord_started");
+    const pendingResetIndex = completion.indexOf("ACTIVATION_ROLLBACK_PENDING=0");
+    expect(waitIndex).toBeGreaterThanOrEqual(0);
+    expect(pendingResetIndex).toBeGreaterThan(waitIndex);
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-rollback-state-"));
+    tempRoots.push(root);
+    const harness = path.join(root, "rollback-state.sh");
+    fs.writeFileSync(harness, [
+      "#!/bin/sh",
+      "netns_exists() { return 1; }",
+      "discord_running() { return 1; }",
+      "teardown_wireguard_netns() { printf '%s\\n' teardown >> \"$ORDER\"; return 0; }",
+      "start_discord() { printf 'start:%s\\n' \"$1\" >> \"$ORDER\"; return 0; }",
+      "wait_discord_started() { printf 'verified:%s\\n' \"$1\" >> \"$ORDER\"; return 0; }",
+      "stop_discord() { printf '%s\\n' stop >> \"$ORDER\"; }",
+      "warn() { printf 'warn:%s\\n' \"$1\" >> \"$ORDER\"; }",
+      "fail() { printf '%s\\n' \"$1\" >&2; exit 1; }",
+      "ACTIVATION_ROLLBACK_PENDING=1",
+      "ACTIVATION_ROLLBACK_REOPEN=0",
+      "ACTIVATION_NETNS_TOUCH_STARTED=0",
+      rollbackFunction!,
+      "rollback_activation",
+      "printf 'rollback_pending=%s\\n' \"$ACTIVATION_ROLLBACK_PENDING\" >> \"$ORDER\"",
+      "FOUND=target",
+      "ACTIVATION_ROLLBACK_PENDING=1",
+      completion,
+      "printf 'completion_pending=%s\\n' \"$ACTIVATION_ROLLBACK_PENDING\" >> \"$ORDER\"",
+      "exit 0",
+    ].join("\n"));
+    fs.chmodSync(harness, 0o755);
+
+    const order = path.join(root, "order");
+    const run = spawnSync("/bin/sh", [harness], {
+      env: { ...process.env, ORDER: order },
+      encoding: "utf8",
+    });
+    expect(run.status, run.stderr).toBe(0);
+    expect(fs.readFileSync(order, "utf8")).toBe(
+      "rollback_pending=0\nstart:target\nverified:target\ncompletion_pending=0\n",
+    );
   });
 
   it("instala apenas comandos ausentes com argv pacman fixo e verifica o resultado", () => {
