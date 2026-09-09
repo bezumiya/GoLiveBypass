@@ -706,15 +706,22 @@ SUDO_AUTH_READY=0
 SUDO_USE_CACHED_PASS=0
 ELEVATION_PROVIDER="none"
 ELEVATION_RESULT="not_attempted"
+ELEVATION_INPUT_STATE="not_applicable"
+ACTIVATION_ROLLBACK_PENDING=0
+ACTIVATION_ROLLBACK_REOPEN=0
+ACTIVATION_ROLLBACK_TARGET=""
+ACTIVATION_NETNS_TOUCH_STARTED=0
+START_DISCORD_HOST_ONLY=0
+WIREGUARD_TMP_CONF=""
 
 # Eventos de elevacao sao encaminhados pela GUI junto com o stderr do standalone.
 # A whitelist evita que uma mensagem de comando, caminho ou qualquer valor externo
 # entre no diagnostico por engano. Nunca registrar senha, tamanho da senha ou stderr
 # do prompt: somente estados controlados e a presenca dele.
 elevation_event() {
-    local event="${1:-}" detail provider result
+    local event="${1:-}" detail provider result input_state
     case "$event" in
-        prompt.requested|prompt.finished|sudo.cached|sudo.validation|pkexec.result|authorization.requested|authorization) ;;
+        prompt.requested|prompt.finished|prompt.unavailable|prompt.failed|sudo.cached|sudo.validation|sudo.credential_store|pkexec.invoked|pkexec.result|authorization.requested|authorization) ;;
         *) return 0 ;;
     esac
 
@@ -723,15 +730,24 @@ elevation_event() {
         *) provider="unknown" ;;
     esac
     case "${ELEVATION_RESULT:-not_attempted}" in
-        not_attempted|requested|accepted|rejected|cancelled|unavailable|failed|cached|empty) result="$ELEVATION_RESULT" ;;
+        not_attempted|requested|accepted|rejected|cancelled|unavailable|failed|cached|empty|authorized) result="$ELEVATION_RESULT" ;;
         *) result="unknown" ;
     esac
 
     printf '[elevation] %s provider=%s result=%s' "$event" "$provider" "$result" >&2
+    case "$event" in
+        prompt.requested|prompt.finished|prompt.unavailable|prompt.failed)
+            case "${ELEVATION_INPUT_STATE:-not_applicable}" in
+                unknown|empty|nonempty|not_applicable) input_state="$ELEVATION_INPUT_STATE" ;;
+                *) input_state="unknown" ;;
+            esac
+            printf ' input=%s' "$input_state" >&2
+            ;;
+    esac
     shift || true
     for detail in "$@"; do
         case "$detail" in
-            phase=dialog|phase=polkit|phase=password|phase=tty|phase=pre_activation|input=nonempty|input=empty|input=unknown|stderr=present|stderr=empty)
+            phase=dialog|phase=polkit|phase=password|phase=tty|phase=pre_activation|reason=provider_missing|reason=temporary_file|code=0|code=1|code=2|code=126|code=127|code=other|stderr=present|stderr=empty)
                 printf ' %s' "$detail" >&2
                 ;;
         esac
@@ -739,11 +755,64 @@ elevation_event() {
     printf '\n' >&2
 }
 
+# O codigo de um processo e reduzido a um conjunto fixo antes de chegar ao log.
+# Assim, nem um valor externo nem uma mensagem de erro do provedor pode ser impresso.
+elevation_code_detail() {
+    case "${1:-}" in
+        0|1|2|126|127) printf 'code=%s' "$1" ;;
+        *) printf '%s' 'code=other' ;;
+    esac
+}
+
 cleanup_sudo_pass() {
+    cleanup_wireguard_temp
+    rollback_activation
     if [ -n "$SUDO_PASS_FILE" ] && [ -f "$SUDO_PASS_FILE" ]; then
-        rm -f "$SUDO_PASS_FILE"
+        rm -f "$SUDO_PASS_FILE" 2>/dev/null || true
     fi
     SUDO_PASS_FILE=""
+}
+
+cleanup_wireguard_temp() {
+    if [ -n "${WIREGUARD_TMP_CONF:-}" ] && [ -f "$WIREGUARD_TMP_CONF" ]; then
+        rm -f "$WIREGUARD_TMP_CONF" 2>/dev/null || true
+    fi
+    WIREGUARD_TMP_CONF=""
+}
+
+# Falhas depois de stop_discord nao podem deixar o cliente fechado nem um namespace
+# incompleto. A reabertura de emergencia so ocorre depois de remover o namespace
+# parcialmente configurado; portanto o Discord nunca e iniciado dentro de uma rota
+# cuja preparacao falhou. O estado pending e limpo antes das acoes para impedir loop
+# no trap se alguma limpeza tambem falhar.
+rollback_activation() {
+    [ "${ACTIVATION_ROLLBACK_PENDING:-0}" -eq 1 ] || return 0
+    ACTIVATION_ROLLBACK_PENDING=0
+
+    if [ "${ACTIVATION_NETNS_TOUCH_STARTED:-0}" -eq 1 ] && netns_exists; then
+        warn "Rollback: removendo o namespace WireGuard incompleto."
+        teardown_wireguard_netns || true
+    fi
+
+    if [ "${ACTIVATION_ROLLBACK_REOPEN:-0}" -ne 1 ] || discord_running; then
+        return 0
+    fi
+    if netns_exists; then
+        warn "Rollback: o namespace WireGuard continua ativo; nao vou iniciar o Discord fora dele."
+        return 0
+    fi
+
+    if [ -n "${ACTIVATION_ROLLBACK_TARGET:-}" ]; then
+        warn "Rollback: bypass nao ativado; reabrindo o Discord sem o namespace WireGuard."
+        START_DISCORD_HOST_ONLY=1
+        if start_discord "$ACTIVATION_ROLLBACK_TARGET" && wait_discord_started "$ACTIVATION_ROLLBACK_TARGET"; then
+            warn "Rollback: Discord reaberto sem bypass; a ativacao falhou e precisa ser repetida."
+        else
+            warn "Rollback: nao consegui reabrir o Discord automaticamente."
+        fi
+        START_DISCORD_HOST_ONLY=0
+    fi
+    return 0
 }
 
 trap cleanup_sudo_pass EXIT INT TERM
@@ -759,27 +828,31 @@ sudo_prompt_provider() {
 
 sudo_pass_get() {
     if [ -n "$SUDO_PASS_FILE" ] && [ -f "$SUDO_PASS_FILE" ]; then
-        [ -n "${ELEVATION_PROVIDER:-}" ] || ELEVATION_PROVIDER="sudo"
+        [ "${ELEVATION_PROVIDER:-none}" = "none" ] && ELEVATION_PROVIDER="sudo"
+        ELEVATION_INPUT_STATE="nonempty"
         return 0
     fi
 
     local pass="" provider="" prompt_error="" prompt_exit=1
-    local prompt_stderr_state="empty" input_state="empty"
+    local prompt_stderr_state="empty"
     provider="$(sudo_prompt_provider 2>/dev/null || true)"
     if [ -z "$provider" ]; then
         ELEVATION_PROVIDER="none"
         ELEVATION_RESULT="unavailable"
-        elevation_event "prompt.finished" "input=empty" "stderr=empty"
+        ELEVATION_INPUT_STATE="not_applicable"
+        elevation_event "prompt.unavailable" "reason=provider_missing"
         return 1
     fi
 
     ELEVATION_PROVIDER="$provider"
     ELEVATION_RESULT="not_attempted"
+    ELEVATION_INPUT_STATE="unknown"
     elevation_event "prompt.requested" "phase=dialog"
 
     if ! prompt_error="$(mktemp 2>/dev/null)"; then
         ELEVATION_RESULT="failed"
-        elevation_event "prompt.finished" "input=empty" "stderr=empty"
+        ELEVATION_INPUT_STATE="not_applicable"
+        elevation_event "prompt.failed" "reason=temporary_file"
         return 1
     fi
 
@@ -797,7 +870,7 @@ sudo_pass_get() {
         fi
     fi
 
-    [ -n "$pass" ] && input_state="nonempty"
+    [ -n "$pass" ] && ELEVATION_INPUT_STATE="nonempty" || ELEVATION_INPUT_STATE="empty"
     [ -s "$prompt_error" ] && prompt_stderr_state="present"
     rm -f "$prompt_error"
 
@@ -807,30 +880,32 @@ sudo_pass_get() {
         else
             ELEVATION_RESULT="cancelled"
         fi
-        elevation_event "prompt.finished" "input=$input_state" "stderr=$prompt_stderr_state"
+        elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
         pass=""
         return 1
     fi
 
     if [ -z "$pass" ]; then
         ELEVATION_RESULT="empty"
-        elevation_event "prompt.finished" "input=empty" "stderr=$prompt_stderr_state"
+        elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
         pass=""
         return 1
     fi
 
-    ELEVATION_RESULT="accepted"
-    elevation_event "prompt.finished" "input=nonempty" "stderr=$prompt_stderr_state"
+    # Texto retornado pelo dialogo e apenas entrada recebida; ainda nao e uma
+    # autorizacao. `accepted` fica reservado ao resultado de sudo -S -k -v.
+    ELEVATION_RESULT="not_attempted"
+    elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
     if ! SUDO_PASS_FILE="$(mktemp 2>/dev/null)"; then
         ELEVATION_RESULT="failed"
-        elevation_event "sudo.validation" "phase=password"
+        elevation_event "sudo.credential_store" "reason=temporary_file" "phase=password"
         pass=""
         return 1
     fi
     if ! chmod 600 "$SUDO_PASS_FILE" 2>/dev/null || ! printf '%s\n' "$pass" > "$SUDO_PASS_FILE"; then
         cleanup_sudo_pass
         ELEVATION_RESULT="failed"
-        elevation_event "sudo.validation" "phase=password"
+        elevation_event "sudo.credential_store" "reason=temporary_file" "phase=password"
         pass=""
         return 1
     fi
@@ -844,6 +919,7 @@ sudo_pass_get() {
 # `sudo -n comando` ainda a exige. Nesses casos o elevate reenvia a mesma senha
 # temporaria para cada comando, sem abrir uma nova janela.
 sudo_authenticate_once() {
+    local sudo_status
     [ "$(id -u)" -eq 0 ] && return 0
     [ "$SUDO_AUTH_READY" -eq 1 ] && return 0
 
@@ -870,14 +946,16 @@ sudo_authenticate_once() {
         fi
         if sudo -S -k -v < "$SUDO_PASS_FILE" >/dev/null 2>&1; then
             ELEVATION_RESULT="accepted"
-            elevation_event "sudo.validation" "phase=password"
+            elevation_event "sudo.validation" "$(elevation_code_detail 0)" "phase=password"
             SUDO_AUTH_READY=1
             SUDO_USE_CACHED_PASS=1
             return 0
+        else
+            sudo_status=$?
         fi
         cleanup_sudo_pass
         ELEVATION_RESULT="rejected"
-        elevation_event "sudo.validation" "phase=password"
+        elevation_event "sudo.validation" "$(elevation_code_detail "$sudo_status")" "phase=password"
         printf '%s\n' 'Falha: a senha do sudo foi recusada. A ativacao foi cancelada sem repetir o pedido.' >&2
         return 1
     fi
@@ -888,12 +966,14 @@ sudo_authenticate_once() {
         elevation_event "prompt.requested" "phase=tty"
         if sudo -v; then
             ELEVATION_RESULT="accepted"
-            elevation_event "sudo.validation" "phase=tty"
+            elevation_event "sudo.validation" "$(elevation_code_detail 0)" "phase=tty"
             SUDO_AUTH_READY=1
             return 0
+        else
+            sudo_status=$?
         fi
         ELEVATION_RESULT="rejected"
-        elevation_event "sudo.validation" "phase=tty"
+        elevation_event "sudo.validation" "$(elevation_code_detail "$sudo_status")" "phase=tty"
         printf '%s\n' 'Falha: nao foi possivel autenticar o sudo.' >&2
         return 1
     fi
@@ -904,10 +984,10 @@ sudo_authenticate_once() {
     return 1
 }
 
-# A GUI sem zenity/kdialog nao consegue apresentar a senha do sudo. Nesse caso,
-# quando o polkit esta disponivel, o proprio pkexec fornece o prompt grafico.
+# A GUI sem zenity/kdialog nao consegue coletar a senha do sudo. Nesse caso,
+# quando o polkit esta disponivel, o pkexec inicia seu proprio fluxo de autorizacao.
 # O teste fica separado da autenticacao para que cancelamento, recusa ou senha
-# incorreta no prompt do sudo nunca disparem um segundo prompt.
+# incorreta no prompt do sudo nunca disparem um segundo fluxo sem necessidade.
 sudo_has_gui_prompt() {
     have zenity || have kdialog
 }
@@ -926,19 +1006,23 @@ sudo_with_cached_password() {
 }
 
 pkexec_interactive() {
-    local pkexec_status
+    local pkexec_status pkexec_code
     ELEVATION_PROVIDER="pkexec"
     ELEVATION_RESULT="requested"
-    elevation_event "prompt.requested" "phase=polkit"
+    ELEVATION_INPUT_STATE="not_applicable"
+    # pkexec pode usar agente grafico, TTY ou politica preautorizada; o script
+    # registra apenas que o comando foi delegado ao polkit, nunca que uma janela apareceu.
+    elevation_event "pkexec.invoked" "phase=polkit"
     if pkexec "$@"; then
-        ELEVATION_RESULT="accepted"
-        elevation_event "pkexec.result" "phase=polkit"
+        ELEVATION_RESULT="authorized"
+        elevation_event "pkexec.result" "$(elevation_code_detail 0)" "phase=polkit"
         return 0
     else
         pkexec_status=$?
     fi
+    pkexec_code="$(elevation_code_detail "$pkexec_status")"
     ELEVATION_RESULT="failed"
-    elevation_event "pkexec.result" "phase=polkit"
+    elevation_event "pkexec.result" "$pkexec_code" "phase=polkit"
     return "$pkexec_status"
 }
 
@@ -971,22 +1055,24 @@ elevate() {
 authorize_install_elevation() {
     if [ "$(id -u)" -eq 0 ]; then
         ELEVATION_PROVIDER="root"
-        ELEVATION_RESULT="accepted"
+        ELEVATION_RESULT="authorized"
         elevation_event "authorization" "phase=pre_activation"
         return 0
     fi
 
+    ELEVATION_INPUT_STATE="not_applicable"
     ELEVATION_RESULT="requested"
     elevation_event "authorization.requested" "phase=pre_activation"
     if elevate true; then
-        ELEVATION_RESULT="accepted"
+        ELEVATION_RESULT="authorized"
         elevation_event "authorization" "phase=pre_activation"
         return 0
     fi
 
     # Preserva o diagnostico especifico produzido por sudo_pass_get/pkexec.
     case "${ELEVATION_RESULT:-not_attempted}" in
-        accepted|cached|rejected|cancelled|unavailable|empty|failed) ;;
+        accepted|cached) ELEVATION_RESULT="failed" ;;
+        rejected|cancelled|unavailable|empty|failed) ;;
         *) ELEVATION_RESULT="failed" ;;
     esac
     elevation_event "authorization" "phase=pre_activation"
@@ -2159,21 +2245,27 @@ setup_wireguard_netns() {
     local wg_file="$INSTALL_DIR/wireguard.conf"
 
     if ! netns_exists; then
+        ACTIVATION_NETNS_TOUCH_STARTED=1
         step "Criando namespace de rede '$NETNS_NAME'"
         elevate ip netns add "$NETNS_NAME"
     fi
 
+    # A partir daqui a interface existente tambem pode ser removida/recriada;
+    # o trap de saida deve tratar o namespace como potencialmente parcial.
+    ACTIVATION_NETNS_TOUCH_STARTED=1
     step "Configurando interface WireGuard '$WG_IF' no namespace '$NETNS_NAME'"
     elevate ip -n "$NETNS_NAME" link del dev "$WG_IF" 2>/dev/null || true
     elevate ip link del dev "$WG_IF" 2>/dev/null || true
 
     local tmp_conf
     tmp_conf="$(mktemp)"
+    WIREGUARD_TMP_CONF="$tmp_conf"
     grep -vE "^(Address|DNS)" "$wg_file" > "$tmp_conf"
 
     elevate ip link add dev "$WG_IF" type wireguard
     elevate wg setconf "$WG_IF" "$tmp_conf"
     rm -f "$tmp_conf"
+    WIREGUARD_TMP_CONF=""
 
     elevate ip link set "$WG_IF" netns "$NETNS_NAME"
 
@@ -2389,6 +2481,20 @@ start_discord() {
     fi
 
     [ -n "$target_cmd" ] || return 1
+
+    if [ "${START_DISCORD_HOST_ONLY:-0}" -eq 1 ]; then
+        # Rollback: depois de remover um namespace incompleto, reabra o cliente
+        # diretamente na sessao do usuario. Isto deixa claro que o bypass falhou,
+        # sem colocar um processo dentro de uma rota que nao foi validada.
+        printf '[%s] launch=host-fallback\n' "$(date -Is)" >>"$discord_log"
+        if have setsid; then
+            setsid -f env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
+        else
+            env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null &
+        fi
+        printf '  Log do Discord: %s\n' "$discord_log" >&2
+        return 0
+    fi
 
     if [ -n "$id" ]; then
         # Flatpak depende do barramento e do portal da sessão gráfica do usuário.
@@ -2699,10 +2805,6 @@ if [ "$MODE" = "status" ]; then
     exit 0
 fi
 
-if [ "$CLEANUP_LEGACY" -eq 1 ]; then
-    cleanup_legacy_tor
-fi
-
 if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]; then
     stop_discord
     teardown_wireguard_netns
@@ -2748,6 +2850,23 @@ printf '%s\n' "$FOUND" > "$lista"
 # A autorizacao precisa estar concluida antes de fechar qualquer cliente. Isso
 # tambem impede que uma falha no prompt deixe o usuario sem Discord aberto.
 authorize_install_elevation || fail "Nao foi possivel autorizar a ativacao Linux (resultado ${ELEVATION_RESULT}). O Discord nao foi encerrado."
+# A limpeza legada apaga recursos e configuracoes antigas; so pode acontecer
+# depois de a autorizacao da ativacao ter sido concluida.
+if [ "$CLEANUP_LEGACY" -eq 1 ]; then
+    cleanup_legacy_tor
+fi
+
+# A partir do stop, qualquer falha fatal precisa remover o namespace parcial e
+# tentar devolver o Discord ao usuario. O trap e armado depois da autorizacao e
+# da limpeza legada, para nao tornar nenhuma falha anterior destrutiva ao cliente.
+ACTIVATION_ROLLBACK_TARGET="$(printf '%s\n' "$FOUND" | head -1)"
+if discord_running; then
+    ACTIVATION_ROLLBACK_REOPEN=1
+else
+    ACTIVATION_ROLLBACK_REOPEN=0
+fi
+ACTIVATION_NETNS_TOUCH_STARTED=0
+ACTIVATION_ROLLBACK_PENDING=1
 # O processo antigo precisa sair antes de qualquer alteracao do namespace. Isso
 # tambem impede que uma troca de rota deixe duas instancias compartilhando o host.
 stop_discord
@@ -2820,6 +2939,9 @@ if ! wait_discord_started "$(printf '%s\n' "$FOUND" | head -1)"; then
     teardown_wireguard_netns
     fail "Discord nao iniciou dentro do namespace WireGuard. Verifique o log em $INSTALL_DIR/logs."
 fi
+# A sessao ja esta confirmada dentro do namespace; a partir daqui o trap deve
+# apenas limpar segredos/temporarios e nunca reabrir o cliente fora do tunel.
+ACTIVATION_ROLLBACK_PENDING=0
 printf '\n  %sDiscord aberto com o GoLiveBypass.%s\n' "$C_GREEN" "$C_OFF" >&2
 
 # O updater do Discord baixa a versao nova numa pasta app-<versao> inteiramente nova, entao a
