@@ -44,7 +44,7 @@ try {
     }
     if (-not (Wait-WireSockState $serviceName 'Stopped' 45)) {
       $info = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
-      throw "STOP_TIMEOUT: servico=$serviceName estado=$($info.State) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
+      throw "STOP_TIMEOUT: servico=$serviceName estado=$($info.State) Win32ExitCode=$($info.ExitCode) ServiceSpecificExitCode=$($info.ServiceSpecificExitCode)"
     }
   }
 
@@ -70,10 +70,10 @@ try {
       Start-Service -Name $name -ErrorAction Stop
       if (Wait-WireSockState $name 'Running' 45) {
         $running = Get-WireSockInfo
-        Complete-WireSock 0 "SERVICE_RUNNING: name=$name pid=$($running.ProcessId) win32=$($running.ExitCode) service=$($running.ServiceSpecificExitCode) path=$($running.PathName)"
+        Complete-WireSock 0 "SERVICE_RUNNING: name=$name pid=$($running.ProcessId) Win32ExitCode=$($running.ExitCode) ServiceSpecificExitCode=$($running.ServiceSpecificExitCode) path=$($running.PathName)"
       }
       $info = Get-WireSockInfo
-      $lastStartError = "name=$name estado=$($info.State) pid=$($info.ProcessId) win32=$($info.ExitCode) service=$($info.ServiceSpecificExitCode)"
+      $lastStartError = "name=$name estado=$($info.State) pid=$($info.ProcessId) Win32ExitCode=$($info.ExitCode) ServiceSpecificExitCode=$($info.ServiceSpecificExitCode)"
     } catch {
       $lastStartError = "name=$name erro=$($_.Exception.Message)"
     }

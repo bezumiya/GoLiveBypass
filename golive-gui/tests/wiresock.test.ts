@@ -62,6 +62,7 @@ describe("WireSock no Windows", () => {
     expect(script).toContain("for ($attempt = 1; $attempt -le 2; $attempt++)");
     expect(script).toContain("GOLIVE_WIRESOCK_ERROR");
     expect(script).toContain("ServiceSpecificExitCode");
+    expect(script).toContain("Win32ExitCode");
     expect(script).toContain("SERVICE_RUNNING");
     expect(script).toContain("wiresock-pro-client-service");
     expect(script).toContain("$name = [string]$serviceInfo.Name");
