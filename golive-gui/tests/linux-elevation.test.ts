@@ -138,9 +138,10 @@ describe("elevacao Linux no standalone", () => {
     expect(result.log).toContain("prompt:zenity");
     expect(result.stderr).toContain("prompt.requested provider=zenity");
     expect(result.stderr).toMatch(
-      /prompt\.finished provider=zenity result=accepted input=nonempty/,
+      /prompt\.finished provider=zenity result=not_attempted input=nonempty code=0/,
     );
-    expect(result.stderr).toMatch(/sudo\.validation provider=zenity result=accepted/);
+    expect(result.stderr).not.toMatch(/prompt\.finished[^\n]*result=accepted/);
+    expect(result.stderr).toMatch(/sudo\.validation provider=zenity result=accepted code=0/);
     expect(result.log).toContain("sudo_validate:nonempty");
     expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
       "unit-test-sudo-secret",
@@ -156,9 +157,10 @@ describe("elevacao Linux no standalone", () => {
     expect(result.log).toContain("prompt:kdialog");
     expect(result.stderr).toContain("prompt.requested provider=kdialog");
     expect(result.stderr).toMatch(
-      /prompt\.finished provider=kdialog result=accepted input=nonempty/,
+      /prompt\.finished provider=kdialog result=not_attempted input=nonempty code=0/,
     );
-    expect(result.stderr).toMatch(/sudo\.validation provider=kdialog result=accepted/);
+    expect(result.stderr).not.toMatch(/prompt\.finished[^\n]*result=accepted/);
+    expect(result.stderr).toMatch(/sudo\.validation provider=kdialog result=accepted code=0/);
     expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
       "unit-test-sudo-secret",
     );
@@ -169,7 +171,7 @@ describe("elevacao Linux no standalone", () => {
     expect(empty.status).not.toBe(0);
     expect(empty.log).toContain("prompt:zenity");
     expect(empty.stderr).toMatch(
-      /prompt\.finished provider=zenity result=empty input=empty/,
+      /prompt\.finished provider=zenity result=empty input=empty code=0/,
     );
     expect(empty.stderr).not.toMatch(/sudo\.validation .*result=accepted/);
     expect(empty.log).not.toContain("sudo_validate:nonempty");
@@ -177,7 +179,7 @@ describe("elevacao Linux no standalone", () => {
     const cancelled = runElevation({ prompt: "zenity-cancel" });
     expect(cancelled.status).not.toBe(0);
     expect(cancelled.stderr).toMatch(
-      /prompt\.finished provider=zenity result=cancelled input=empty/,
+      /prompt\.finished provider=zenity result=cancelled input=empty code=1/,
     );
     expect(cancelled.stderr).not.toMatch(/sudo\.validation .*result=accepted/);
     expect(cancelled.log).not.toContain("sudo_validate:nonempty");
@@ -190,9 +192,10 @@ describe("elevacao Linux no standalone", () => {
     });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(
-      /prompt\.finished provider=zenity result=accepted input=nonempty/,
+      /prompt\.finished provider=zenity result=not_attempted input=nonempty code=0/,
     );
-    expect(result.stderr).toMatch(/sudo\.validation provider=zenity result=rejected/);
+    expect(result.stderr).not.toMatch(/prompt\.finished[^\n]*result=rejected/);
+    expect(result.stderr).toMatch(/sudo\.validation provider=zenity result=rejected code=1/);
     expect(result.log).toContain("sudo_validate:nonempty");
     expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
       "unit-test-sudo-secret",
