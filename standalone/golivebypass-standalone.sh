@@ -704,6 +704,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 SUDO_PASS_FILE=""
 SUDO_AUTH_READY=0
 SUDO_USE_CACHED_PASS=0
+SUDO_PROMPT_FALLBACK_PKEXEC=0
+SUDO_PROMPT_OUTCOME="not_attempted"
 ELEVATION_PROVIDER="none"
 ELEVATION_RESULT="not_attempted"
 ELEVATION_INPUT_STATE="not_applicable"
@@ -828,11 +830,11 @@ trap cleanup_sudo_pass EXIT INT TERM
 sudo_prompt_provider() {
     if have zenity; then
         printf '%s\n' 'zenity'
-    elif have kdialog; then
-        printf '%s\n' 'kdialog'
-    else
-        return 1
     fi
+    if have kdialog; then
+        printf '%s\n' 'kdialog'
+    fi
+    return 0
 }
 
 sudo_pass_get() {
@@ -842,85 +844,142 @@ sudo_pass_get() {
         return 0
     fi
 
-    local pass="" provider="" prompt_error="" prompt_exit=1
-    local prompt_stderr_state="empty"
-    provider="$(sudo_prompt_provider 2>/dev/null || true)"
-    if [ -z "$provider" ]; then
+    local pass="" provider="" providers="" prompt_error="" prompt_exit=1
+    local prompt_stderr_state="empty" provider_seen=0 provider_failure=0
+    SUDO_PROMPT_FALLBACK_PKEXEC=0
+    SUDO_PROMPT_OUTCOME="not_attempted"
+    providers="$(sudo_prompt_provider 2>/dev/null || true)"
+    if [ -z "$providers" ]; then
         ELEVATION_PROVIDER="none"
         ELEVATION_RESULT="unavailable"
         ELEVATION_INPUT_STATE="not_applicable"
+        SUDO_PROMPT_FALLBACK_PKEXEC=1
+        SUDO_PROMPT_OUTCOME="provider_unavailable"
         elevation_event "prompt.unavailable" "reason=provider_missing"
         return 1
     fi
 
-    ELEVATION_PROVIDER="$provider"
-    ELEVATION_RESULT="not_attempted"
-    ELEVATION_INPUT_STATE="unknown"
-    elevation_event "prompt.requested" "phase=dialog"
+    # A ordem e fixa e cada nome veio apenas da whitelist acima. Uma falha de
+    # execucao/inizializacao (stderr ou codigo diferente do cancelamento 1)
+    # libera o proximo provedor; cancelamento e senha vazia encerram a coleta.
+    for provider in $providers; do
+        provider_seen=1
+        pass=""
+        prompt_exit=1
+        prompt_stderr_state="empty"
+        ELEVATION_PROVIDER="$provider"
+        ELEVATION_RESULT="not_attempted"
+        ELEVATION_INPUT_STATE="unknown"
+        elevation_event "prompt.requested" "phase=dialog"
 
-    if ! prompt_error="$(mktemp 2>/dev/null)"; then
-        ELEVATION_RESULT="failed"
-        ELEVATION_INPUT_STATE="not_applicable"
-        elevation_event "prompt.failed" "reason=temporary_file"
-        return 1
-    fi
-
-    if [ "$provider" = "zenity" ]; then
-        if pass="$(zenity --password --title='GoLiveBypass - senha do sudo' 2>"$prompt_error")"; then
-            prompt_exit=0
-        else
-            prompt_exit=$?
+        if ! prompt_error="$(mktemp 2>/dev/null)"; then
+            ELEVATION_RESULT="failed"
+            ELEVATION_INPUT_STATE="not_applicable"
+            elevation_event "prompt.failed" "reason=temporary_file"
+            SUDO_PROMPT_OUTCOME="internal_failure"
+            pass=""
+            return 1
         fi
-    else
-        if pass="$(kdialog --password 'Senha do sudo (GoLiveBypass)' 2>"$prompt_error")"; then
-            prompt_exit=0
+
+        if [ "$provider" = "zenity" ]; then
+            if pass="$(zenity --password --title='GoLiveBypass - senha do sudo' 2>"$prompt_error")"; then
+                prompt_exit=0
+            else
+                prompt_exit=$?
+            fi
         else
-            prompt_exit=$?
+            if pass="$(kdialog --password 'Senha do sudo (GoLiveBypass)' 2>"$prompt_error")"; then
+                prompt_exit=0
+            else
+                prompt_exit=$?
+            fi
         fi
-    fi
 
-    [ -n "$pass" ] && ELEVATION_INPUT_STATE="nonempty" || ELEVATION_INPUT_STATE="empty"
-    [ -s "$prompt_error" ] && prompt_stderr_state="present"
-    rm -f "$prompt_error"
+        [ -s "$prompt_error" ] && prompt_stderr_state="present"
+        rm -f "$prompt_error"
 
-    if [ "$prompt_exit" -ne 0 ]; then
+        # Qualquer stderr indica que o provedor nao abriu/terminou de forma
+        # confiavel, mesmo que tambem tenha devolvido texto. Nao guardar esse
+        # texto: marque a falha e tente apenas o proximo provedor fixo.
         if [ "$prompt_stderr_state" = "present" ]; then
             ELEVATION_RESULT="failed"
-        else
-            ELEVATION_RESULT="cancelled"
+            ELEVATION_INPUT_STATE="not_applicable"
+            elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=present"
+            provider_failure=1
+            SUDO_PROMPT_OUTCOME="provider_failed"
+            pass=""
+            continue
         fi
+
+        if [ "$prompt_exit" -ne 0 ]; then
+            if [ "$prompt_exit" -ne 1 ]; then
+                ELEVATION_RESULT="failed"
+                ELEVATION_INPUT_STATE="not_applicable"
+                elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
+                provider_failure=1
+                SUDO_PROMPT_OUTCOME="provider_failed"
+                pass=""
+                continue
+            fi
+            ELEVATION_RESULT="cancelled"
+            ELEVATION_INPUT_STATE="empty"
+            SUDO_PROMPT_OUTCOME="cancelled"
+            elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
+            pass=""
+            return 1
+        fi
+
+        if [ -z "$pass" ]; then
+            ELEVATION_RESULT="empty"
+            ELEVATION_INPUT_STATE="empty"
+            SUDO_PROMPT_OUTCOME="empty"
+            elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
+            pass=""
+            return 1
+        fi
+
+        # Texto retornado pelo dialogo e apenas entrada recebida; ainda nao e
+        # uma autorizacao. `accepted` fica reservado ao sudo -S -k -v.
+        ELEVATION_RESULT="not_attempted"
+        ELEVATION_INPUT_STATE="nonempty"
         elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
+        if ! SUDO_PASS_FILE="$(mktemp 2>/dev/null)"; then
+            ELEVATION_RESULT="failed"
+            SUDO_PROMPT_OUTCOME="internal_failure"
+            elevation_event "sudo.credential_store" "reason=temporary_file" "phase=password"
+            pass=""
+            return 1
+        fi
+        if ! chmod 600 "$SUDO_PASS_FILE" 2>/dev/null || ! printf '%s\n' "$pass" > "$SUDO_PASS_FILE"; then
+            cleanup_sudo_pass
+            ELEVATION_RESULT="failed"
+            SUDO_PROMPT_OUTCOME="internal_failure"
+            elevation_event "sudo.credential_store" "reason=temporary_file" "phase=password"
+            pass=""
+            return 1
+        fi
+        # O valor deixa de ser necessario depois da escrita no arquivo temporario.
         pass=""
+        SUDO_PROMPT_OUTCOME="credential_received"
+        return 0
+    done
+
+    if [ "$provider_seen" -eq 1 ] && [ "$provider_failure" -eq 1 ]; then
+        ELEVATION_PROVIDER="none"
+        ELEVATION_RESULT="failed"
+        ELEVATION_INPUT_STATE="not_applicable"
+        SUDO_PROMPT_FALLBACK_PKEXEC=1
+        SUDO_PROMPT_OUTCOME="provider_failed"
         return 1
     fi
 
-    if [ -z "$pass" ]; then
-        ELEVATION_RESULT="empty"
-        elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
-        pass=""
-        return 1
-    fi
-
-    # Texto retornado pelo dialogo e apenas entrada recebida; ainda nao e uma
-    # autorizacao. `accepted` fica reservado ao resultado de sudo -S -k -v.
-    ELEVATION_RESULT="not_attempted"
-    elevation_event "prompt.finished" "$(elevation_code_detail "$prompt_exit")" "stderr=$prompt_stderr_state"
-    if ! SUDO_PASS_FILE="$(mktemp 2>/dev/null)"; then
-        ELEVATION_RESULT="failed"
-        elevation_event "sudo.credential_store" "reason=temporary_file" "phase=password"
-        pass=""
-        return 1
-    fi
-    if ! chmod 600 "$SUDO_PASS_FILE" 2>/dev/null || ! printf '%s\n' "$pass" > "$SUDO_PASS_FILE"; then
-        cleanup_sudo_pass
-        ELEVATION_RESULT="failed"
-        elevation_event "sudo.credential_store" "reason=temporary_file" "phase=password"
-        pass=""
-        return 1
-    fi
-    # O valor deixa de ser necessario depois da escrita no arquivo temporario.
-    pass=""
-    return 0
+    ELEVATION_PROVIDER="none"
+    ELEVATION_RESULT="unavailable"
+    ELEVATION_INPUT_STATE="not_applicable"
+    SUDO_PROMPT_FALLBACK_PKEXEC=1
+    SUDO_PROMPT_OUTCOME="provider_unavailable"
+    elevation_event "prompt.unavailable" "reason=provider_missing"
+    return 1
 }
 
 # Valida a senha uma unica vez na janela grafica. Algumas politicas de sudo usam
@@ -1039,13 +1098,17 @@ elevate() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
     elif have sudo; then
-        if [ "${NONINTERACTIVE:-0}" -ne 1 ] && [ "${SUDO_AUTH_READY:-0}" -ne 1 ] && [ "${GOLIVE_GUI:-0}" = "1" ] && ! sudo -n true 2>/dev/null && ! sudo_has_gui_prompt; then
-            if have pkexec; then
+        if ! sudo_authenticate_once; then
+            # pkexec so substitui um provedor grafico que nao conseguiu iniciar
+            # (ou a ausencia dele). Cancelamento, senha vazia, senha recusada,
+            # falha interna e NONINTERACTIVE nunca entram neste fallback.
+            if [ "${SUDO_PROMPT_FALLBACK_PKEXEC:-0}" -eq 1 ] && have pkexec \
+                && [ "${GOLIVE_GUI:-0}" = "1" ] && [ "${NONINTERACTIVE:-0}" -ne 1 ]; then
                 pkexec_interactive "$@"
                 return $?
             fi
+            return 1
         fi
-        sudo_authenticate_once || return 1
         if [ "$SUDO_USE_CACHED_PASS" -eq 1 ]; then
             sudo_with_cached_password "$@"
             return $?
