@@ -1565,3 +1565,24 @@ As regressões finais passaram: os 19 módulos `tests/test-plugin-*.mjs`, Vitest
 `.exe` de probe realmente bloqueado por outro processo e a rodada controlada de
 falha de serviço com `boot → relaunch → adoção`; a abertura normal do Discord
 oficial e o caminho de recuperação de autostart já foram exercitados.
+
+## Revalidação r9: instalador PowerShell beta e envio para main
+
+Data: 2026-09-09.
+
+- `installer/GoLiveBypass-Installer.ps1` deixou de abortar na entrada e agora
+  mostra explicitamente o canal `[BETA]`. Ele distribui todas as fontes do
+  plugin WireGuard e baixa o `proton-confgen.exe` Windows x64 da beta com
+  validação SHA-256; `-PluginSource` continua preferindo um helper local.
+- O PowerShell da VM Windows executou o script em `-Mode CheckUpdate` sem erro
+  de parsing, mostrou o aviso beta e reconheceu o plugin instalado
+  `v2.0.0-beta.1`. O teste de paridade local terminou com 32/32 casos.
+- O conjunto consolidado foi commitado em `d8146b5` e integrado à base oficial
+  em `22a4cbc`. O push foi confirmado em `bezumiya/GoLiveBypass` como
+  `upstream/main`; não houve tag, release ou mensagem de Discord criada.
+- `.codex/` e `tmp/` ficaram fora do commit por serem estado local/artefatos
+  temporários. O checkpoint antigo da VM em `sdc` permaneceu intocado.
+
+As lacunas de cobertura de probe bloqueado por outro processo e de falha de
+serviço no ciclo `boot → relaunch → adoção` continuam explicitamente pendentes;
+encerrar o loop nesta rodada não transforma essas hipóteses em evidência.
