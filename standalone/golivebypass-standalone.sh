@@ -713,6 +713,12 @@ ACTIVATION_ROLLBACK_TARGET=""
 ACTIVATION_NETNS_TOUCH_STARTED=0
 START_DISCORD_HOST_ONLY=0
 WIREGUARD_TMP_CONF=""
+# Executor escolhido uma vez por ativacao. O nome nunca vai para logs; uid/gid
+# numericos permitem usar setpriv sem interpolar identidade em um comando shell.
+RUN_USER_NAME=""
+RUN_USER_UID=""
+RUN_USER_GID=""
+RUN_USER_METHOD="none"
 
 # Eventos de elevacao sao encaminhados pela GUI junto com o stderr do standalone.
 # A whitelist evita que uma mensagem de comando, caminho ou qualquer valor externo
@@ -815,6 +821,9 @@ rollback_activation() {
     return 0
 }
 
+# O trap e instalado cedo para que uma falha durante a coleta da senha ainda
+# limpe o segredo temporario. `ACTIVATION_ROLLBACK_PENDING` continua em zero ate
+# depois de todas as funcoes de rollback/lancamento estarem definidas.
 trap cleanup_sudo_pass EXIT INT TERM
 sudo_prompt_provider() {
     if have zenity; then
@@ -1048,6 +1057,174 @@ elevate() {
         printf '%s\n' 'Falha: sudo nao esta instalado neste sistema.' >&2
         return 127
     fi
+}
+
+# Valida a identidade e seleciona o menor mecanismo disponivel para trocar do
+# root elevado para o usuario da sessao. O comando selecionado e sempre um dos
+# tres literais abaixo; nenhum valor vindo do ambiente entra em log ou em shell.
+# A funcao deve ser chamada antes de fechar o Discord, para que a ausencia de
+# sudo/runuser/setpriv nao deixe a sessao sem cliente aberto.
+prepare_run_user() {
+    local user="${1:-}" uid="" gid=""
+
+    RUN_USER_NAME=""
+    RUN_USER_UID=""
+    RUN_USER_GID=""
+    RUN_USER_METHOD="none"
+
+    case "$user" in
+        ''|-*|*[!A-Za-z0-9_.-]*)
+            printf '%s\n' 'Falha: usuario de execucao do Discord invalido.' >&2
+            return 127
+            ;;
+    esac
+    uid="$(id -u "$user" 2>/dev/null || true)"
+    gid="$(id -g "$user" 2>/dev/null || true)"
+    case "$uid" in ''|*[!0-9]*) printf '%s\n' 'Falha: nao consegui resolver o usuario de execucao do Discord.' >&2; return 127 ;; esac
+    case "$gid" in ''|*[!0-9]*) printf '%s\n' 'Falha: nao consegui resolver o grupo de execucao do Discord.' >&2; return 127 ;; esac
+
+    if have sudo; then
+        RUN_USER_METHOD="sudo"
+    elif have runuser; then
+        RUN_USER_METHOD="runuser"
+    elif have setpriv; then
+        RUN_USER_METHOD="setpriv"
+    else
+        printf '%s\n' 'Falha: nenhum executor seguro (sudo, runuser ou setpriv) esta disponivel para iniciar o Discord.' >&2
+        return 127
+    fi
+
+    RUN_USER_NAME="$user"
+    RUN_USER_UID="$uid"
+    RUN_USER_GID="$gid"
+    return 0
+}
+
+# Executa o comando dentro do namespace, aplicando a troca de usuario somente
+# depois que ip netns exec ja entrou no namespace. Assim o fallback nao move o
+# iproute2 para o host nem amplia o escopo do WireGuard.
+run_user_netns_command() {
+    local launch_mode="${1:-}"
+    [ "$#" -gt 0 ] || { printf '%s\n' 'Falha: executor do Discord recebeu um modo vazio.' >&2; return 127; }
+    shift
+    [ "$#" -gt 0 ] || { printf '%s\n' 'Falha: executor do Discord recebeu um comando vazio.' >&2; return 127; }
+    case "$launch_mode" in
+        detached|background|foreground) ;;
+        *) printf '%s\n' 'Falha: modo de lancamento do Discord invalido.' >&2; return 127 ;;
+    esac
+
+    case "$RUN_USER_METHOD" in
+        sudo)
+            case "$launch_mode" in
+                detached) elevate setsid -f ip netns exec "$NETNS_NAME" sudo -u "$RUN_USER_NAME" -- "$@" ;;
+                background) elevate ip netns exec "$NETNS_NAME" sudo -u "$RUN_USER_NAME" -- "$@" & return 0 ;;
+                foreground) elevate ip netns exec "$NETNS_NAME" sudo -u "$RUN_USER_NAME" -- "$@" ;;
+            esac
+            ;;
+        runuser)
+            case "$launch_mode" in
+                detached) elevate setsid -f ip netns exec "$NETNS_NAME" runuser -u "$RUN_USER_NAME" -- "$@" ;;
+                background) elevate ip netns exec "$NETNS_NAME" runuser -u "$RUN_USER_NAME" -- "$@" & return 0 ;;
+                foreground) elevate ip netns exec "$NETNS_NAME" runuser -u "$RUN_USER_NAME" -- "$@" ;;
+            esac
+            ;;
+        setpriv)
+            case "$launch_mode" in
+                detached) elevate setsid -f ip netns exec "$NETNS_NAME" setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- "$@" ;;
+                background) elevate ip netns exec "$NETNS_NAME" setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- "$@" & return 0 ;;
+                foreground) elevate ip netns exec "$NETNS_NAME" setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- "$@" ;;
+            esac
+            ;;
+        *)
+            printf '%s\n' 'Falha: executor seguro do Discord nao foi preparado.' >&2
+            return 127
+            ;;
+    esac
+}
+
+# systemd-run tambem inicia como root; a troca de usuario continua depois da
+# entrada no namespace e usa exatamente o mesmo metodo validado acima.
+run_user_systemd_command() {
+    local unit="${1:-}"
+    [ "$#" -gt 0 ] || { printf '%s\n' 'Falha: unidade systemd do Discord ausente.' >&2; return 127; }
+    shift
+    [ "$#" -gt 0 ] || { printf '%s\n' 'Falha: executor systemd do Discord recebeu um comando vazio.' >&2; return 127; }
+    case "$unit" in
+        discord-vpn-[0-9]*) ;;
+        *) printf '%s\n' 'Falha: unidade systemd do Discord invalida.' >&2; return 127 ;;
+    esac
+
+    case "$RUN_USER_METHOD" in
+        sudo)
+            elevate systemd-run --collect --unit="$unit" ip netns exec "$NETNS_NAME" sudo -u "$RUN_USER_NAME" -- env "$@"
+            # A unidade permanece em foreground; o chamador captura sua saida:
+            # sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1
+            ;;
+        runuser)
+            elevate systemd-run --collect --unit="$unit" ip netns exec "$NETNS_NAME" runuser -u "$RUN_USER_NAME" -- env "$@"
+            ;;
+        setpriv)
+            elevate systemd-run --collect --unit="$unit" ip netns exec "$NETNS_NAME" setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- env "$@"
+            ;;
+        *)
+            printf '%s\n' 'Falha: executor seguro do Discord nao foi preparado.' >&2
+            return 127
+            ;;
+    esac
+}
+
+# Usado somente no rollback host-only, depois de o namespace incompleto ter
+# sido removido. Mesmo esse caminho nao pode cair silenciosamente no usuario
+# corrente se o processo estiver elevado.
+run_user_host_command() {
+    local launch_mode="${1:-}"
+    [ "$#" -gt 0 ] || { printf '%s\n' 'Falha: executor host do Discord recebeu um modo vazio.' >&2; return 127; }
+    shift
+    [ "$#" -gt 0 ] || { printf '%s\n' 'Falha: executor host do Discord recebeu um comando vazio.' >&2; return 127; }
+    case "$launch_mode" in
+        detached|background|foreground) ;;
+        *) printf '%s\n' 'Falha: modo de lancamento host invalido.' >&2; return 127 ;;
+    esac
+
+    # O rollback normalmente ja esta rodando como o usuario real. Nesse caso
+    # nao force um novo prompt sudo apenas para voltar a abrir o mesmo cliente;
+    # a disponibilidade do executor ja foi validada por prepare_run_user().
+    if [ "$(id -u)" -eq "$RUN_USER_UID" ]; then
+        case "$launch_mode" in
+            detached) setsid -f "$@" ;;
+            background) "$@" & return 0 ;;
+            foreground) "$@" ;;
+        esac
+        return $?
+    fi
+
+    case "$RUN_USER_METHOD" in
+        sudo)
+            case "$launch_mode" in
+                detached) setsid -f sudo -u "$RUN_USER_NAME" -- "$@" ;;
+                background) sudo -u "$RUN_USER_NAME" -- "$@" & return 0 ;;
+                foreground) sudo -u "$RUN_USER_NAME" -- "$@" ;;
+            esac
+            ;;
+        runuser)
+            case "$launch_mode" in
+                detached) setsid -f runuser -u "$RUN_USER_NAME" -- "$@" ;;
+                background) runuser -u "$RUN_USER_NAME" -- "$@" & return 0 ;;
+                foreground) runuser -u "$RUN_USER_NAME" -- "$@" ;;
+            esac
+            ;;
+        setpriv)
+            case "$launch_mode" in
+                detached) setsid -f setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- "$@" ;;
+                background) setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- "$@" & return 0 ;;
+                foreground) setpriv --reuid "$RUN_USER_UID" --regid "$RUN_USER_GID" --init-groups -- "$@" ;;
+            esac
+            ;;
+        *)
+            printf '%s\n' 'Falha: executor seguro do Discord nao foi preparado.' >&2
+            return 127
+            ;;
+    esac
 }
 
 # A autorizacao acontece antes de qualquer stop_discord. Assim, um prompt ausente,
@@ -2434,7 +2611,8 @@ start_discord() {
     resources="${linha%%\|*}"
 
     local run_user="${SUDO_USER:-$(id -un 2>/dev/null || whoami)}"
-    local run_uid="$(id -u "$run_user" 2>/dev/null || id -u)"
+    prepare_run_user "$run_user" || return 127
+    local run_uid="$RUN_USER_UID"
     local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$run_uid}"
     local discord_log_dir="$INSTALL_DIR/logs"
     local discord_log="$discord_log_dir/discord-vpn-$(date +%Y%m%d-%H%M%S).log"
@@ -2488,9 +2666,9 @@ start_discord() {
         # sem colocar um processo dentro de uma rota que nao foi validada.
         printf '[%s] launch=host-fallback\n' "$(date -Is)" >>"$discord_log"
         if have setsid; then
-            setsid -f env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
+            run_user_host_command detached env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
         else
-            env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null &
+            run_user_host_command background env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
         fi
         printf '  Log do Discord: %s\n' "$discord_log" >&2
         return 0
@@ -2504,11 +2682,9 @@ start_discord() {
         # ambiente Wayland/DBus e ainda mantém o tráfego isolado no WireGuard.
         printf '[%s] launch=flatpak-direct app=%s\n' "$(date -Is)" "$id" >>"$discord_log"
         if have setsid; then
-            elevate setsid -f ip netns exec "$NETNS_NAME" sudo -u "$run_user" env $run_env \
-                sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
+            run_user_netns_command detached env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
         else
-            elevate ip netns exec "$NETNS_NAME" sudo -u "$run_user" env $run_env \
-                sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null &
+            run_user_netns_command background env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
         fi
     elif have systemd-run; then
         # O arquivo captura o stderr/stdout do cliente para diferenciar crash,
@@ -2518,8 +2694,7 @@ start_discord() {
         # background: o trap de fim do script apaga a senha temporaria, e o
         # processo destacado tentava le-la tarde demais, deixando o Discord
         # fechado apesar de o tunel estar ativo.
-        elevate systemd-run --collect --unit="discord-vpn-$(date +%s)" \
-            ip netns exec "$NETNS_NAME" sudo -u "$run_user" env \
+        run_user_systemd_command "discord-vpn-$(date +%s)" \
             "HOME=$_USER_HOME" "USER=$run_user" "LOGNAME=$run_user" "DISPLAY=${DISPLAY:-}" \
             "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}" "XAUTHORITY=${XAUTHORITY:-$_USER_HOME/.Xauthority}" \
             "XDG_RUNTIME_DIR=$runtime_dir" "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$run_uid/bus}" \
@@ -2530,8 +2705,7 @@ start_discord() {
             "ELECTRON_OZONE_PLATFORM_HINT=${ELECTRON_OZONE_PLATFORM_HINT:-auto}" \
             sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1
     else
-        elevate ip netns exec "$NETNS_NAME" sudo -u "$run_user" env $run_env \
-            sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null &
+        run_user_netns_command background env $run_env sh -c 'exec "$@"' sh $target_cmd >>"$discord_log" 2>&1 </dev/null
     fi
     printf '  Log do Discord: %s\n' "$discord_log" >&2
 }
@@ -2850,6 +3024,11 @@ printf '%s\n' "$FOUND" > "$lista"
 # A autorizacao precisa estar concluida antes de fechar qualquer cliente. Isso
 # tambem impede que uma falha no prompt deixe o usuario sem Discord aberto.
 authorize_install_elevation || fail "Nao foi possivel autorizar a ativacao Linux (resultado ${ELEVATION_RESULT}). O Discord nao foi encerrado."
+# Valide o executor do usuario antes de remover configuracoes legadas ou fechar
+# o cliente. `pkexec` autoriza a operacao privilegiada, mas nao substitui a
+# troca segura para o usuario que deve possuir a sessao grafica.
+ACTIVATION_RUN_USER="${SUDO_USER:-$(id -un 2>/dev/null || whoami)}"
+prepare_run_user "$ACTIVATION_RUN_USER" || fail "Nao foi possivel preparar a execucao segura do Discord. O Discord nao foi encerrado."
 # A limpeza legada apaga recursos e configuracoes antigas; so pode acontecer
 # depois de a autorizacao da ativacao ter sido concluida.
 if [ "$CLEANUP_LEGACY" -eq 1 ]; then
@@ -2857,8 +3036,8 @@ if [ "$CLEANUP_LEGACY" -eq 1 ]; then
 fi
 
 # A partir do stop, qualquer falha fatal precisa remover o namespace parcial e
-# tentar devolver o Discord ao usuario. O trap e armado depois da autorizacao e
-# da limpeza legada, para nao tornar nenhuma falha anterior destrutiva ao cliente.
+# tentar devolver o Discord ao usuario. O trap ja existe para limpar segredos,
+# mas so e habilitado para rollback aqui, depois de autorizacao e limpeza legada.
 ACTIVATION_ROLLBACK_TARGET="$(printf '%s\n' "$FOUND" | head -1)"
 if discord_running; then
     ACTIVATION_ROLLBACK_REOPEN=1
