@@ -10,18 +10,15 @@ const source = fs.readFileSync(
 );
 const functions = source.slice(source.indexOf("have() {"), source.indexOf("# Ler campo a campo"));
 
-type PromptMode =
-  | "zenity-accepted"
-  | "zenity-empty"
-  | "zenity-cancel"
-  | "kdialog-accepted";
+type PromptProvider = "zenity" | "kdialog";
+type PromptOutcome = "accepted" | "empty" | "cancelled" | "technical-failure";
+type PromptScenario = Partial<Record<PromptProvider, PromptOutcome>>;
 
 type ElevationOptions = {
   cached?: boolean;
-  prompt?: PromptMode;
+  prompts?: PromptScenario;
   sudoValidation?: "accepted" | "rejected";
   pkexec?: boolean;
-  noPrompt?: boolean;
   readonly?: boolean;
   readonlyElevate?: boolean;
   authReady?: boolean;
@@ -67,19 +64,23 @@ function runElevation(options: ElevationOptions): ElevationResult {
     write("pkexec", 'echo "pkexec:$*" >> "$LOG"; exit 0');
   }
 
-  const promptProvider = options.prompt?.startsWith("kdialog") ? "kdialog" : "zenity";
-  const promptMode = options.prompt?.replace(/^(zenity|kdialog)-/, "") ?? "";
-  if (options.prompt && !options.noPrompt) {
+  for (const provider of ["zenity", "kdialog"] as const) {
+    const outcome = options.prompts?.[provider];
+    if (!outcome) continue;
     const prompt = [
-      `echo "prompt:${promptProvider}" >> "$LOG"`,
-      'case "$PROMPT_MODE" in',
-      '  accepted) printf "%s\\n" "$PROMPT_SECRET"; exit 0 ;;',
-      '  empty) exit 0 ;;',
-      '  cancel) exit 1 ;;',
-      '  *) exit 1 ;;',
-      "esac",
+      `echo "prompt:${provider}" >> "$LOG"`,
+      ...(outcome === "accepted"
+        ? ['printf "%s\\n" "$PROMPT_SECRET"; exit 0']
+        : outcome === "empty"
+          ? ["exit 0"]
+          : outcome === "cancelled"
+            ? ["exit 1"]
+            : [
+                "printf '%s\\n' provider-error-sentinel >&2",
+                "exit 2",
+              ]),
     ].join("\n");
-    write(promptProvider, prompt);
+    write(provider, prompt);
   }
 
   const call = options.readonly ? "elevate_readonly true" : "elevate true";
@@ -104,7 +105,6 @@ function runElevation(options: ElevationOptions): ElevationResult {
       ...process.env,
       PATH: bin,
       LOG: path.join(dir, "log"),
-      PROMPT_MODE: promptMode,
       PROMPT_SECRET: secret,
       TMPDIR: dir,
     },
@@ -130,7 +130,7 @@ describe("elevacao Linux no standalone", () => {
 
   it("registra que o prompt zenity foi solicitado e aceito", () => {
     const result = runElevation({
-      prompt: "zenity-accepted",
+      prompts: { zenity: "accepted" },
       sudoValidation: "accepted",
     });
     expect(result.status).toBe(0);
@@ -150,7 +150,7 @@ describe("elevacao Linux no standalone", () => {
 
   it("aceita o prompt kdialog e nunca registra a senha", () => {
     const result = runElevation({
-      prompt: "kdialog-accepted",
+      prompts: { kdialog: "accepted" },
       sudoValidation: "accepted",
     });
     expect(result.status).toBe(0);
@@ -167,7 +167,7 @@ describe("elevacao Linux no standalone", () => {
   });
 
   it("distingue prompt vazio de prompt cancelado", () => {
-    const empty = runElevation({ prompt: "zenity-empty" });
+    const empty = runElevation({ prompts: { zenity: "empty" }, pkexec: true });
     expect(empty.status).not.toBe(0);
     expect(empty.log).toContain("prompt:zenity");
     expect(empty.stderr).toMatch(
@@ -176,7 +176,7 @@ describe("elevacao Linux no standalone", () => {
     expect(empty.stderr).not.toMatch(/sudo\.validation .*result=accepted/);
     expect(empty.log).not.toContain("sudo_validate:nonempty");
 
-    const cancelled = runElevation({ prompt: "zenity-cancel" });
+    const cancelled = runElevation({ prompts: { zenity: "cancelled" }, pkexec: true });
     expect(cancelled.status).not.toBe(0);
     expect(cancelled.stderr).toMatch(
       /prompt\.finished provider=zenity result=cancelled input=empty code=1/,
@@ -187,7 +187,7 @@ describe("elevacao Linux no standalone", () => {
 
   it("distingue prompt aceito de senha sudo recusada", () => {
     const result = runElevation({
-      prompt: "zenity-accepted",
+      prompts: { zenity: "accepted" },
       sudoValidation: "rejected",
     });
     expect(result.status).not.toBe(0);
@@ -202,8 +202,59 @@ describe("elevacao Linux no standalone", () => {
     );
   });
 
+  it("tenta kdialog quando zenity falha tecnicamente, sem usar pkexec", () => {
+    const result = runElevation({
+      prompts: { zenity: "technical-failure", kdialog: "accepted" },
+      pkexec: true,
+      sudoValidation: "accepted",
+    });
+    expect(result.status).toBe(0);
+    expect(result.log).toContain("prompt:zenity");
+    expect(result.log).toContain("prompt:kdialog");
+    expect(result.log).not.toContain("pkexec:");
+    expect(result.stderr).toMatch(
+      /prompt\.finished provider=zenity result=failed input=not_applicable code=2 stderr=present/,
+    );
+    expect(result.stderr).toMatch(
+      /prompt\.finished provider=kdialog result=not_attempted input=nonempty code=0 stderr=empty/,
+    );
+    expect(result.stderr).toMatch(/sudo\.validation provider=kdialog result=accepted code=0/);
+    expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
+      "provider-error-sentinel",
+    );
+    expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
+      "unit-test-sudo-secret",
+    );
+  });
+
+  it("usa pkexec quando zenity e kdialog falham tecnicamente", () => {
+    const result = runElevation({
+      prompts: { zenity: "technical-failure", kdialog: "technical-failure" },
+      pkexec: true,
+    });
+    expect(result.status).toBe(0);
+    expect(result.log).toContain("prompt:zenity");
+    expect(result.log).toContain("prompt:kdialog");
+    expect(result.log).toContain("pkexec:");
+    expect(result.log).not.toContain("sudo_validate:nonempty");
+    expect(result.stderr).toMatch(
+      /prompt\.finished provider=zenity result=failed input=not_applicable code=2 stderr=present/,
+    );
+    expect(result.stderr).toMatch(
+      /prompt\.finished provider=kdialog result=failed input=not_applicable code=2 stderr=present/,
+    );
+    expect(result.stderr).toMatch(/pkexec\.invoked provider=pkexec result=requested/);
+    expect(result.stderr).toMatch(/pkexec\.result provider=pkexec result=authorized code=0/);
+    expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
+      "provider-error-sentinel",
+    );
+    expect(`${result.log}\n${result.stdout}\n${result.stderr}`).not.toContain(
+      "unit-test-sudo-secret",
+    );
+  });
+
   it("usa pkexec quando sudo nao tem prompt grafico", () => {
-    const result = runElevation({ pkexec: true, noPrompt: true });
+    const result = runElevation({ pkexec: true });
     expect(result.status).toBe(0);
     expect(result.log).toContain("pkexec:");
     expect(result.log).not.toContain("prompt:");
