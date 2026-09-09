@@ -36,6 +36,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   segunda otimização quando a janela é aberta durante o boot. Standalone e plugin legado
   não participam desse fluxo.
 
+## [2.0.6-beta-5] - 2026-09-08
+
+### Correções de ativação Windows e diagnóstico
+
+- Reforça a ativação WireSock por aplicativo: a GUI confirma o processo direto que recebeu
+  o perfil e não transforma uma saída prematura em sucesso nem em fallback para serviço.
+- Registra uma trilha detalhada por operação e tentativa, incluindo fase, duração, PID,
+  códigos do SCM, fingerprint do perfil e saída limitada dos processos, com redação de
+  segredos para facilitar a investigação de novas issues.
+- Mantém o reparo autenticado do helper Proton e os assets de runtime da mesma release,
+  permitindo recuperar instalações incompletas sem aceitar executáveis não verificados.
+
 ## [2.0.6-beta-4] - 2026-09-08
 
 - Corrige o caso da issue #256 no Windows em que o serviço WireSock aparecia como ativo, mas o filtro não capturava o Discord e a rota continuava brasileira. A GUI agora prioriza o modo oficial por aplicativo (`wiresock-client run`), confirma o processo que leu o perfil e mantém o serviço global apenas como fallback.
