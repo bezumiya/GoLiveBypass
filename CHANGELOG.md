@@ -6,6 +6,25 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Regressão do updater portable e caminhos Windows
+
+- Assets auxiliares Proton deixam o prefixo `GoLiveBypass-`: versões antigas que selecionam o primeiro `GoLiveBypass-*.exe` não podem confundir o confgen com a GUI nas próximas releases. O manifesto continua informando o nome exato do helper.
+- O updater Windows valida nome, origem/tag, tamanho, SHA-256 e estrutura PE GUI/NSIS antes de preparar, restaurar ou aplicar um update. Pendências antigas sem identidade completa são descartadas em vez de executadas.
+- Preserva o `.old` até a nova GUI iniciar e restaura a ordenação numérica de `beta-10` acima de `beta-9`.
+- Scripts de ativação WireSock preservam caminhos Unicode no Windows PowerShell 5.1 usando BOM; a captura não perde letras `s` e falhas SCM preservam seus códigos sem serem mascaradas pela tentativa direta incompatível.
+- A confirmação do modo direto não espera o processo persistente encerrar; preserva o handle para obter códigos de saída reais e limita o fallback a incompatibilidade explícita de `run`, não de outra opção/comando.
+- Estas mudanças de execução são específicas da GUI Windows. Linux continua com electron-updater; o plugin não recebe automaticamente o updater portable nem os scripts de ativação da GUI. Nomes novos de assets são resolvidos pelo manifesto nas duas plataformas.
+
+## [2.0.6-beta-6] - 2026-09-09
+
+### Correção do updater portable e ativação Windows
+
+- Impede que o updater confunda a GUI com o `proton-confgen` de aproximadamente 14 MB; a identidade do executável agora é validada por nome, origem, tamanho, SHA-256 e estrutura PE/NSIS antes do download e da aplicação.
+- Preserva a versão anterior até a nova GUI iniciar e corrige a ordenação numérica das betas, incluindo a transição de `beta-9` para `beta-10`.
+- Corrige a ativação WireSock no Windows em caminhos Unicode e evita fallback indevido para o serviço global quando o modo oficial por aplicativo falha por outro motivo.
+- Adiciona regressões de updater, empacotamento, WireSock e contratos Windows ao workflow antes da publicação.
+
+
 ### Correção da ativação Linux e diagnóstico de elevação
 
 - Corrige o caso da issue #258 em que o Discord era encerrado antes de o script conseguir obter ou validar a senha do `sudo`; a autorização e o executor do usuário agora são validados antes de qualquer encerramento ou limpeza legada.

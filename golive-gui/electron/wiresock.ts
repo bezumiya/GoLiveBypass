@@ -101,11 +101,15 @@ export type WireSockDirectResult =
  */
 export function classifyWireSockDirectResult(detail: string): WireSockDirectResult {
   const normalized = detalheErro(detail);
-  const running = normalized.match(/DIRECT_RUNNING:\s*pid=(\d+)/i);
+  // A successful exit is still a stopped tunnel, regardless of captured text.
+  if (/^(?:GOLIVE_WIRESOCK_DIRECT_ERROR:\s*)?DIRECT_EXITED:\s*codigo=0\b/i.test(normalized)) {
+    return { kind: "failed", code: "WIRESOCK_DIRECT_EXITED_0", detail: normalized };
+  }
+  const running = normalized.match(/^DIRECT_RUNNING:\s*pid=(\d+)\s*$/i);
   if (running) {
     return { kind: "running", pid: Number(running[1]), detail: normalized };
   }
-  if (/DIRECT_UNSUPPORTED|RUN_NOT_SUPPORTED|UNKNOWN_COMMAND|unknown\s+(?:command|option)|unrecognized\s+(?:command|option)|(?:run|application mode).{0,24}(?:not supported|unsupported)|comando\s+desconhecido|op[cç][aã]o\s+n[aã]o\s+reconhecida|par[aâ]metro\s+n[aã]o\s+reconhecido|not\s+recognized/i.test(normalized)) {
+  if (/\b(?:DIRECT_UNSUPPORTED|RUN_NOT_SUPPORTED)\b|(?:unknown|unrecognized)\s+command\s*[:=]?\s*['"]?run\b|\brun['"]?\s+(?:is\s+)?(?:not supported|unsupported)|comando\s+desconhecido\s*[:=]?\s*['"]?run\b/i.test(normalized)) {
     return { kind: "unsupported", code: "WIRESOCK_DIRECT_UNSUPPORTED", detail: normalized };
   }
   if (/DIRECT_EXITED:\s*codigo=0\b/i.test(normalized)) {
@@ -166,7 +170,7 @@ export function classifyWireSockActivationFailure(error: unknown): WireSockActiv
     return {
       kind: "service",
       code: "WIRESOCK_SERVICE",
-      message: "O serviço WireSock não pôde ser instalado ou iniciado. Reinstale o GoLiveBypass e tente novamente.",
+      message: "O serviço WireSock não pôde ser instalado ou iniciado. Consulte os logs de diagnóstico para identificar a falha do Windows.",
     };
   }
   return {
@@ -753,7 +757,7 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
     const directStartedAt = Date.now();
     let directError: unknown = null;
     try {
-      execFileSync("powershell.exe", elevatedPowerShellFileArgs(directScriptPath), {
+      execFileSync("powershell.exe", elevatedPowerShellFileArgs(directScriptPath, directResultPath), {
         windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000,
       });
     } catch (error) {
@@ -860,7 +864,9 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
         await esperarProcessoWireSock(servicePid, 6, 250),
       );
       if (!serviceStarted) {
-        const failure = classifyWireSockActivationFailure(directFailure + " " + serviceDetail);
+        // The direct attempt was explicitly unsupported, not the cause of the
+        // service failure. Keep it in the log without masking the SCM result.
+        const failure = classifyWireSockActivationFailure(serviceDetail || "START_FAILED: serviço não confirmou o processo próprio");
         logger.logEvent("error", "wiresock", "activation.failed", {
           operation_id: operationId,
           attempt_id: serviceAttemptId,

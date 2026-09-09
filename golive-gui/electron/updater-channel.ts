@@ -16,12 +16,15 @@ export interface ReleaseCandidata {
   url: string | null; // browser_download_url do exe (null = sem exe anexado)
   digest: string | null; // sha256 que a propria API do GitHub devolve no asset
   prerelease: boolean;
+  assetName?: string;
+  size?: number;
 }
 
 export interface AssetWindows {
   name: string;
   browser_download_url?: string;
   digest?: string;
+  size?: number;
 }
 
 // O portable tem o nome exato da tag sem o prefixo "v". Não aceite apenas o
@@ -54,7 +57,7 @@ function partir(versao: string): { base: number[]; pre: string[] | null } {
   while (base.length < 3) base.push(0);
   return {
     base: base.slice(0, 3),
-    pre: partePre === null ? null : partePre.split("."),
+    pre: partePre === null ? null : partePre.replace(/^beta-(\d+)$/, "beta.$1").split("."),
   };
 }
 

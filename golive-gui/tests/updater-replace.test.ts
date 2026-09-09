@@ -73,7 +73,6 @@ describe("updater-replace", () => {
     expect(script).toContain('move /Y "%~1" "%~1.old" >NUL 2>&1');
     expect(script).toContain('move /Y "%~2" "%~1" >NUL 2>&1');
     expect(script).toContain('start "" "%~1"');
-    expect(script).toContain('del "%~1.old" >NUL 2>&1');
     expect(script).toContain('del "%~2" >NUL 2>&1');
     expect(script).toContain('del "%~3" >NUL 2>&1');
     // Depois de lancar, o bat apaga a si mesmo.
@@ -84,6 +83,20 @@ describe("updater-replace", () => {
     // Esgotou as tentativas e restaura/lanca a versao antiga.
     expect(script).toContain("goto fail");
     expect(script).toContain(":installed");
+  });
+
+  it("preserva .old no caminho de sucesso ate a limpeza no boot do novo app", () => {
+    const script = buildWindowsUpdateScript();
+    const installed = script.split("\r\n:installed\r\n")[1]?.split("\r\n:fail\r\n")[0];
+    const cleanup = script.split("\r\n:cleanup\r\n")[1];
+    expect(installed).toBeDefined();
+    expect(installed).toContain('start "" "%~1"');
+    expect(installed).toContain("goto cleanup");
+    expect(installed).not.toContain(".old");
+    expect(cleanup).toBeDefined();
+    expect(cleanup).not.toContain(".old");
+    // A recuperacao de uma troca malsucedida continua presente.
+    expect(script).toContain('if not exist "%~1" if exist "%~1.old" move /Y "%~1.old" "%~1" >NUL 2>&1');
   });
 
   it("vbs do helper comeca com BOM UTF-16LE e cita os quatro caminhos", () => {

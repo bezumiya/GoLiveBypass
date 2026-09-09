@@ -43,6 +43,17 @@ describe("compararVersoes (semver minimo do projeto)", () => {
     expect(compararVersoes("1.1.12-beta.10", "1.1.12-beta.9")).toBeGreaterThan(0); // numerico, nao lexicografico
   });
 
+  it("ordena beta-N numericamente e preserva equivalencia com beta.N", () => {
+    expect(compararVersoes("2.0.6-beta-10", "2.0.6-beta-9")).toBeGreaterThan(0);
+    expect(compararVersoes("2.0.6-beta-9", "2.0.6-beta-10")).toBeLessThan(0);
+    expect(compararVersoes("2.0.6-beta-10", "2.0.6-beta.10")).toBe(0);
+    expect(compararVersoes("2.0.6", "2.0.6-beta-10")).toBeGreaterThan(0);
+    const beta10 = release({ tag: "v2.0.6-beta-10", prerelease: true });
+    expect(escolherRelease([beta10], "2.0.6-beta-9", "beta")?.tag).toBe(beta10.tag);
+    expect(escolherRelease([release({ tag: "v2.0.6-beta-9", prerelease: true })], "2.0.6-beta-10", "beta")).toBeNull();
+    expect(escolherRelease([beta10], "2.0.6-beta-9", "stable")).toBeNull();
+  });
+
   it("prerelease de triplo maior ganha de stable de triplo menor", () => {
     expect(compararVersoes("1.1.13-beta.1", "1.1.12")).toBeGreaterThan(0);
   });

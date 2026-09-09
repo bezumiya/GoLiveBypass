@@ -47,6 +47,9 @@ jobs:
           cache-dependency-path: tools/proton-confgen/go.sum
       - run: npm ci
         working-directory: golive-gui
+      - name: Regressões do updater portable antes de publicar
+        run: npm test -- tests/updater-channel.test.ts tests/updater-identity.test.ts tests/updater-replace.test.ts tests/proton-packaging.test.ts
+        working-directory: golive-gui
       # --publish always: gera o GoLiveBypass.exe + latest.yml e faz upload na release
       # (o GH_TOKEN do workflow vira o GH_TOKEN que o electron-builder usa).
       # No canal beta a release nasce como draft; beta-marcar aplica a classificação
@@ -121,13 +124,13 @@ jobs:
           test "$(jq -r '.version' "$MANIFEST")" = "$VERSION"
           mkdir -p runtime
           cp tools/proton-confgen/build/proton-confgen \
-            "runtime/GoLiveBypass-${VERSION}-proton-confgen-linux-x64"
+            "runtime/proton-confgen-${VERSION}-linux-x64"
           cp tools/proton-confgen/build/proton-confgen.exe \
-            "runtime/GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe"
-          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64 \
-            > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-linux-x64.sha256
-          sha256sum runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe \
-            > runtime/GoLiveBypass-"${VERSION}"-proton-confgen-win-x64.exe.sha256
+            "runtime/proton-confgen-${VERSION}-win-x64.exe"
+          sha256sum runtime/proton-confgen-"${VERSION}"-linux-x64 \
+            > runtime/proton-confgen-"${VERSION}"-linux-x64.sha256
+          sha256sum runtime/proton-confgen-"${VERSION}"-win-x64.exe \
+            > runtime/proton-confgen-"${VERSION}"-win-x64.exe.sha256
           cp "$MANIFEST" runtime/proton-confgen-manifest.json
       - name: Comparar hashes do manifesto com os assets
         env:
@@ -138,8 +141,8 @@ jobs:
           MANIFEST="tools/proton-confgen/build/proton-confgen-manifest.json"
           test "$(jq -r '.version' "$MANIFEST")" = "$VERSION"
           for pair in \
-            "linux-x64|GoLiveBypass-${VERSION}-proton-confgen-linux-x64" \
-            "win32-x64|GoLiveBypass-${VERSION}-proton-confgen-win-x64.exe"; do
+            "linux-x64|proton-confgen-${VERSION}-linux-x64" \
+            "win32-x64|proton-confgen-${VERSION}-win-x64.exe"; do
             key="${pair%%|*}"
             asset="${pair#*|}"
             expected="$(jq -r --arg key "$key" '.assets[$key].sha256' "$MANIFEST")"
@@ -153,10 +156,10 @@ jobs:
           tag_name: ${{ inputs.tag }}
           draft: ${{ inputs.rascunho || inputs.canal == 'beta' }}
           files: |
-            runtime/GoLiveBypass-*-proton-confgen-linux-x64
-            runtime/GoLiveBypass-*-proton-confgen-linux-x64.sha256
-            runtime/GoLiveBypass-*-proton-confgen-win-x64.exe
-            runtime/GoLiveBypass-*-proton-confgen-win-x64.exe.sha256
+            runtime/proton-confgen-*-linux-x64
+            runtime/proton-confgen-*-linux-x64.sha256
+            runtime/proton-confgen-*-win-x64.exe
+            runtime/proton-confgen-*-win-x64.exe.sha256
             runtime/proton-confgen-manifest.json
           fail_on_unmatched_files: true
 

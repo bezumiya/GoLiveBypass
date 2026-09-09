@@ -29,8 +29,10 @@ for (const target of targets) {
 }
 
 const assetNames = {
-  'linux-x64': `GoLiveBypass-${version}-proton-confgen-linux-x64`,
-  'win32-x64': `GoLiveBypass-${version}-proton-confgen-win-x64.exe`,
+  // Older portable updaters accept GoLiveBypass-*.exe, including helpers.
+  // Keep auxiliary assets outside that namespace so those clients can migrate.
+  'linux-x64': `proton-confgen-${version}-linux-x64`,
+  'win32-x64': `proton-confgen-${version}-win-x64.exe`,
 };
 const assets = {};
 for (const target of targets) {

@@ -6,6 +6,35 @@ import path from "path";
 import { classifyWireSockActivationFailure, classifyWireSockDirectResult, findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, mayUseServiceCompatibility, parseWireSockCliExternalAddress, parseWireSockCliStatus, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
 
 describe("WireSock no Windows", () => {
+  it("preserva caminhos Unicode nos arquivos usados pelo Windows PowerShell 5.1", () => {
+    const executable = "C:\\Usuários\\João\\WireSock\\client.exe";
+    const config = "C:\\Usuários\\João\\perfil.conf";
+    const result = "C:\\Usuários\\João\\resultado.txt";
+    for (const script of [wireSockServiceScript(executable, config, result), wireSockDirectScript(executable, config, result)]) {
+      const bytes = Buffer.from(script, "utf8");
+      expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+      const decoded = new TextDecoder("utf-8").decode(bytes);
+      expect(decoded).toContain(executable);
+      expect(decoded).toContain(config);
+      expect(decoded).toContain(result);
+    }
+  });
+
+  it("preserva whitespace e palavras do diagnóstico capturado", () => {
+    const script = wireSockDirectScript("C:\\ws.exe", "C:\\wg.conf", "C:\\result.txt");
+    const pattern = script.match(/\[regex\]::Replace\(\$text, '([^']+)'/)?.[1];
+    expect(pattern).toBe("\\s+");
+    expect("unknown command\r\nservice\tunsupported".replace(new RegExp(pattern!, "g"), " ")).toBe("unknown command service unsupported");
+  });
+
+  it("classifica a falha do serviço sem recomendar reinstalação sem evidência", () => {
+    expect(classifyWireSockActivationFailure("START_FAILED: Win32ExitCode=1060")).toMatchObject({ code: "WIRESOCK_SERVICE" });
+    expect(classifyWireSockActivationFailure("START_FAILED: Win32ExitCode=1060").message).not.toMatch(/reinstale/i);
+    const src = fs.readFileSync(path.resolve(process.cwd(), "electron/wiresock.ts"), "utf8");
+    expect(src).not.toContain('classifyWireSockActivationFailure(directFailure + " " + serviceDetail)');
+    expect(src).toContain('classifyWireSockActivationFailure(serviceDetail ||');
+  });
+
   it("classifica cancelamento e reboot do instalador sem permitir retry silencioso", () => {
     expect(wireSockInstallerExitKind({ code: 1223 })).toBe("cancel");
     expect(wireSockInstallerExitKind({ code: 3010 })).toBe("reboot");
@@ -71,6 +100,7 @@ describe("WireSock no Windows", () => {
     expect(script).toContain("wiresock-pro-client-service");
     expect(script).toContain("$name = [string]$serviceInfo.Name");
     expect(script).toContain("pid=$($running.ProcessId)");
+    expect(script).toContain("ServiceSpecificExitCode=$($info.ServiceSpecificExitCode) erro=$startMessage");
     expect(script).toContain("[IO.File]::WriteAllText");
   });
 
@@ -89,9 +119,16 @@ describe("WireSock no Windows", () => {
     expect(script).toContain("-RedirectStandardError");
     expect(script).toContain("Read-Captured");
     expect(script).toContain("DIRECT_EXITED: codigo=");
+    expect(script).toContain("$processHandle = $child.Handle");
+    expect(script.indexOf("$processHandle = $child.Handle")).toBeLessThan(script.indexOf("$child.Refresh()"));
+    expect(script).toContain("$child.WaitForExit()");
   });
 
   it("aceita somente o processo próprio e reserva o serviço para incompatibilidade explícita", () => {
+    const exited = classifyWireSockDirectResult("GOLIVE_WIRESOCK_DIRECT_ERROR: DIRECT_EXITED: codigo=0 stdout=unknown command run DIRECT_RUNNING: pid=1234");
+    expect(exited).toMatchObject({ kind: "failed", code: "WIRESOCK_DIRECT_EXITED_0" });
+    expect(mayUseServiceCompatibility(exited)).toBe(false);
+    expect(classifyWireSockDirectResult("DIRECT_EXITED: codigo=7 stdout=DIRECT_RUNNING: pid=1234").kind).toBe("failed");
     expect(classifyWireSockDirectResult("DIRECT_RUNNING: pid=1234")).toMatchObject({ kind: "running", pid: 1234 });
     expect(classifyWireSockDirectResult("DIRECT_EXITED: codigo=0")).toMatchObject({
       kind: "failed",
@@ -101,6 +138,9 @@ describe("WireSock no Windows", () => {
     expect(unsupported).toMatchObject({ kind: "unsupported", code: "WIRESOCK_DIRECT_UNSUPPORTED" });
     expect(mayUseServiceCompatibility(unsupported)).toBe(true);
     expect(mayUseServiceCompatibility(classifyWireSockDirectResult("DIRECT_EXITED: codigo=1"))).toBe(false);
+    for (const detail of ["unknown command service", "unknown option -network-lock", "not recognized", "run -config option unsupported"]) {
+      expect(mayUseServiceCompatibility(classifyWireSockDirectResult(`DIRECT_EXITED: codigo=7 stdout=${detail}`))).toBe(false);
+    }
   });
 
   it("prioriza o modo direto oficial e não usa fallback genérico do serviço", () => {
@@ -129,6 +169,16 @@ describe("WireSock no Windows", () => {
     expect(decoded).toContain("'-ExecutionPolicy','Bypass','-File'");
     expect(decoded).toContain("Start-Process powershell.exe -Verb RunAs");
     expect(decoded).not.toContain("GOLIVE_WIRESOCK_ERROR");
+  });
+
+  it("modo direto espera resultado proprio sem aguardar o worker de logs terminar", () => {
+    const args = elevatedPowerShellFileArgs("C:\\teste\\direct.ps1", "C:\\teste\\result.txt");
+    const decoded = Buffer.from(args[args.length - 1], "base64").toString("utf16le");
+    expect(decoded).toContain("Start-Process @launch");
+    expect(decoded).toContain("Test-Path -LiteralPath 'C:\\teste\\result.txt'");
+    expect(decoded).toContain("DIRECT_WORKER_TIMEOUT");
+    expect(decoded).not.toContain("-Wait");
+    expect(decoded).toContain("exit [int]$Matches[1]");
   });
 
   it("inclui o diretorio app do Discord para cobrir todos os subprocessos", () => {

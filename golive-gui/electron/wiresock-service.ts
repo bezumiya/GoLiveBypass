@@ -7,7 +7,9 @@ export function wireSockServiceScript(executable: string, config: string, result
   const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
   const command = `"${executable}" service -config "${config}" -log-level info -network-lock disabled`;
   const result = resultPath ? literal(resultPath) : "$null";
-  return `$ErrorActionPreference = 'Stop'
+  // Windows PowerShell 5.1 reads -File as ANSI without a BOM. Preserve Unicode
+  // paths (including the result file) when this string is written as UTF-8.
+  return `\uFEFF$ErrorActionPreference = 'Stop'
 $resultPath = ${result}
 function Complete-WireSock([int]$code, [string]$detail) {
   if ($resultPath) {
@@ -75,7 +77,9 @@ try {
       $info = Get-WireSockInfo
       $lastStartError = "name=$name estado=$($info.State) pid=$($info.ProcessId) Win32ExitCode=$($info.ExitCode) ServiceSpecificExitCode=$($info.ServiceSpecificExitCode)"
     } catch {
-      $lastStartError = "name=$name erro=$($_.Exception.Message)"
+      $startMessage = $_.Exception.Message
+      $info = Get-WireSockInfo
+      $lastStartError = "name=$name estado=$($info.State) pid=$($info.ProcessId) Win32ExitCode=$($info.ExitCode) ServiceSpecificExitCode=$($info.ServiceSpecificExitCode) erro=$startMessage"
     }
     if ($attempt -lt 2) { Start-Sleep -Seconds 2; Stop-WireSockService $name }
   }
@@ -97,19 +101,22 @@ export function wireSockDirectScript(executable: string, config: string, resultP
     if (!value || /["\r\n\0]/.test(value)) throw new Error("Caminho WireSock inválido");
   }
   const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
-  return `$ErrorActionPreference = 'Stop'
+  return `\uFEFF$ErrorActionPreference = 'Stop'
 $resultPath = ${literal(resultPath)}
 $stdoutPath = ${literal(resultPath + '.stdout')}
 $stderrPath = ${literal(resultPath + '.stderr')}
 function Complete-WireSock([int]$code, [string]$detail) {
-  try { [IO.File]::WriteAllText($resultPath, "$code\n$detail", [Text.UTF8Encoding]::new($false)) } catch {}
+  try {
+    [IO.File]::WriteAllText(($resultPath + '.tmp'), "$code\n$detail", [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath ($resultPath + '.tmp') -Destination $resultPath -Force
+  } catch {}
   exit $code
 }
 function Read-Captured([string]$path) {
   try {
     if (-not (Test-Path -LiteralPath $path)) { return '' }
     $text = [IO.File]::ReadAllText($path)
-    $text = [regex]::Replace($text, '\s+', ' ').Trim()
+    $text = [regex]::Replace($text, '\\s+', ' ').Trim()
     if ($text.Length -gt 1200) { return $text.Substring(0, 1200) + '…' }
     return $text
   } catch { return '' }
@@ -136,9 +143,13 @@ try {
   Remove-Item -LiteralPath $resultPath, $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
   $arguments = @('run', '-config', ('"' + ${literal(config)} + '"'), '-log-level', 'info', '-network-lock', 'disabled')
   $child = Start-Process -FilePath ${literal(executable)} -ArgumentList $arguments -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru -ErrorAction Stop
+  # Cache the native handle before Refresh: Windows PowerShell otherwise loses
+  # ExitCode for short-lived processes returned by Start-Process -PassThru.
+  $processHandle = $child.Handle
   Start-Sleep -Seconds 3
   $child.Refresh()
   if ($child.HasExited) {
+    $child.WaitForExit()
     $stdout = Read-Captured $stdoutPath
     $stderr = Read-Captured $stderrPath
     throw "DIRECT_EXITED: codigo=$($child.ExitCode) stdout=$stdout stderr=$stderr"
@@ -160,9 +171,32 @@ try {
  * line limit; the WireSock service script is intentionally detailed enough
  * to exceed it when the script is nested in the elevation wrapper.
  */
-export function elevatedPowerShellFileArgs(scriptPath: string): string[] {
-  if (!scriptPath || /["\r\n\0]/.test(scriptPath)) throw new Error("Caminho do script PowerShell inválido");
+export function elevatedPowerShellFileArgs(scriptPath: string, resultPath?: string): string[] {
+  if (!scriptPath || /["\r\n\0]/.test(scriptPath) || (resultPath !== undefined && (!resultPath || /["\r\n\0]/.test(resultPath)))) throw new Error("Caminho do script PowerShell inválido");
   const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  // A worker redirecting a long-running child's output can stay alive with it.
+  // For direct mode, wait for the explicit result, not for that worker to exit.
+  if (resultPath) {
+    const wrapper = `$ErrorActionPreference='Stop'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$launch = @{FilePath='powershell.exe'; WindowStyle='Hidden'; PassThru=$true; ArgumentList=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + ${literal(scriptPath)} + '"'))}
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $launch.Verb = 'RunAs' }
+$worker = Start-Process @launch
+$deadline = (Get-Date).AddSeconds(100)
+do {
+  if (Test-Path -LiteralPath ${literal(resultPath)}) {
+    $result = [IO.File]::ReadAllText(${literal(resultPath)})
+    if ($result -match '^(0|1)\\r?\\n.+') { exit [int]$Matches[1] }
+  }
+  $worker.Refresh()
+  if ($worker.HasExited) { throw 'DIRECT_WORKER_EXITED: worker encerrou sem resultado' }
+  Start-Sleep -Milliseconds 100
+} while ((Get-Date) -lt $deadline)
+Stop-Process -Id $worker.Id -Force -ErrorAction SilentlyContinue
+throw 'DIRECT_WORKER_TIMEOUT: sem resultado de ativacao'`;
+    return ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(wrapper, "utf16le").toString("base64")];
+  }
   const wrapper = `$ErrorActionPreference='Stop'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)

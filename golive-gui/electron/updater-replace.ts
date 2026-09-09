@@ -86,8 +86,7 @@ export function buildWindowsUpdateScript(): string {
     "goto retry",
     "",
     ":installed",
-    // O novo processo faz a limpeza final do .old no boot; aqui tentamos adiantar.
-    `del "%~1.old" >NUL 2>&1`,
+    // Preserva o backup ate o novo processo abrir e executar cleanupOldExe no boot.
     `ping 127.0.0.1 -n 2 >NUL`,
     `start "" "%~1"`,
     "goto cleanup",
