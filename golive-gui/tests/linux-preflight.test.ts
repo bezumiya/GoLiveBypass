@@ -237,9 +237,9 @@ describe("preflight Linux", () => {
     expect(source).toMatch(/^rollback_activation\(\) \{/m);
 
     const rollbackStart = source.indexOf("rollback_activation() {");
-    const rollbackBoundary = source.indexOf("\n}\n\ntrap cleanup_sudo_pass EXIT INT TERM", rollbackStart);
-    const rollbackFunction = rollbackStart >= 0 && rollbackBoundary > rollbackStart
-      ? source.slice(rollbackStart, rollbackBoundary + 2)
+    const rollbackTrap = source.indexOf("\ntrap cleanup_sudo_pass", rollbackStart);
+    const rollbackFunction = rollbackStart >= 0 && rollbackTrap > rollbackStart
+      ? source.slice(rollbackStart, rollbackTrap).trim()
       : null;
     const startIndex = source.indexOf('start_discord "$(printf');
     const completionEnd = source.indexOf("\nprintf '\\n  %sDiscord aberto", startIndex);
