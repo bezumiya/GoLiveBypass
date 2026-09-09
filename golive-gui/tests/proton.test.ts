@@ -18,6 +18,14 @@ import {
 } from "../electron/proton";
 
 describe("ProtonVPN Integration & Sidecar", () => {
+  it("registra as fases do helper sem expor sessão ou credenciais", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "electron/proton.ts"), "utf8");
+    expect(source).toContain("ensureProtonConfgen");
+    expect(source).toContain("logEvent");
+    expect(source).toContain("safeConfgenArgs");
+    expect(source).not.toContain("logger.info('proton', 'sessão");
+  });
+
   it("gera perfis Proton com IPv6 para impedir saida direta fora do AllowedIPs", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "electron/proton.ts"), "utf8");
     const generation = source.slice(source.indexOf("export async function generateOptimalProtonConfig"));

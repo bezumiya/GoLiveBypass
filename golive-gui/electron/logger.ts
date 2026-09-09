@@ -12,8 +12,10 @@
 
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 
 export type Nivel = "info" | "warn" | "error";
+export type LogContext = Record<string, string | number | boolean | null | undefined>;
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // rotacao igual ao standalone: corta pra metade
 const RING_MAX = 1000; // linhas guardadas em memoria para o report
@@ -87,6 +89,40 @@ export function warn(cat: string, msg: string, data?: Record<string, unknown>) {
 }
 export function error(cat: string, msg: string, data?: Record<string, unknown>) {
   escrever("error", cat, msg, data);
+}
+
+export function createOperationId(prefix: string): string {
+  const safePrefix = prefix.trim().replace(/[^A-Za-z0-9_-]+/g, "-") || "operation";
+  return safePrefix + "-" + randomUUID();
+}
+
+export function clipLogText(value: unknown, max = 2000): string {
+  const limit = Math.max(1, Math.floor(max));
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > limit ? text.slice(0, limit) + "…" : text;
+}
+
+const SENSITIVE_LOG_KEY = /password|senha|token|secret|private(?:key|_key)?|session|credential|auth/i;
+
+export function redactLogValue(value: unknown, key = ""): string {
+  if (SENSITIVE_LOG_KEY.test(key)) return "[redacted]";
+  return clipLogText(value, 4000)
+    .replace(/((?:password|senha|token|secret|privatekey|private_key|session|credential|auth)[=:]\s*)[^\s,;]+/gi, "$1[redacted]");
+}
+
+export function logEvent(
+  nivel: Nivel,
+  cat: string,
+  event: string,
+  context: LogContext,
+  data?: LogContext,
+): void {
+  const merged = Object.fromEntries(
+    Object.entries({ ...context, ...data })
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, redactLogValue(value, key)]),
+  );
+  escrever(nivel, cat, event, merged);
 }
 
 export function initLogger(dir: string) {

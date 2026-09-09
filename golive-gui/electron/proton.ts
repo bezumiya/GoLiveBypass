@@ -138,6 +138,15 @@ function abortError(): Error {
   return error;
 }
 
+function safeConfgenArgs(args: string[]): string {
+  return args.map((arg, index) => {
+    const previous = args[index - 1] || '';
+    if (/^-?(?:password|2fa|hv-token|session-file)$/i.test(previous)) return '[redacted]';
+    if (/^-?username$/i.test(previous)) return '[account]';
+    return logger.clipLogText(arg, 160);
+  }).join(' ');
+}
+
 function validProgress(value: any): ProtonOptimizationProgress | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const phases = ['ping', 'preparing', 'testing', 'finalizing', 'completed', 'failed', 'cancelled'];
@@ -180,6 +189,17 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
     }
 
     const timeout = options.timeoutMs ?? 25000;
+    const operationId = logger.createOperationId('proton-confgen');
+    const startedAt = Date.now();
+    const logContext = {
+      operation_id: operationId,
+      phase: 'confgen',
+      executable: path.basename(exe),
+      timeout_ms: timeout,
+    };
+    logger.logEvent('info', 'proton', 'confgen.start', logContext, {
+      args: safeConfgenArgs(options.args),
+    });
     const child = spawn(exe, options.args, {
       windowsHide: true,
       env: { ...process.env },
@@ -204,7 +224,17 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
         try { const progress = validProgress(JSON.parse(match[1])); if (progress && !terminationError) options.onProgress?.(progress); } catch {}
       }
     };
-    const finishReject = (error: Error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } };
+    const finishReject = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      logger.logEvent('error', 'proton', 'confgen.failed', logContext, {
+        durationMs: Date.now() - startedAt,
+        error: error.message,
+        aborted,
+      });
+      reject(error);
+    };
     const killAndWait = (error: Error) => {
       if (settled || terminationError) return;
       terminationError = error;
@@ -247,6 +277,14 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
       if (terminationError || aborted) { finishReject(terminationError || abortError()); return; }
       const parsedJson = parseConfgenJson(stdout);
       settled = true;
+      logger.logEvent(code === 0 ? 'info' : 'warn', 'proton', 'confgen.complete', logContext, {
+        durationMs: Date.now() - startedAt,
+        exitCode: code,
+        stdoutBytes: Buffer.byteLength(stdout, 'utf8'),
+        stderrBytes: Buffer.byteLength(stderr, 'utf8'),
+        json: Boolean(parsedJson),
+        stderrTail: logger.clipLogText(stderr, 1200),
+      });
       resolve({ code, stdout, stderr, json: parsedJson });
     });
     if (aborted) abort();

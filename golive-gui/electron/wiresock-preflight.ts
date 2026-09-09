@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { execFile } from "child_process";
+import * as logger from "./logger";
 
 export const MIN_WIRESOCK_SDK = Object.freeze({ major: 3, minor: 4, patch: 8, build: 1 });
 export type WireSockVersion = { major: number; minor: number; patch: number; build: number };
@@ -40,6 +41,13 @@ export function selectSupportedWireSock(candidates: WireSockCandidate[]): WireSo
  */
 export async function enumerateWireSockCandidatesAsync(roots: string[]): Promise<WireSockCandidate[]> {
   if (process.platform !== "win32") return [];
+  const operationId = logger.createOperationId("wiresock-preflight");
+  logger.logEvent("info", "wiresock", "preflight.start", {
+    operation_id: operationId,
+    phase: "preflight",
+  }, {
+    roots: roots.length,
+  });
   const pairs: Array<{ executable: string; booster: string }> = [];
   const seen = new Set<string>();
   const addPair = (executable: string, booster: string) => {
@@ -64,22 +72,55 @@ export async function enumerateWireSockCandidatesAsync(roots: string[]): Promise
       }
     }
   }
-  if (!pairs.length) return [];
+  if (!pairs.length) {
+    logger.logEvent("warn", "wiresock", "diagnostic.source_unavailable", {
+      operation_id: operationId,
+      phase: "preflight",
+      source: "filesystem",
+    }, {
+      reason: "nenhum par wiresock-client.exe/wgbooster.dll encontrado",
+    });
+    return [];
+  }
   const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
   const exes = pairs.map((pair) => quote(pair.executable)).join(",");
   const boosters = pairs.map((pair) => quote(pair.booster)).join(",");
   const script = `$e=@(${exes});$b=@(${boosters});$o=@();for($i=0;$i -lt $e.Count;$i++){ $ev=(Get-Item -LiteralPath $e[$i]).VersionInfo.FileVersion; $bv=(Get-Item -LiteralPath $b[$i]).VersionInfo.FileVersion; $o += [PSCustomObject]@{e=$e[$i];b=$b[$i];ev=$ev;bv=$bv} }; ConvertTo-Json -Compress $o`;
-  const output = await new Promise<string>((resolve, reject) => execFile(
-    "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true, timeout: 5000 },
-    (error, stdout) => error ? reject(error) : resolve(stdout),
-  ));
+  let output: string;
+  try {
+    output = await new Promise<string>((resolve, reject) => execFile(
+      "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true, timeout: 5000 },
+      (error, stdout) => error ? reject(error) : resolve(stdout),
+    ));
+  } catch (error) {
+    logger.logEvent("error", "wiresock", "preflight.failed", {
+      operation_id: operationId,
+      phase: "preflight",
+      source: "powershell",
+    }, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
   const raw = JSON.parse(output) as Array<{ e?: string; b?: string; ev?: string; bv?: string }> | { e?: string; b?: string; ev?: string; bv?: string };
   const rows = Array.isArray(raw) ? raw : [raw];
-  return rows.flatMap((row) => {
+  const candidates = rows.flatMap((row) => {
     const executableVersion = parseWireSockVersion(row.ev ?? "");
     const boosterVersion = parseWireSockVersion(row.bv ?? "");
     if (!row.e || !row.b || !executableVersion || !boosterVersion) return [];
     return [{ executable: row.e, booster: row.b, executableVersion, boosterVersion }];
   });
+  logger.logEvent("info", "wiresock", "preflight.complete", {
+    operation_id: operationId,
+    phase: "preflight",
+  }, {
+    candidates: JSON.stringify(candidates.map((candidate) => ({
+      executable: path.basename(candidate.executable),
+      booster: path.basename(candidate.booster),
+      executableVersion: candidate.executableVersion,
+      boosterVersion: candidate.boosterVersion,
+    }))),
+  });
+  return candidates;
 }

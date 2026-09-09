@@ -62,4 +62,37 @@ describe("logger", () => {
     expect(() => logger.info("app", "sobrevive")).not.toThrow();
     expect(logger.getRecent()).toContain("sobrevive");
   });
+
+  it("gera ids distintos e registra contexto operacional", () => {
+    const operationId = logger.createOperationId("activation");
+    const attemptId = logger.createOperationId("direct");
+    logger.logEvent("info", "wiresock", "process.start", {
+      app_session_id: "session-test",
+      operation_id: operationId,
+      attempt_id: attemptId,
+      phase: "process",
+      pid: 123,
+    });
+
+    const recent = logger.getRecent();
+    expect(operationId).toMatch(/^activation-/);
+    expect(attemptId).toMatch(/^direct-/);
+    expect(recent).toContain("operation_id=" + operationId);
+    expect(recent).toContain("phase=process");
+  });
+
+  it("redacta campos sensíveis e limita saídas de helper", () => {
+    logger.logEvent("info", "proton", "helper.output", {
+      password: "s3cr3t",
+      token: "abc",
+      stdout: "password=still-secret PrivateKey=xyz",
+    });
+    const recent = logger.getRecent();
+    expect(recent).toContain("password=[redacted]");
+    expect(recent).toContain("token=[redacted]");
+    expect(recent).not.toContain("s3cr3t");
+    expect(recent).not.toContain("still-secret");
+    expect(logger.clipLogText("123456789", 5)).toBe("12345…");
+    expect(logger.redactLogValue("PrivateKey=xyz")).toBe("PrivateKey=[redacted]");
+  });
 });
