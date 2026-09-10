@@ -6,6 +6,8 @@ import os from 'os';
 
 const state = vi.hoisted(() => ({
   success: true,
+  json: undefined as any,
+  error: '',
   executable: '',
   args: [] as string[],
   existed: false,
@@ -36,7 +38,9 @@ vi.mock('child_process', () => ({
       const routePool = args.includes('-route-pool');
       const outputDirAt = args.indexOf('-route-pool-output-dir');
       const outputDir = outputDirAt >= 0 ? args[outputDirAt + 1] : '';
-      const result = routePool
+      const result = state.json !== undefined
+        ? state.json
+        : routePool
         ? {
           success: state.success,
           expiresAt: Math.floor(Date.now() / 1000) + 3600,
@@ -50,9 +54,19 @@ vi.mock('child_process', () => ({
             confFile: outputDir ? path.join(outputDir, `route-0${index}.conf`) : '',
           })),
         }
+        : args.includes('-manual-probe')
+        ? state.success
+          ? {
+            success: true,
+            manual: true,
+            server: args[args.indexOf('-server') + 1] || 'US#8',
+            pingMs: 188,
+            endpoint: '192.0.2.8:51820',
+          }
+          : { success: false, error: state.error || 'rota manual indisponível' }
         : state.success
         ? { success: true, server: 'US#1', pingMs: 100, downloadMbps: state.downloadMbps, uploadMbps: state.uploadMbps, speedTested: 6, speedSucceeded: 5 }
-        : { success: false, error: 'nenhum candidato completou a medição' };
+        : { success: false, error: state.error || 'nenhum candidato completou a medição' };
       child.stdout.emit('data', Buffer.from(JSON.stringify(result)));
       if (state.createOutput && routePool && outputDir) {
         fs.mkdirSync(outputDir, { recursive: true });
@@ -70,12 +84,98 @@ vi.mock('child_process', () => ({
   }),
 }));
 
-import { canReuseMeasuredProfile, generateOptimalProtonConfig, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, runConfgen } from '../electron/proton';
+import { canReuseMeasuredProfile, generateManualProtonConfig, generateOptimalProtonConfig, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, removeStagedProtonConfig, runConfgen } from '../electron/proton';
 
 describe('medidor isolado da regra WireSock', () => {
   beforeEach(() => {
-    state.success = true; state.code = 0; state.closeDelay = 0; state.createOutput = true;
+    state.success = true; state.json = undefined; state.error = ''; state.code = 0; state.closeDelay = 0; state.createOutput = true;
     state.progressChunks = []; state.killAt = 0; state.downloadMbps = 30; state.uploadMbps = 10;
+  });
+
+  it('gera somente a rota manual solicitada e deixa o perfil ativo intacto', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-manual-route-'));
+    fs.writeFileSync(path.join(dir, 'wireguard.conf'), 'existing profile');
+    try {
+      const result = await generateManualProtonConfig(dir, {
+        username: 'test@example.test',
+        server: 'US#8',
+        countries: 'US',
+        freeOnly: true,
+        autoPing: true,
+      });
+
+      expect(state.args).toEqual(expect.arrayContaining([
+        '-server', 'US#8', '-manual-probe',
+      ]));
+      expect(state.args).not.toContain('-speed-test');
+      expect(result).toMatchObject({
+        success: true,
+        server: 'US#8',
+        pingMs: 188,
+        staged: true,
+      });
+      expect(result.confFile).toBeTruthy();
+      expect(fs.readFileSync(path.join(dir, 'wireguard.conf'), 'utf8'))
+        .toBe('existing profile');
+      expect(fs.readFileSync(result.confFile!, 'utf8')).toContain('US#1');
+    } finally {
+      if (state.args.length > 0) {
+        const staged = fs.readdirSync(dir).find((name) => name.includes('.manual-proton-route.'));
+        if (staged) removeStagedProtonConfig(path.join(dir, staged));
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejeita JSON manual inválido e limpa o staged', async () => {
+    state.json = { success: true, manual: false, server: 'US#8', pingMs: 188 };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-manual-invalid-json-'));
+    try {
+      const result = await generateManualProtonConfig(dir, {
+        username: 'test@example.test', server: 'US#8',
+      });
+      expect(result.success).toBe(false);
+      expect(fs.readdirSync(dir).filter((name) => name.includes('.manual-proton-route.'))).toHaveLength(0);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('não promove saída não zero nem deixa arquivo staged', async () => {
+    state.success = false;
+    state.code = 1;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-manual-nonzero-'));
+    try {
+      const result = await generateManualProtonConfig(dir, {
+        username: 'test@example.test', server: 'US#8',
+      });
+      expect(result.success).toBe(false);
+      expect(fs.readdirSync(dir).filter((name) => name.includes('.manual-proton-route.'))).toHaveLength(0);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('rejeita sucesso sem arquivo staged e limpa o diretório', async () => {
+    state.createOutput = false;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-manual-no-output-'));
+    try {
+      const result = await generateManualProtonConfig(dir, {
+        username: 'test@example.test', server: 'US#8',
+      });
+      expect(result.success).toBe(false);
+      expect(fs.readdirSync(dir).filter((name) => name.includes('.manual-proton-route.'))).toHaveLength(0);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('redige a conta nos erros manuais', async () => {
+    state.success = false;
+    state.error = 'falha ao validar test@example.test na sessão';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-manual-redaction-'));
+    try {
+      const result = await generateManualProtonConfig(dir, {
+        username: 'test@example.test', server: 'US#8',
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).not.toContain('test@example.test');
+      expect(result.error).toContain('[account]');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
   it('usa outro executável temporário, transmite Mbps reais e remove a cópia', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-speed-result-'));

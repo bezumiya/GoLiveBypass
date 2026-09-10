@@ -72,6 +72,35 @@ type ProtonPlanCacheEntry = {
 let protonPlanCache: ProtonPlanCacheEntry | null = null;
 let protonPlanGeneration = 0;
 
+type ManualRouteCandidateState = {
+  server: string;
+  pingMs?: number;
+  downloadMbps?: number;
+  uploadMbps?: number;
+  pingStatus: "not-tested" | "pending" | "success" | "failed";
+  preflightStatus: "not-tested" | "pending" | "success" | "failed";
+  speedStatus: "not-tested" | "pending" | "success" | "failed";
+  failureReason?: string;
+};
+
+type ManualMeasurementSession = {
+  measurementId: string;
+  ownerId: number;
+  username: string;
+  country: string;
+  freeOnly: boolean;
+  autoPing: boolean;
+  candidates: Map<string, ManualRouteCandidateState>;
+  expiresAt: number;
+};
+
+// A medição automática continua sendo a autoridade. Este cache só fica
+// disponível quando essa medição termina sem rota aplicável, permitindo que o
+// renderer tente uma das candidatas que já respondeu ao ping.
+const MANUAL_MEASUREMENT_TTL_MS = 10 * 60_000;
+const manualMeasurementSessions = new Map<number, ManualMeasurementSession>();
+const manualRouteSelectionsInFlight = new Set<string>();
+
 function normalizeProtonPlanUsername(username: string): string {
   return username.trim().toLocaleLowerCase("en-US");
 }
@@ -2134,6 +2163,174 @@ function promoteProtonCandidate(candidate: ProtonRouteMetadata): void {
   } catch (error) {
     try { fs.rmSync(temp, { force: true }); } catch {}
     throw error;
+  }
+}
+
+type ProtonConfigBackup = {
+  canonical: string;
+  backupFile?: string;
+  existed: boolean;
+};
+type ProtonConfigBackupLike = ProtonConfigBackup | string | undefined;
+
+function protonCanonicalConfig(): string {
+  return path.join(settingsDir(), "wireguard.conf");
+}
+
+function backupProtonConfig(): ProtonConfigBackup {
+  const canonical = protonCanonicalConfig();
+  if (!fs.existsSync(canonical)) return { canonical, existed: false };
+  const backupFile = `${canonical}.${randomUUID()}.backup`;
+  try {
+    fs.copyFileSync(canonical, backupFile);
+    try { fs.chmodSync(backupFile, 0o600); } catch {}
+    return { canonical, backupFile, existed: true };
+  } catch (error) {
+    try { fs.rmSync(backupFile, { force: true }); } catch {}
+    throw error;
+  }
+}
+
+function restoreProtonConfigBackup(backup: ProtonConfigBackupLike): void {
+  if (!backup) return;
+  if (typeof backup === "string") {
+    if (!fs.existsSync(backup)) return;
+    const canonical = protonCanonicalConfig();
+    const temp = `${canonical}.${randomUUID()}.restore.tmp`;
+    try {
+      fs.copyFileSync(backup, temp);
+      try { fs.chmodSync(temp, 0o600); } catch {}
+      fs.renameSync(temp, canonical);
+    } finally {
+      try { fs.rmSync(temp, { force: true }); } catch {}
+    }
+    return;
+  }
+  if (!backup.existed || !backup.backupFile) {
+    try { fs.rmSync(backup.canonical, { force: true }); } catch {}
+    return;
+  }
+  if (!fs.existsSync(backup.backupFile)) return;
+  const temp = `${backup.canonical}.${randomUUID()}.restore.tmp`;
+  try {
+    fs.copyFileSync(backup.backupFile, temp);
+    try { fs.chmodSync(temp, 0o600); } catch {}
+    fs.renameSync(temp, backup.canonical);
+  } finally {
+    try { fs.rmSync(temp, { force: true }); } catch {}
+  }
+}
+
+function removeProtonConfigBackup(backup: ProtonConfigBackupLike): void {
+  const backupFile = typeof backup === "string" ? backup : backup?.backupFile;
+  if (!backupFile) return;
+  try { fs.rmSync(backupFile, { force: true }); } catch {}
+}
+
+type ProtonRouteApplyContext = {
+  status: string;
+  username: string;
+  country: string;
+  freeOnly: boolean;
+  autoPing: boolean;
+  configBackup?: ProtonConfigBackupLike;
+  previousSettings?: Record<string, unknown>;
+};
+
+async function applyProtonRouteResult(
+  generated: proton.ProtonManualRouteResult,
+  context: ProtonRouteApplyContext,
+): Promise<proton.ProtonManualRouteResult> {
+  const canonical = protonCanonicalConfig();
+  const previousSettings = context.previousSettings ?? readSharedSettings();
+  const saved: proton.ProtonManualRouteResult = {
+    ...generated,
+    success: true,
+    manual: true,
+    confFile: canonical,
+  };
+  if (!updateSharedSettings({
+    protonCountry: context.country,
+    protonFreeOnly: context.freeOnly,
+    protonAutoPing: context.autoPing,
+    protonLastServer: {
+      ...saved,
+      measurementUsername: context.username.trim().toLocaleLowerCase("en-US"),
+      updatedAt: new Date().toISOString(),
+    },
+  })) {
+    return { ...saved, success: false, error: "A rota foi preparada, mas não foi possível salvar suas preferências." };
+  }
+  if (context.status !== "ACTIVE") return saved;
+
+  try {
+    if (IS_WINDOWS) {
+      const installs = getDiscordInstalls();
+      const generation = beginWindowsRouteOperation();
+      stopWindowsRouteWatchdog();
+      pararWgStatsWatchdog();
+      await killDiscord();
+      const recovery = await recoverWireSockNetwork();
+      if (!recovery.ok) throw new Error(`a rota anterior não encerrou com segurança (${recovery.residual.join(", ") || recovery.error || "rede não validada"})`);
+      assertWindowsRouteGeneration(generation);
+      await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs));
+      await waitForWindowsRouteSettle(generation, "selecionar-rota-manual");
+      if (!(await startDiscordAndConfirm(installs, "selecionar-rota-manual"))) {
+        throw new Error("a nova rota foi comprovada, mas o Discord não iniciou");
+      }
+      windowsRouteStarted = true;
+      windowsRouteState = "active";
+      startWindowsRouteWatchdog();
+      iniciarWgStatsWatchdog(wgStatsProvider);
+    } else if (IS_LINUX) {
+      await linuxDeactivate(() => {});
+      const preflight = await linuxPreflight();
+      if (!preflight.ok && !linuxPreflightRepairable(preflight)) {
+        throw new Error(`${linuxPreflightMessage(preflight)}${preflight.installCommand ? ` Execute: ${preflight.installCommand}` : ""}`);
+      }
+      await linuxActivate(() => {});
+    }
+    return saved;
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error);
+    logger.error("proton", "rota manual nao ficou pronta", { server: generated.server, erro: message });
+    try {
+      restoreProtonConfigBackup(context.configBackup);
+      updateSharedSettings({
+        protonCountry: previousSettings.protonCountry,
+        protonFreeOnly: previousSettings.protonFreeOnly,
+        protonAutoPing: previousSettings.protonAutoPing,
+        protonLastServer: previousSettings.protonLastServer,
+      });
+      if (IS_WINDOWS) {
+        windowsRouteStarted = false;
+        windowsRouteState = "failed";
+        stopWindowsRouteWatchdog();
+        const installs = getDiscordInstalls();
+        await killDiscord();
+        const recovery = await recoverWireSockNetwork();
+        if (!recovery.ok) {
+          windowsRouteState = "recovery_required";
+          throw new Error(recovery.error || "a rede não pôde ser restaurada");
+        }
+        await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs));
+        await waitForWindowsRouteSettle(windowsRouteGeneration, "selecionar-rota-manual.rollback");
+        if (!(await startDiscordAndConfirm(installs, "selecionar-rota-manual.rollback"))) {
+          throw new Error("o Discord não voltou após restaurar a rota anterior");
+        }
+        windowsRouteStarted = true;
+        windowsRouteState = "active";
+        startWindowsRouteWatchdog();
+        iniciarWgStatsWatchdog(wgStatsProvider);
+      } else if (IS_LINUX) {
+        await linuxDeactivate(() => {});
+        await linuxActivate(() => {});
+      }
+    } catch (rollbackError) {
+      if (IS_WINDOWS) windowsRouteState = "recovery_required";
+      logger.error("proton", "rota manual.rollback.falhou", { erro: String((rollbackError as Error)?.message ?? rollbackError) });
+    }
+    return { ...generated, success: false, manual: true, error: `A rota ${generated.server ?? "selecionada"} não ficou pronta: ${message}` };
   }
 }
 
@@ -5168,6 +5365,8 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
   const sendProgress = (progress: proton.ProtonOptimizationProgress) => {
     if (!protonOptimizations.isCurrent(operation) || event.sender.isDestroyed()) return;
     lastProgress = progress;
+    const sessions = typeof manualMeasurementSessions !== "undefined" ? manualMeasurementSessions : undefined;
+    proton.recordManualMeasurementProgress?.(sessions?.get(event.sender.id), requestId, progress);
     try {
       event.sender.send("proton-optimization-progress", { ...progress, requestId });
     } catch {
@@ -5208,6 +5407,21 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
       // selection and writes a fresh profile.
       if (!speedTest && proton.canReuseMeasuredProfile(settingsDir(), previous, { username, country, freeOnly, autoPing })) {
         return { ...previous, success: true };
+      }
+      if (speedTest) {
+        const sessions = typeof manualMeasurementSessions !== "undefined" ? manualMeasurementSessions : undefined;
+        if (sessions) {
+          sessions.set(event.sender.id, {
+            measurementId: requestId,
+            ownerId: event.sender.id,
+            username,
+            country,
+            freeOnly,
+            autoPing,
+            candidates: new sessions.constructor(),
+            expiresAt: Date.now() + MANUAL_MEASUREMENT_TTL_MS,
+          });
+        }
       }
 
       const status = IS_LINUX ? await linuxStatus() : getStatus();
@@ -5359,6 +5573,11 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
     } else if (!("deferred" in result && result.deferred)) {
       sendProgress({ ...lastProgress, phase: result.success ? "completed" : "failed" });
     }
+    const sessions = typeof manualMeasurementSessions !== "undefined" ? manualMeasurementSessions : undefined;
+    if (sessions && (result.success || ("cancelled" in result && result.cancelled) || ("deferred" in result && result.deferred))) {
+      const current = sessions.get(event.sender.id);
+      if (current?.measurementId === requestId) sessions.delete(event.sender.id);
+    }
     refreshWindowStatus();
     refreshTray().catch(() => {});
     return result;
@@ -5384,6 +5603,107 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
     { title: String(p.title ?? ""), description: String(p.description ?? ""), includeLogs: !!p.includeLogs },
     { statusBypass, installsFlavours: ultimosFlavoursLinux, graphics: ultimosGraficosLinux, wgTunel },
   );
+});
+
+type ProtonManualSelectionOptions = {
+  measurementId?: unknown;
+  server?: unknown;
+};
+
+ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelectionOptions) => {
+  if (isMac) return { success: false, error: "O bypass por WireGuard ainda não está disponível no macOS." };
+  const ownerId = event.sender.id;
+  const measurementId = typeof options?.measurementId === "string" ? options.measurementId.trim() : "";
+  const server = typeof options?.server === "string" ? options.server.trim() : "";
+  const session = manualMeasurementSessions.get(ownerId);
+  if (!session || session.ownerId !== ownerId || !measurementId || session.measurementId !== measurementId || session.expiresAt <= Date.now()) {
+    return { success: false, error: "A sessão de medição expirou. Execute a medição novamente." };
+  }
+  const candidate = session.candidates.get(server);
+  const pingMs = Number(candidate?.pingMs);
+  if (!candidate || !server || !Number.isFinite(pingMs) || pingMs <= 0 || pingMs >= 999 || candidate.pingStatus === "failed") {
+    return { success: false, error: "A rota selecionada não possui um ping válido." };
+  }
+  if (candidate.preflightStatus === "failed") {
+    return { success: false, error: "A rota selecionada foi reprovada no preflight rápido." };
+  }
+
+  const selectionKey = `${ownerId}:${measurementId}`;
+  if (manualRouteSelectionsInFlight.has(selectionKey)) {
+    return { success: false, error: "Já existe uma seleção manual em andamento." };
+  }
+  manualRouteSelectionsInFlight.add(selectionKey);
+  let configBackup: ProtonConfigBackupLike;
+  let stagedFile: string | undefined;
+  try {
+    return await withWireSockLifecycle("selecionar-rota-manual", async () => {
+      if (quitting) return { success: false, error: "A seleção foi cancelada porque o aplicativo está encerrando." };
+      const settings = readSharedSettings() as any;
+      const username = typeof settings.protonUsername === "string" ? settings.protonUsername.trim() : "";
+      if (!username || !proton.protonIdentityMatches(session.username, username)) {
+        return { success: false, error: "A conta Proton mudou. Execute a medição novamente." };
+      }
+      const plan = await resolveProtonPlan(username);
+      const country = typeof settings.protonCountry === "string" ? settings.protonCountry : "";
+      const freeOnly = plan.status !== "premium";
+      const autoPing = settings.protonAutoPing !== false;
+      if (country !== session.country || freeOnly !== session.freeOnly || autoPing !== session.autoPing) {
+        return { success: false, error: "As preferências Proton mudaram. Execute a medição novamente." };
+      }
+      const status = IS_LINUX ? await linuxStatus() : getStatus();
+      let generated: proton.ProtonManualRouteResult;
+      try {
+        generated = await proton.generateManualProtonConfig(settingsDir(), {
+          username,
+          server,
+          countries: country || undefined,
+          freeOnly,
+          autoPing,
+        });
+      } catch (error) {
+        return { success: false, manual: true, error: String((error as Error)?.message ?? error) };
+      }
+      if (!generated.success) return { ...generated, manual: true };
+      stagedFile = generated.confFile;
+      if (!stagedFile) return { ...generated, success: false, manual: true, error: "A rota não gerou um perfil temporário válido." };
+
+      try {
+        configBackup = backupProtonConfig();
+        proton.promoteStagedProtonConfig(stagedFile);
+        const applied = await applyProtonRouteResult(generated, {
+          status,
+          username,
+          country,
+          freeOnly,
+          autoPing,
+          configBackup,
+          previousSettings: settings,
+        });
+        if (!applied || !applied.success) {
+          restoreProtonConfigBackup(configBackup);
+          removeProtonConfigBackup(configBackup);
+          proton.removeStagedProtonConfig(stagedFile);
+          return { ...(applied || generated), success: false, manual: true };
+        }
+        removeProtonConfigBackup(configBackup);
+        proton.removeStagedProtonConfig(stagedFile);
+        manualMeasurementSessions.delete(ownerId);
+        return { ...applied, success: true, manual: true };
+      } catch (error) {
+        restoreProtonConfigBackup(configBackup);
+        removeProtonConfigBackup(configBackup);
+        proton.removeStagedProtonConfig(stagedFile);
+        return {
+          ...generated,
+          success: false,
+          manual: true,
+          error: String((error as Error)?.message ?? error),
+        };
+      }
+    });
+  } finally {
+    manualRouteSelectionsInFlight.delete(selectionKey);
+  }
 });
 
 // A pagina reporta a ALTURA DO CONTEUDO. Com titleBarOverlay, setSize (janela externa)

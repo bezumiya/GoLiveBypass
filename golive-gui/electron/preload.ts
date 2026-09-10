@@ -49,6 +49,8 @@ import { ipcRenderer } from 'electron';
   logoutProton: () => ipcRenderer.invoke('logout-proton'),
   optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; refreshOnStartup?: boolean; requestId?: string }) =>
     ipcRenderer.invoke('optimize-proton-route', options),
+  selectProtonRoute: (options: { measurementId: string; server: string }) =>
+    ipcRenderer.invoke('select-proton-route', options),
   cancelProtonOptimization: (requestId: string) => ipcRenderer.invoke('cancel-proton-optimization', requestId),
   onProtonOptimizationProgress: (callback: (progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => callback(progress);

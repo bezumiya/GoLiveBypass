@@ -132,6 +132,36 @@ export interface ProtonOptimizationProgress {
   status?: 'testing' | 'success' | 'failed';
 }
 
+export function recordManualMeasurementProgress(
+  session: {
+    measurementId: string;
+    candidates: Map<string, any>;
+    expiresAt: number;
+  } | undefined,
+  measurementId: string,
+  progress: ProtonOptimizationProgress,
+): void {
+  if (!session || session.measurementId !== measurementId || !progress.server) return;
+  const current = session.candidates.get(progress.server) ?? {
+    server: progress.server,
+    pingStatus: 'not-tested',
+    preflightStatus: 'not-tested',
+    speedStatus: 'not-tested',
+  };
+  const status = progress.status === 'success' ? 'success' : progress.status === 'failed' ? 'failed' : 'pending';
+  if (Number.isFinite(progress.pingMs) && progress.pingMs > 0 && progress.pingMs < 999) current.pingMs = progress.pingMs;
+  if (Number.isFinite(progress.downloadMbps) && progress.downloadMbps > 0) current.downloadMbps = progress.downloadMbps;
+  if (Number.isFinite(progress.uploadMbps) && progress.uploadMbps > 0) current.uploadMbps = progress.uploadMbps;
+  if (progress.phase === 'ping') current.pingStatus = status;
+  else if (progress.phase === 'preparing') current.preflightStatus = status;
+  else if (progress.phase === 'testing') current.speedStatus = status;
+  if (progress.status === 'failed') current.failureReason = progress.phase === 'preparing'
+    ? 'Falha no túnel ou HTTPS'
+    : progress.phase === 'ping' ? 'Sem resposta ao ping' : 'Não foi possível medir a velocidade';
+  session.candidates.set(progress.server, current);
+  session.expiresAt = Date.now() + 10 * 60_000;
+}
+
 function abortError(): Error {
   const error = new Error('Operação Proton cancelada.');
   error.name = 'AbortError';
@@ -713,6 +743,167 @@ export async function generateOptimalProtonConfig(
     : undefined) || res.stderr || res.stdout || 'Falha ao selecionar e gerar configuração ProtonVPN.';
   logger.error('proton', 'erro ao gerar configuração ótima', { codigo_saida: res.code, resposta_json: Boolean(res.json) });
   return { success: false, error: errMsg };
+}
+
+export interface ProtonManualRouteOptions {
+  username: string;
+  server: string;
+  countries?: string;
+  freeOnly?: boolean;
+  autoPing?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface ProtonManualRouteResult {
+  success: boolean;
+  manual?: boolean;
+  server?: string;
+  country?: string;
+  city?: string;
+  tier?: string;
+  load?: number;
+  score?: number;
+  pingMs?: number;
+  endpoint?: string;
+  preflight?: string;
+  confFile?: string;
+  staged?: boolean;
+  error?: string;
+}
+
+function redactManualRouteError(value: unknown, username: string): string {
+  const text = String(value ?? '').trim();
+  if (!text) return 'Não foi possível validar a rota ProtonVPN selecionada.';
+  const account = username.trim();
+  return account ? text.split(account).join('[account]').slice(0, 500) : text.slice(0, 500);
+}
+
+/**
+ * Probes one server chosen by the user and leaves its profile staged. The
+ * active profile is promoted by main.ts only after the lifecycle transaction
+ * has taken a backup, so a failed manual selection cannot replace a working
+ * route.
+ */
+export async function generateManualProtonConfig(
+  installDir: string,
+  options: ProtonManualRouteOptions,
+): Promise<ProtonManualRouteResult> {
+  const username = typeof options.username === 'string' ? options.username.trim() : '';
+  const server = typeof options.server === 'string' ? options.server.trim() : '';
+  if (!username) return { success: false, error: 'Nenhuma conta ProtonVPN conectada.' };
+  if (!server) return { success: false, error: 'Nenhuma rota ProtonVPN foi selecionada.' };
+
+  ensureInstallDir(installDir);
+  const sessionFile = getProtonSessionFile(installDir);
+  const stagingFile = path.join(installDir, `.manual-proton-route.${randomUUID()}.tmp`);
+  let exePath: string;
+  try {
+    exePath = await ensureProtonConfgen(installDir);
+  } catch (error) {
+    return { success: false, error: redactManualRouteError(error, username) };
+  }
+
+  const args = [
+    '-username', username,
+    '-session-file', sessionFile,
+    '-server', server,
+    '-output', stagingFile,
+    '-json',
+    '-ipv6',
+    '-manual-probe',
+    '-exclude-countries', 'BR',
+  ];
+  if (options.autoPing !== false) args.push('-auto-ping');
+  if (options.freeOnly !== false) args.push('-free-only');
+  if (options.countries && options.countries.trim()) args.push('-countries', options.countries.trim());
+
+  logger.info('proton', 'validando rota ProtonVPN escolhida manualmente', {
+    server,
+    country: options.countries || 'AUTO',
+    autoPing: options.autoPing !== false,
+  });
+
+  let res;
+  try {
+    res = await runConfgen({
+      args,
+      timeoutMs: 60_000,
+      signal: options.signal,
+      exePath,
+    });
+  } catch (error) {
+    removeStagedProtonConfig(stagingFile);
+    throw error;
+  }
+
+  const json = res.json;
+  const pingMs = Number(json?.pingMs);
+  const validResult = res.code === 0 && json?.success === true && json?.manual === true &&
+    typeof json.server === 'string' && json.server.trim() === server &&
+    Number.isFinite(pingMs) && pingMs > 0 && pingMs < 999 &&
+    typeof json.endpoint === 'string' && json.endpoint.trim() &&
+    fs.existsSync(stagingFile);
+  if (validResult) {
+    if (options.signal?.aborted) {
+      removeStagedProtonConfig(stagingFile);
+      throw abortError();
+    }
+    logger.info('proton', 'rota ProtonVPN manual validada', {
+      server,
+      ping: pingMs,
+      endpoint: json.endpoint,
+    });
+    return {
+      success: true,
+      manual: true,
+      server,
+      country: typeof json.country === 'string' ? json.country : undefined,
+      city: typeof json.city === 'string' ? json.city : undefined,
+      tier: typeof json.tier === 'string' ? json.tier : undefined,
+      load: Number.isFinite(Number(json.load)) ? Number(json.load) : undefined,
+      score: Number.isFinite(Number(json.score)) ? Number(json.score) : undefined,
+      pingMs,
+      endpoint: json.endpoint.trim(),
+      preflight: json.preflight === 'success' ? 'success' : undefined,
+      confFile: stagingFile,
+      staged: true,
+    };
+  }
+
+  removeStagedProtonConfig(stagingFile);
+  const rawError = json?.error || res.stderr || res.stdout ||
+    'Não foi possível validar a rota ProtonVPN selecionada.';
+  logger.warn('proton', 'rota ProtonVPN manual rejeitada', {
+    server,
+    codigo_saida: res.code,
+    resposta_json: Boolean(json),
+  });
+  return { success: false, error: redactManualRouteError(rawError, username) };
+}
+
+export function removeStagedProtonConfig(stagedFile: string | undefined): void {
+  if (!stagedFile) return;
+  try { fs.rmSync(stagedFile, { force: true }); } catch {}
+}
+
+export function promoteStagedProtonConfig(stagedFile: string, outputFile?: string): void {
+  const resolvedStage = path.resolve(stagedFile || '');
+  const target = outputFile || path.join(path.dirname(resolvedStage), 'wireguard.conf');
+  const resolvedDir = path.dirname(resolvedStage);
+  const relative = path.relative(resolvedDir, resolvedStage);
+  if (!stagedFile || !relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('arquivo staged Proton inválido');
+  }
+  const temp = `${target}.${randomUUID()}.tmp`;
+  try {
+    if (!fs.existsSync(resolvedStage)) throw new Error('arquivo staged Proton não foi encontrado');
+    fs.copyFileSync(resolvedStage, temp);
+    try { fs.chmodSync(temp, 0o600); } catch {}
+    fs.renameSync(temp, target);
+  } catch (error) {
+    try { fs.rmSync(temp, { force: true }); } catch {}
+    throw error;
+  }
 }
 
 export interface ProtonRoutePoolResult {

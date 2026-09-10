@@ -171,10 +171,38 @@ describe("guarda de ativacao duplicada", () => {
   it("serializa a geracao Proton antes de persistir e aplicar a rota", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
     const fnStart = src.indexOf('ipcMain.handle("optimize-proton-route"');
-    const fnBody = src.slice(fnStart, fnStart + 5200);
+    const fnBody = src.slice(fnStart, src.indexOf('ipcMain.handle("report-bug"', fnStart));
     expect(fnBody).toMatch(/return withWireSockLifecycle\("troca-rota-proton", async \(\) => \{/);
     expect(fnBody.indexOf("return withWireSockLifecycle")).toBeLessThan(fnBody.indexOf("proton.generateOptimalProtonConfig"));
     expect(fnBody).not.toMatch(/withWireSockLifecycle\("troca-rota-proton"[\s\S]*withWireSockLifecycle\("troca-rota-proton"/);
+  });
+
+  it("mantém o IPC automático separado da seleção manual", () => {
+    const src = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const automaticStart = src.indexOf('ipcMain.handle("optimize-proton-route"');
+    const automaticEnd = src.indexOf('ipcMain.handle("report-bug"', automaticStart);
+    const automatic = src.slice(automaticStart, automaticEnd);
+    const manualStart = src.indexOf('ipcMain.handle("select-proton-route"');
+    const manual = src.slice(manualStart, src.indexOf('ipcMain.handle("report-bug"', manualStart));
+
+    expect(manualStart).toBeGreaterThan(automaticStart);
+    expect(automatic).not.toContain("generateManualProtonConfig");
+    expect(automatic).not.toContain("-manual-probe");
+    expect(manual).toContain("generateManualProtonConfig");
+    expect(manual).toContain('withWireSockLifecycle("selecionar-rota-manual"');
+    expect(manual).toContain("measurementId");
+    expect(manual).toContain("ownerId");
+  });
+
+  it("faz backup antes da promoção manual e restaura em falha", () => {
+    const src = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const start = src.indexOf('ipcMain.handle("select-proton-route"');
+    const body = src.slice(start, src.indexOf('ipcMain.handle("report-bug"', start));
+
+    expect(body.indexOf("backupProtonConfig")).toBeLessThan(body.indexOf("promoteStagedProtonConfig"));
+    expect(body).toContain("restoreProtonConfigBackup");
+    expect(body).toContain("removeStagedProtonConfig");
+    expect(body).toContain("manualRouteSelectionsInFlight");
   });
 
   it("mantem o diagnostico centrado no WireGuard", () => {
