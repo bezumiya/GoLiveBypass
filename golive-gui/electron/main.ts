@@ -2248,6 +2248,7 @@ async function applyProtonRouteResult(
     success: true,
     manual: true,
     confFile: canonical,
+    staged: false,
   };
   if (!updateSharedSettings({
     protonCountry: context.country,
@@ -5615,6 +5616,9 @@ ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelect
   const ownerId = event.sender.id;
   const measurementId = typeof options?.measurementId === "string" ? options.measurementId.trim() : "";
   const server = typeof options?.server === "string" ? options.server.trim() : "";
+  if (measurementId.length > 128 || server.length > 200) {
+    return { success: false, error: "A identificação da medição ou da rota é inválida." };
+  }
   const session = manualMeasurementSessions.get(ownerId);
   if (!session || session.ownerId !== ownerId || !measurementId || session.measurementId !== measurementId || session.expiresAt <= Date.now()) {
     return { success: false, error: "A sessão de medição expirou. Execute a medição novamente." };
@@ -5666,6 +5670,10 @@ ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelect
       if (!generated.success) return { ...generated, manual: true };
       stagedFile = generated.confFile;
       if (!stagedFile) return { ...generated, success: false, manual: true, error: "A rota não gerou um perfil temporário válido." };
+      if (generated.server !== server || !Number.isFinite(Number(generated.pingMs)) || Number(generated.pingMs) <= 0 || Number(generated.pingMs) >= 999) {
+        proton.removeStagedProtonConfig(stagedFile);
+        return { ...generated, success: false, manual: true, error: "A validação retornou uma rota diferente da selecionada." };
+      }
 
       try {
         configBackup = backupProtonConfig();

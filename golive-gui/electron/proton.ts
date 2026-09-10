@@ -775,7 +775,9 @@ function redactManualRouteError(value: unknown, username: string): string {
   const text = String(value ?? '').trim();
   if (!text) return 'Não foi possível validar a rota ProtonVPN selecionada.';
   const account = username.trim();
-  return account ? text.split(account).join('[account]').slice(0, 500) : text.slice(0, 500);
+  if (!account) return text.slice(0, 500);
+  const escaped = account.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(escaped, 'gi'), '[account]').slice(0, 500);
 }
 
 /**
@@ -891,7 +893,8 @@ export function promoteStagedProtonConfig(stagedFile: string, outputFile?: strin
   const target = outputFile || path.join(path.dirname(resolvedStage), 'wireguard.conf');
   const resolvedDir = path.dirname(resolvedStage);
   const relative = path.relative(resolvedDir, resolvedStage);
-  if (!stagedFile || !relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (!stagedFile || !relative || relative.startsWith('..') || path.isAbsolute(relative) ||
+    !path.basename(resolvedStage).startsWith('.manual-proton-route.')) {
     throw new Error('arquivo staged Proton inválido');
   }
   const temp = `${target}.${randomUUID()}.tmp`;

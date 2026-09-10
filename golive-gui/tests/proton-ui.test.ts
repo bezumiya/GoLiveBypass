@@ -75,6 +75,33 @@ describe("controles Proton", () => {
     expect(source).toContain("protonMeasurementRows.get(event.server)");
   });
 
+  it("oferece fallback manual ordenado e uma rota recomendada", () => {
+    const html = fs.readFileSync(path.resolve(process.cwd(), "index.html"), "utf8");
+    expect(html).toContain('id="protonManualFallback"');
+    expect(html).toContain('id="protonManualRecommendationBtn"');
+    expect(html).toContain("menor ping primeiro");
+    const source = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
+    expect(source).toContain("reduceManualRouteEvent");
+    expect(source).toContain("sortManualRouteCandidates");
+    expect(source).toContain("recommendManualRoute");
+    expect(source).toContain("window.api.selectProtonRoute({ measurementId: protonManualMeasurementId, server })");
+    expect(source).toContain("toggleBtn.disabled = busy || protonOptimizationInFlight");
+    expect(source).toContain("protonCloseMeasurementBtn.disabled = busy");
+    expect(source).toContain("if (protonOptimizationInFlight || protonManualSelectionInFlight) return;");
+  });
+
+  it("só habilita a escolha manual depois da falha automática", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
+    const failureBranch = source.indexOf("if (res.cancelled)");
+    const manualRender = source.indexOf("renderManualRouteChoices()", failureBranch);
+    const manualSelection = source.indexOf("async function selectManualProtonRoute");
+    const manualSelectionEnd = source.indexOf("function updateMeasurementProgress", manualSelection);
+    expect(failureBranch).toBeGreaterThan(0);
+    expect(manualRender).toBeGreaterThan(failureBranch);
+    expect(source.slice(manualSelection, manualSelectionEnd)).toContain("if (protonManualSelectionInFlight || !protonManualMeasurementId || !server) return;");
+    expect(source).toContain("protonManualMeasurementId = '';");
+  });
+
   it("distingue a prova funcional da telemetria auxiliar", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
     expect(source).not.toContain("res.readiness?.verified === false");

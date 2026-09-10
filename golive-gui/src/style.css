@@ -2544,6 +2544,32 @@ html[data-theme='dark'] .settings-switch input:checked + .switch-track .switch-t
 .proton-measurement__close:active { transform: scale(0.97); }
 .proton-measurement__close[hidden] { display: none !important; }
 
+.proton-manual-fallback {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.proton-manual-fallback__heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.proton-manual-fallback__heading h3 { margin: 4px 0 0; color: var(--ink-strong); font-size: 12px; line-height: 1.25; }
+.proton-manual-fallback__sort { color: var(--muted); font-family: var(--mono); font-size: 8px; white-space: nowrap; }
+.proton-manual-fallback__hint { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.proton-manual-recommendation { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid color-mix(in srgb, var(--ok-ink) 42%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--ok-ink) 8%, var(--surface-muted)); }
+.proton-manual-recommendation__label { color: var(--ok-ink); font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.proton-manual-recommendation__button { min-width: 0; padding: 5px 7px; overflow: hidden; border: 0; border-radius: 6px; background: transparent; color: var(--ink-strong); cursor: pointer; font-family: var(--mono); font-size: 9px; font-weight: 650; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.proton-manual-recommendation__button:hover:not(:disabled) { background: color-mix(in srgb, var(--ok-ink) 12%, transparent); }
+.proton-manual-recommendation__button:disabled { cursor: wait; opacity: .65; }
+.proton-manual-route { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-muted); color: var(--ink); cursor: pointer; font: inherit; text-align: left; transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease); }
+.proton-manual-route:hover:not(:disabled), .proton-manual-route.is-recommended { border-color: var(--ok-ink); background: color-mix(in srgb, var(--ok-ink) 7%, var(--surface-muted)); }
+.proton-manual-route:focus-visible { outline: 2px solid var(--ok-ink); outline-offset: 2px; }
+.proton-manual-route:disabled { cursor: not-allowed; opacity: .52; }
+.proton-manual-route__top { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.proton-manual-route__name { min-width: 0; overflow: hidden; color: var(--ink-strong); font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.proton-manual-route__badge { color: var(--ok-ink); font-size: 8px; font-weight: 700; white-space: nowrap; }
+.proton-manual-route__status { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.proton-manual-route__metrics { grid-column: 1 / -1; color: var(--faint); font-family: var(--mono); font-size: 8.5px; }
+.proton-manual-route.is-unavailable .proton-manual-route__status, .proton-manual-route.is-unavailable .proton-manual-route__metrics { color: var(--err-ink); }
+
 @keyframes proton-measurement-dialog-in {
   from { opacity: 0; transform: translateY(7px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }

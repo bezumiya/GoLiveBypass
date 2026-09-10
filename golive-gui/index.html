@@ -357,6 +357,20 @@
               <span id="protonMeasurementCount" class="proton-measurement__count">Preparando servidores…</span>
             </div>
             <div id="protonMeasurementList" class="proton-measurement__list"></div>
+            <section id="protonManualFallback" class="proton-manual-fallback" hidden aria-labelledby="protonManualFallbackTitle">
+              <div class="proton-manual-fallback__heading">
+                <div>
+                  <span class="proton-server-caption">Alternativa manual</span>
+                  <h3 id="protonManualFallbackTitle">Escolha uma rota medida</h3>
+                </div>
+                <span class="proton-manual-fallback__sort">menor ping primeiro</span>
+              </div>
+              <p id="protonManualFallbackHint" class="proton-manual-fallback__hint">A seleção automática falhou. Estas rotas já responderam e serão verificadas novamente antes de aplicar.</p>
+              <div id="protonManualRecommendation" class="proton-manual-recommendation" hidden>
+                <span class="proton-manual-recommendation__label">Rota recomendada</span>
+                <button type="button" id="protonManualRecommendationBtn" class="proton-manual-recommendation__button"></button>
+              </div>
+            </section>
             <div id="protonMeasurementActions" class="proton-measurement__actions" hidden>
               <button type="button" id="protonRetryMeasurementBtn" class="proton-btn proton-btn--action">Tentar novamente</button>
               <button type="button" id="protonContinueMeasurementBtn" class="proton-measurement__continue">Continuar sem medição</button>

@@ -77,7 +77,7 @@ function compareServerNames(left: ManualRouteCandidate, right: ManualRouteCandid
 }
 
 function manualRouteCapacity(candidate: ManualRouteCandidate): number | undefined {
-  if (!isPositiveFinite(candidate.downloadMbps) || !isPositiveFinite(candidate.uploadMbps)) {
+  if (candidate.speedStatus !== 'success' || !isPositiveFinite(candidate.downloadMbps) || !isPositiveFinite(candidate.uploadMbps)) {
     return undefined;
   }
   return (2 * candidate.downloadMbps * candidate.uploadMbps)

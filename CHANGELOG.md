@@ -6,6 +6,12 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Fallback manual de rotas Proton na GUI
+
+- Mantém a seleção automática existente e, quando a medição não encontra uma rota aplicável, mostra as candidatas que responderam com ping em ordem crescente.
+- Exibe ping e velocidade medidos quando disponíveis, destaca uma recomendação e permite validar novamente e aplicar uma rota escolhida sem substituir a configuração anterior em caso de falha.
+- A troca manual continua isolada por aplicativo no WireGuard; ela não altera o standalone, o plugin nem promete uma prova geográfica de saída.
+
 ### Atualizações do plugin Vencord/Equicord
 
 - Mantém o canal estável padrão, com beta opt-in e atualização automática
