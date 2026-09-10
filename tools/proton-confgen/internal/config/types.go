@@ -64,6 +64,7 @@ type Config struct {
 	SessionFile     string
 	AutoPing        bool
 	SpeedTest       bool
+	ManualProbe     bool
 	ProgressJSON    bool
 	SpeedTestTrace  bool
 	JSONOutput      bool

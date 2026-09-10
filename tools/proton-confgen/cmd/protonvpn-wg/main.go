@@ -276,7 +276,55 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 	var server *api.LogicalServer
 	var pingMs int
 	var measured *speedtest.Result
-	if cfg.SpeedTest {
+	if cfg.ManualProbe {
+		progress := speedtest.ProgressFunc(nil)
+		if cfg.ProgressJSON || cfg.SpeedTestTrace {
+			progress = func(event speedtest.ProgressEvent) {
+				if cfg.ProgressJSON {
+					data, _ := json.Marshal(event)
+					fmt.Fprintf(os.Stderr, "GOLIVE_PROGRESS %s\n", data)
+				}
+				if cfg.SpeedTestTrace {
+					printSpeedTrace(event)
+				}
+			}
+			progress(speedtest.ProgressEvent{Phase: "ping", Total: 0, Tested: 0, Succeeded: 0})
+		}
+
+		server, pingMs, err = selector.SelectManualWithPing(servers)
+		if err != nil {
+			return err
+		}
+		if progress != nil {
+			progress(speedtest.ProgressEvent{
+				Phase: "ping", Total: 1, Tested: 1, Succeeded: 1,
+				Server: server.Name, PingMs: pingMs, Status: "success",
+			})
+			progress(speedtest.ProgressEvent{
+				Phase: "preparing", Total: 1, Tested: 0, Succeeded: 0,
+				Server: server.Name, Status: "testing",
+			})
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		probeErr := speedtest.ProbeCandidate(ctx, cfg.ClientPrivateKey, *server)
+		cancel()
+		if progress != nil {
+			status := "success"
+			succeeded := 1
+			if probeErr != nil {
+				status = "failed"
+				succeeded = 0
+			}
+			progress(speedtest.ProgressEvent{
+				Phase: "preparing", Total: 1, Tested: 1, Succeeded: succeeded,
+				Server: server.Name, Status: status,
+			})
+		}
+		if probeErr != nil {
+			return fmt.Errorf("manual route preflight failed: %w", probeErr)
+		}
+	} else if cfg.SpeedTest {
 		const (
 			pingTriageLimit       = 12
 			speedMeasurementLimit = 6
@@ -407,6 +455,10 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 			"endpoint":  fmt.Sprintf("%s:%d", physicalServer.EntryIP, constants.WireGuardPort),
 			"confFile":  cfg.OutputFile,
 			"expiresAt": vpnInfo.ExpirationTime,
+		}
+		if cfg.ManualProbe {
+			resp["manual"] = true
+			resp["preflight"] = "success"
 		}
 		if measured != nil {
 			resp["downloadMbps"] = measured.DownloadMbps

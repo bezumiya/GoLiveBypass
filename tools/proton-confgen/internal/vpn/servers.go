@@ -18,12 +18,13 @@ import (
 
 // ServerSelector handles server selection logic
 type ServerSelector struct {
-	config *config.Config
+	config     *config.Config
+	manualPing func(string, time.Duration) int
 }
 
 // NewServerSelector creates a new server selector
 func NewServerSelector(cfg *config.Config) *ServerSelector {
-	return &ServerSelector{config: cfg}
+	return &ServerSelector{config: cfg, manualPing: ProbePing}
 }
 
 // EligibleServers returns the online servers matching the configured filters,
@@ -113,6 +114,44 @@ func (s *ServerSelector) SelectBestWithPing(servers []api.LogicalServer) (*api.L
 	pings := ProbeCandidatesPing(candidates, len(candidates))
 	return bestMeasuredCandidate(candidates, pings)
 
+}
+
+// SelectManualWithPing selects the explicitly requested server only after
+// applying the same account/region filters used by automatic selection. It
+// also validates the exact WireGuard peer and confirms that its endpoint
+// answers the bounded ping probe. The method is intentionally separate from
+// SelectBestWithPing so the automatic no-server branch keeps its existing
+// ranking and fallback behavior.
+func (s *ServerSelector) SelectManualWithPing(servers []api.LogicalServer) (*api.LogicalServer, int, error) {
+	if s == nil || s.config == nil || strings.TrimSpace(s.config.ServerName) == "" {
+		return nil, 0, fmt.Errorf("manual server selection requires -server")
+	}
+
+	requestedName := s.config.ServerName
+	for i := range servers {
+		candidate := &servers[i]
+		if candidate.Name != requestedName || !isEligible(s.config, candidate) || slices.Contains(s.config.ExcludedServers, candidate.Name) {
+			continue
+		}
+
+		peer := GetBestWireGuardPhysicalServer(candidate)
+		if peer == nil {
+			return nil, 0, fmt.Errorf("server %q has no usable WireGuard peer", candidate.Name)
+		}
+
+		probe := s.manualPing
+		if probe == nil {
+			probe = ProbePing
+		}
+		pingMs := probe(peer.EntryIP, 1200*time.Millisecond)
+		if pingMs <= 0 || pingMs >= 999 {
+			return nil, pingMs, fmt.Errorf("server %q did not respond to ping", candidate.Name)
+		}
+
+		return candidate, pingMs, nil
+	}
+
+	return nil, 0, fmt.Errorf("server %q is offline or outside current filters", requestedName)
 }
 
 // regionalCandidates considers every eligible server and retains the two

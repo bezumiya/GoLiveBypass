@@ -84,6 +84,7 @@ func Parse() (*Config, error) {
 
 	// Automated GUI & Ping extensions
 	flag.BoolVar(&cfg.SpeedTest, "speed-test", false, "Ping all regional routes, validate twelve, then measure download/upload on up to six healthy finalists (up to 30 MiB, about 3m)")
+	flag.BoolVar(&cfg.ManualProbe, "manual-probe", false, "Validate and generate one explicitly selected server without speed test")
 	flag.BoolVar(&cfg.ProgressJSON, "progress-json", false, "Emit speed-test progress events as JSON on stderr")
 	flag.BoolVar(&cfg.SpeedTestTrace, "speed-test-trace", false, "Print the four speed-test stages in the terminal (ping, shortlist, tunnel, speed)")
 	flag.StringVar(&cfg.TwoFactorCode, "2fa", "", "2FA TOTP code for non-interactive authentication")
@@ -252,6 +253,14 @@ func readStdinSecrets(reader io.Reader, cfg *Config) error {
 func validateFeatureFlags(cfg *Config) error {
 	if cfg.PortForwarding && cfg.ModerateNAT {
 		return fmt.Errorf("port-forwarding and moderate-nat cannot be enabled together")
+	}
+	if cfg.ManualProbe {
+		if strings.TrimSpace(cfg.ServerName) == "" {
+			return fmt.Errorf("manual-probe requires -server")
+		}
+		if cfg.SpeedTest {
+			return fmt.Errorf("manual-probe cannot be used with -speed-test")
+		}
 	}
 	return validateDuration(cfg)
 }
