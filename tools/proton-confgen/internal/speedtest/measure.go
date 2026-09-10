@@ -36,7 +36,7 @@ type Result struct {
 	Succeeded int `json:"succeeded"`
 }
 
-// ProgressEvent describes one step of the sequential candidate measurement.
+// ProgressEvent describes public progress from route discovery or measurement.
 // It is deliberately limited to public server metrics; it never contains
 // credentials, keys, or tunnel details.
 type ProgressEvent struct {
@@ -45,6 +45,11 @@ type ProgressEvent struct {
 	Tested       int     `json:"tested"`
 	Succeeded    int     `json:"succeeded"`
 	Server       string  `json:"server,omitempty"`
+	Country      string  `json:"country,omitempty"`
+	City         string  `json:"city,omitempty"`
+	Tier         string  `json:"tier,omitempty"`
+	Load         int     `json:"load,omitempty"`
+	Score        float64 `json:"score,omitempty"`
 	DownloadMbps float64 `json:"downloadMbps,omitempty"`
 	UploadMbps   float64 `json:"uploadMbps,omitempty"`
 	PingMs       int     `json:"pingMs,omitempty"`

@@ -5,6 +5,8 @@
  */
 
 import { RendererSettings } from "@main/settings";
+import { execFile, execFileSync, spawn } from "child_process";
+import { createHash, randomUUID } from "crypto";
 import { app, BrowserWindow, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 import {
     appendFileSync,
@@ -20,14 +22,14 @@ import {
     realpathSync,
     renameSync,
     rmSync,
+    type Stats,
     statSync,
     writeFileSync,
 } from "fs";
-import { execFileSync } from "child_process";
-import { createHash, randomUUID } from "crypto";
+import type { ClientRequest } from "http";
 import { request } from "https";
-import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
+import { basename, dirname, join, resolve } from "path";
 
 import {
     choosePluginRelease,
@@ -38,6 +40,13 @@ import {
 } from "./update-channel";
 import { isCompatiblePluginManifest, releaseAssetUrl, securePluginUpdateUrl } from "./update-security";
 import { defaultPluginVpnDataDir, PluginVpnController, type ProtonLoginPayload, type ProtonOptimizationOptions } from "./vpn-controller";
+import {
+    findSystemBinary,
+    GOLIVE_PLUGIN_LINUX_NAMESPACE,
+    isFlatpak as isLinuxFlatpak,
+    isProcessInNamespace,
+    isValidLinuxName,
+} from "./vpn-linux";
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
 
@@ -50,23 +59,106 @@ const UNKNOWN_PLUGIN_VERSION = "unknown";
 const PLUGIN_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 const PLUGIN_UPDATE_INITIAL_DELAY_MS = 8_000;
 const PLUGIN_API_MAX_BYTES = 2 * 1024 * 1024;
-const PLUGIN_ARCHIVE_MAX_BYTES = 16 * 1024 * 1024;
+const PLUGIN_ARCHIVE_MAX_BYTES = 32 * 1024 * 1024;
 const PLUGIN_MAX_REDIRECTS = 4;
 const USERPLUGIN_DIR = "goLiveBypass";
 const UPDATE_STAGING_DIR = ".golivebypass-update-staging";
-const REQUIRED_PLUGIN_FILES = [
-    "index.tsx",
-    "native.ts",
-    "update-channel.ts",
-    "update-security.ts",
-    "stability.ts",
-    "vpn-controller.ts",
-    "vpn-proton.ts",
-    "vpn-types.ts",
-    "vpn-windows.ts",
-    "manifest.json",
-    "bin/win32-x64/proton-confgen.exe",
-] as const;
+
+function resolvePlatformHelperRelativePath(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string {
+    const platformKey = platform === "win32" ? "win32" : platform === "linux" ? "linux" : platform;
+    const exeName = platform === "win32" ? "proton-confgen.exe" : "proton-confgen";
+    return `bin/${platformKey}-${arch}/${exeName}`;
+}
+
+function resolvePlatformLauncherRelativePath(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string | null {
+    return platform === "linux" && arch === "x64" ? `bin/linux-${arch}/netns-launcher` : null;
+}
+
+function requiredFilesForPlatform(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string[] {
+    const common = [
+        "index.tsx",
+        "native.ts",
+        "update-channel.ts",
+        "update-security.ts",
+        "stability.ts",
+        "vpn-controller.ts",
+        "vpn-proton.ts",
+        "vpn-types.ts",
+        "vpn-windows.ts",
+        "vpn-linux.ts",
+        "manifest.json",
+    ];
+    const files = [...common, resolvePlatformHelperRelativePath(platform, arch)];
+    const launcher = resolvePlatformLauncherRelativePath(platform, arch);
+    if (launcher) files.push(launcher);
+    return files;
+}
+function findLinuxNetnsLauncher(): string {
+    const candidates = [
+        join(__dirname, "bin", "linux-x64", "netns-launcher"),
+        join(__dirname, "goLiveBypass", "bin", "linux-x64", "netns-launcher"),
+        resolve(__dirname, "../../src/userplugins/goLiveBypass/bin/linux-x64/netns-launcher"),
+        resolve(__dirname, "../src/userplugins/goLiveBypass/bin/linux-x64/netns-launcher"),
+        resolve(process.cwd(), "goLiveBypass/bin/linux-x64/netns-launcher"),
+        resolve(process.cwd(), "src/userplugins/goLiveBypass/bin/linux-x64/netns-launcher"),
+    ];
+    for (const candidate of candidates) {
+        try {
+            const stat = lstatSync(candidate);
+            if (stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && (stat.mode & 0o111) !== 0 && (stat.mode & 0o022) === 0)
+                return resolve(candidate);
+        } catch {
+            // try the next known package location
+        }
+    }
+    try { return proton.materializeEmbeddedLinuxAsset("netns-launcher", VPN_DATA_DIR); } catch {}
+    throw new Error("O launcher Linux do namespace não foi encontrado no pacote do plugin.");
+}
+async function installFlatpakNetnsLauncher(flatpakSpawn: string, pkexec: string, launcher: string, uid: number): Promise<string> {
+    const install = findSystemBinary("install");
+    if (!install) throw new Error("Utilitário 'install' não encontrado no host para preparar o relaunch Flatpak.");
+    const destination = `/run/user/${uid}/golivebypass-netns-launcher-${process.pid}-${Date.now()}`;
+    const payload = readFileSync(launcher);
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    const child = spawn(flatpakSpawn, ["--host", pkexec, install, "-m", "700", "/dev/stdin", destination], {
+        stdio: ["pipe", "ignore", "pipe"],
+    });
+    let stderr = "";
+    let settled = false;
+    const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(error);
+        else resolve(destination);
+    };
+    child.stderr?.on("data", chunk => { stderr = (stderr + chunk.toString("utf8")).slice(-1000); });
+    child.once("error", error => finish(error));
+    child.once("close", code => {
+        if (code === 0) {
+            finish();
+            return;
+        }
+        if (/AccessDenied|Portal call failed|Permission denied/i.test(stderr)) {
+            finish(new Error("O cliente Flatpak não possui permissão para preparar o launcher no host. Conceda: flatpak override --user --talk-name=org.freedesktop.Flatpak <app-id>"));
+            return;
+        }
+        finish(new Error(`Não foi possível preparar o launcher Linux no host (código ${code ?? "desconhecido"}): ${stderr.trim()}`));
+    });
+    child.stdin?.once("error", error => finish(error));
+    child.stdin?.end(payload);
+    return promise;
+}
+
+async function removeFlatpakNetnsLauncher(flatpakSpawn: string, pkexec: string, destination: string): Promise<void> {
+    const rm = findSystemBinary("rm");
+    if (!rm) return;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const child = spawn(flatpakSpawn, ["--host", pkexec, rm, "-f", destination], { stdio: "ignore" });
+    child.once("error", () => resolve());
+    child.once("close", () => resolve());
+    await promise;
+}
+
 const USERPLUGIN_BUILD_TIMEOUT_MS = 120_000;
 const PENDING_UPDATE_FILE = "plugin-update-pending.json";
 const UPDATE_LOCK_FILE = "plugin-update.lock";
@@ -208,7 +300,7 @@ let pluginOptimizationStatus: PluginOptimizationStatus = {
 
 function pluginSettings(): PluginSettingsRecord {
     const root = RendererSettings.plain as { plugins?: unknown };
-    const plugins = root.plugins;
+    const { plugins } = root;
     if (plugins === null || typeof plugins !== "object") return {};
     const value = (plugins as Record<string, unknown>).GoLiveBypass;
     return value !== null && typeof value === "object" ? value as PluginSettingsRecord : {};
@@ -259,14 +351,333 @@ function log(level: "info" | "warn" | "error", message: string, data?: Record<st
     }
 }
 
+async function requestRelaunch(namespace: string | null): Promise<boolean> {
+    if (process.platform !== "linux") {
+        return false;
+    }
+
+    if (namespace !== null && !isValidLinuxName(namespace)) {
+        throw new Error(`Nome de network namespace inválido para reinício: ${namespace}`);
+    }
+
+    const inFlatpak = isLinuxFlatpak();
+    let flatpakId: string | null = null;
+    if (inFlatpak) {
+        flatpakId = process.env.FLATPAK_ID?.trim() || null;
+        if (!flatpakId && existsSync("/.flatpak-info")) {
+            try {
+                const infoContent = readFileSync("/.flatpak-info", "utf8");
+                const match = infoContent.match(/^app=(.+)$/m) || infoContent.match(/^name=(.+)$/m);
+                if (match && match[1]?.trim()) flatpakId = match[1].trim();
+            } catch {
+                // ignore
+            }
+        }
+        if (!flatpakId) {
+            throw new Error("Ambiente Flatpak detectado, mas o identificador da aplicação (FLATPAK_ID) não pôde ser determinado.");
+        }
+    }
+
+    const currentlyInNamespace = isProcessInNamespace();
+
+    const rawArgs = process.argv.slice(1);
+    const clientArgs: string[] = [];
+    for (const arg of rawArgs) {
+        if (typeof arg !== "string" || arg.length > 4096 || /[\0\r\n]/.test(arg)) continue;
+        if (/password|secret|token|auth/i.test(arg)) continue;
+        clientArgs.push(arg);
+    }
+
+    const safeEnvKeys = [
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+        "XDG_BACKEND",
+        "XDG_SESSION_TYPE",
+        "GDK_BACKEND",
+        "QT_QPA_PLATFORM",
+        "MOZ_ENABLE_WAYLAND",
+        "ELECTRON_OZONE_PLATFORM_HINT",
+        "OZONE_PLATFORM",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+        "XDG_CONFIG_DIRS",
+        "XDG_DATA_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "PULSE_SERVER",
+        "PIPEWIRE_REMOTE",
+        "PIPEWIRE_LATENCY",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_MESSAGES",
+        "SHELL",
+        "TERM",
+        "TZ",
+    ];
+
+    const safeEnv: NodeJS.ProcessEnv = {};
+    for (const key of safeEnvKeys) {
+        const val = process.env[key];
+        if (typeof val === "string" && val.length > 0 && !/[\0\r\n]/.test(val)) {
+            safeEnv[key] = val;
+        }
+    }
+
+    if (namespace) {
+        safeEnv[GOLIVE_PLUGIN_LINUX_NAMESPACE] = namespace;
+    }
+
+    const setenvArgs: string[] = [];
+    for (const [k, v] of Object.entries(safeEnv)) {
+        if (v && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !/[\0\r\n]/.test(v)) {
+            setenvArgs.push(`--setenv=${k}=${v}`);
+        }
+    }
+    const launcherEnvArgs: string[] = [];
+    for (const [k, v] of Object.entries(safeEnv)) {
+        if (v && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !/[\0\r\n]/.test(v)) {
+            launcherEnvArgs.push(`--env=${k}=${v}`);
+        }
+    }
+
+    if (!namespace && currentlyInNamespace) {
+        const unitName = `golivebypass-relaunch-${Date.now()}`;
+        if (inFlatpak) {
+            const flatpakSpawn = findSystemBinary("flatpak-spawn");
+            if (!flatpakSpawn) {
+                throw new Error("Ponte Flatpak ('flatpak-spawn') ausente. Instale o flatpak ou execute o cliente nativo.");
+            }
+            const args = [
+                "--host",
+                "systemd-run",
+                "--user",
+                "--collect",
+                `--unit=${unitName}`,
+                ...setenvArgs,
+                "flatpak",
+                "run",
+                `--unset-env=${GOLIVE_PLUGIN_LINUX_NAMESPACE}`,
+                flatpakId!,
+                ...clientArgs,
+            ];
+            await new Promise<void>((resolve, reject) => {
+                execFile(flatpakSpawn, args, (error, _stdout, stderr) => {
+                    if (error) {
+                        const errStr = `${stderr || ""} ${error.message || ""}`;
+                        if (/AccessDenied|Portal call failed|Permission denied/i.test(errStr)) {
+                            reject(new Error(
+                                "O cliente Flatpak não possui permissão para executar comandos no host via flatpak-spawn. " +
+                                `Conceda a permissão no terminal: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId}`
+                            ));
+                            return;
+                        }
+                        if (/Failed to connect to bus|No such file or directory/i.test(errStr) || error.code === "ENOENT") {
+                            reject(new Error("O serviço 'systemd --user' está indisponível ou inacessível no host para realizar o reinício fora do namespace."));
+                            return;
+                        }
+                        reject(new Error(`Falha no flatpak-spawn/systemd-run para reinício fora do namespace: ${errStr.trim()}`));
+                        return;
+                    }
+                    resolve();
+                });
+            });
+        } else {
+            const systemdRun = findSystemBinary("systemd-run");
+            if (!systemdRun) {
+                throw new Error("Utilitário 'systemd-run' ausente. O reinício para fora do namespace de rede exige systemd na sessão do usuário.");
+            }
+            if (!existsSync(process.execPath)) {
+                throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
+            }
+            const args = [
+                "--user",
+                "--collect",
+                `--unit=${unitName}`,
+                ...setenvArgs,
+                process.execPath,
+                ...clientArgs,
+            ];
+            await new Promise<void>((resolve, reject) => {
+                execFile(systemdRun, args, (error, _stdout, stderr) => {
+                    if (error) {
+                        const errStr = `${stderr || ""} ${error.message || ""}`;
+                        if (/Failed to connect to bus|No such file or directory/i.test(errStr)) {
+                            reject(new Error("O serviço 'systemd --user' está indisponível ou inacessível para realizar o reinício fora do namespace."));
+                            return;
+                        }
+                        reject(new Error(`Falha ao executar systemd-run para reinício fora do namespace: ${errStr.trim()}`));
+                        return;
+                    }
+                    resolve();
+                });
+            });
+        }
+
+        log("info", "comando de relaunch externo aceito com sucesso; encerrando processo atual");
+        app.exit(0);
+        return true;
+    }
+
+    if (namespace) {
+        const directNativeLaunch = currentlyInNamespace && !inFlatpak;
+        let temporaryHostLauncher: string | undefined;
+        let temporaryHostLauncherAccepted = false;
+        try {
+            const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+            const gid = typeof process.getgid === "function" ? process.getgid() : undefined;
+            if (uid === undefined || gid === undefined) throw new Error("Não foi possível determinar o usuário atual para o relaunch Linux.");
+
+            let command: string;
+            let spawnArgs: string[];
+            let childEnv: NodeJS.ProcessEnv | undefined;
+            if (directNativeLaunch) {
+                if (!existsSync(process.execPath)) {
+                    throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
+                }
+                command = process.execPath;
+                spawnArgs = clientArgs;
+                childEnv = safeEnv;
+            } else {
+                const pkexec = findSystemBinary("pkexec");
+                if (!pkexec) throw new Error("Utilitário 'pkexec' ausente; o relaunch para entrar no namespace Linux exige polkit.");
+                const launcher = findLinuxNetnsLauncher();
+                const target = inFlatpak ? (findSystemBinary("flatpak") || "/usr/bin/flatpak") : process.execPath;
+                if (!inFlatpak && !existsSync(target)) {
+                    throw new Error(`Executável do cliente Discord ausente ou inacessível: ${target}`);
+                }
+                const targetArgs = inFlatpak
+                    ? ["run", `--env=${GOLIVE_PLUGIN_LINUX_NAMESPACE}=${namespace}`, flatpakId!, ...clientArgs]
+                    : clientArgs;
+                const launcherArgs = [
+                    namespace,
+                    String(uid),
+                    String(gid),
+                    ...(inFlatpak ? ["--self-delete"] : []),
+                    ...launcherEnvArgs,
+                    "--",
+                    target,
+                    ...targetArgs,
+                ];
+                if (inFlatpak) {
+                    const flatpakSpawn = findSystemBinary("flatpak-spawn");
+                    if (!flatpakSpawn) throw new Error("Ponte Flatpak ('flatpak-spawn') ausente. Conceda acesso ao host ou use o cliente nativo.");
+                    temporaryHostLauncher = await installFlatpakNetnsLauncher(flatpakSpawn, pkexec, launcher, uid);
+                    command = flatpakSpawn;
+                    spawnArgs = ["--host", pkexec, temporaryHostLauncher, ...launcherArgs];
+                } else {
+                    command = pkexec;
+                    spawnArgs = [launcher, ...launcherArgs];
+                }
+            }
+
+            const { promise, resolve, reject } = Promise.withResolvers<void>();
+            const child = spawn(command, spawnArgs, {
+                detached: true,
+                stdio: ["ignore", "ignore", "pipe"],
+                env: childEnv,
+            });
+            let settled = false;
+            let stderrData = "";
+            const finish = (error?: Error) => {
+                if (settled) return;
+                settled = true;
+                if (error) reject(error);
+                else resolve();
+            };
+            child.stderr?.on("data", chunk => { stderrData = (stderrData + chunk.toString("utf8")).slice(-1000); });
+            child.once("error", error => finish(error));
+            child.once("close", (code, signal) => {
+                if (code === 0 || code === null) {
+                    finish();
+                    return;
+                }
+                const detail = `${stderrData.trim()} (código ${code}, sinal ${signal})`.trim();
+                if (/AccessDenied|Portal call failed|Permission denied/i.test(detail)) {
+                    finish(new Error(`O cliente Flatpak não possui permissão para executar o relaunch no host. Conceda: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId || "<app-id>"}`));
+                    return;
+                }
+                finish(new Error(`Relaunch Linux encerrou prematuramente: ${detail}`));
+            });
+            const timer = setTimeout(() => finish(), 200);
+            timer.unref?.();
+            child.unref();
+            await promise;
+            temporaryHostLauncherAccepted = true;
+        } finally {
+            if (temporaryHostLauncher && !temporaryHostLauncherAccepted) {
+                const flatpakSpawn = findSystemBinary("flatpak-spawn");
+                const pkexec = findSystemBinary("pkexec");
+                if (flatpakSpawn && pkexec) await removeFlatpakNetnsLauncher(flatpakSpawn, pkexec, temporaryHostLauncher);
+            }
+        }
+
+        log("info", "comando de relaunch no namespace aceito com sucesso; encerrando processo atual", { namespace });
+        app.exit(0);
+        return true;
+    }
+
+    if (inFlatpak) {
+        const flatpakSpawn = findSystemBinary("flatpak-spawn");
+        if (!flatpakSpawn) {
+            throw new Error("Ponte Flatpak ('flatpak-spawn') ausente. Instale o flatpak ou execute o cliente nativo.");
+        }
+        const spawnArgs = [
+            "--host",
+            "flatpak",
+            "run",
+            `--unset-env=${GOLIVE_PLUGIN_LINUX_NAMESPACE}`,
+            flatpakId!,
+            ...clientArgs,
+        ];
+        const child = spawn(flatpakSpawn, spawnArgs, {
+            detached: true,
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        child.unref();
+        await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            child.once("error", err => { if (!settled) { settled = true; reject(err); } });
+            child.once("exit", (code, signal) => {
+                if (!settled && code !== 0 && code !== null) {
+                    settled = true;
+                    reject(new Error(`Reinício Flatpak encerrou prematuramente (código: ${code}, sinal: ${signal})`));
+                }
+            });
+            setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 200);
+        });
+    } else {
+        if (!existsSync(process.execPath)) {
+            throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
+        }
+        const child = spawn(process.execPath, clientArgs, {
+            detached: true,
+            stdio: "ignore",
+            env: safeEnv,
+        });
+        child.unref();
+    }
+
+    log("info", "comando de relaunch normal aceito com sucesso; encerrando processo atual");
+    app.exit(0);
+    return true;
+}
+
 const controller = new PluginVpnController({
     dataDir: VPN_DATA_DIR,
     guiDataDir: GUI_DATA_DIR,
     readSettings: controllerSettings,
     isEnabled: pluginEnabled,
     log,
+    requestRelaunch,
 });
-
 export function logFromRenderer(_: IpcMainInvokeEvent, message: unknown): void {
     if (typeof message === "string" && message.trim()) log("info", message.slice(0, 2000));
 }
@@ -434,11 +845,11 @@ export function enable(_: IpcMainInvokeEvent) {
 }
 
 export function shutdown(_: IpcMainInvokeEvent) {
-    // Desativar/recarregar o userplugin não deve reiniciar o Discord no meio de
-    // uma chamada. O caminho explícito restartDiscord() continua responsável
-    // pelo relaunch quando a pessoa confirma uma atualização preparada.
+    // Desativar o userplugin no Windows não reinicia o Discord para não interromper
+    // chamadas em andamento. No Linux, contudo, um processo dentro de netns não consegue
+    // voltar à rede host sem relaunch; portanto pedimos relaunch externo apenas no Linux.
     controller.cancelProtonLogin();
-    return controller.shutdown(false);
+    return controller.shutdown(process.platform === "linux");
 }
 
 export function restoreNetwork(_: IpcMainInvokeEvent) {
@@ -606,8 +1017,7 @@ function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: s
     return new Promise((resolveBytes, reject) => {
         let settled = false;
         let delegated = false;
-        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-        let req: ReturnType<typeof request> | undefined;
+        let req: ClientRequest | undefined;
 
         const cleanup = () => {
             if (deadlineTimer) clearTimeout(deadlineTimer);
@@ -632,7 +1042,7 @@ function downloadBytes(url: string, maxBytes: number, redirects = 0, baseUrl?: s
         };
         const onAbort = () => abortRequest("download do update cancelado");
 
-        deadlineTimer = setTimeout(() => abortRequest("update request timed out"), remaining);
+        const deadlineTimer = setTimeout(() => abortRequest("update request timed out"), remaining);
         deadlineTimer.unref?.();
         options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -721,7 +1131,7 @@ function isProcessAlive(pid: number): boolean {
         process.kill(pid, 0);
         return true;
     } catch (error) {
-        const code = (error as { code?: string }).code;
+        const { code } = (error as { code?: string });
         if (code === "ESRCH") return false;
         if (process.platform !== "win32") return true;
         try {
@@ -743,9 +1153,9 @@ function isProcessAlive(pid: number): boolean {
 function readUpdateLockOwner(path: string): { pid: number; token: string; startedAt: number } | null {
     try {
         const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-        const pid = raw.pid;
-        const token = raw.token;
-        const startedAt = raw.startedAt;
+        const { pid } = raw;
+        const { token } = raw;
+        const { startedAt } = raw;
         if (typeof pid !== "number" || !Number.isSafeInteger(pid) || typeof token !== "string" || !token
             || typeof startedAt !== "number" || !Number.isFinite(startedAt)) return null;
         return { pid, token, startedAt };
@@ -1030,11 +1440,23 @@ function recoverInterruptedPluginUpdate(): void {
     log("warn", "intenção de update interrompida descartada antes da troca", { versão: pending.version, canal: pending.channel });
 }
 
-function readManifest(target: string): { name?: unknown; version?: unknown; updater?: unknown } {
+interface PluginManifestData {
+    name?: unknown;
+    version?: unknown;
+    updater?: unknown;
+    platforms?: unknown;
+}
+
+function readManifest(target: string): PluginManifestData {
     const manifestPath = join(target, "manifest.json");
     if (!existsSync(manifestPath)) throw new Error("manifest do plugin ausente");
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: unknown; version?: unknown; updater?: unknown };
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as PluginManifestData;
     if (!isCompatiblePluginManifest(manifest, PLUGIN_ASSET)) throw new Error("manifest do plugin não pertence ao updater oficial");
+    if (manifest.platforms !== undefined) {
+        if (!Array.isArray(manifest.platforms) || !manifest.platforms.every(p => typeof p === "string" && p.trim().length > 0)) {
+            throw new Error("manifest do plugin contém metadados de plataformas inválidos");
+        }
+    }
     return manifest;
 }
 
@@ -1168,8 +1590,8 @@ function validateExtractedTree(root: string): void {
     }
 }
 
-function validatePluginSourceTree(root: string): void {
-    let rootStats: ReturnType<typeof lstatSync>;
+function validatePluginSourceTree(root: string, platform: NodeJS.Platform = process.platform, arch: string = process.arch): void {
+    let rootStats: Stats;
     try { rootStats = lstatSync(root); }
     catch { throw new Error("fonte do plugin ausente"); }
     if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) throw new Error("fonte do plugin não é uma pasta regular");
@@ -1188,9 +1610,18 @@ function validatePluginSourceTree(root: string): void {
         }
     }
 
-    for (const relative of REQUIRED_PLUGIN_FILES) {
+    const manifest = readManifest(root);
+    if (Array.isArray(manifest.platforms)) {
+        const normalizedPlatforms = manifest.platforms.map(p => String(p).trim().toLowerCase());
+        const current = platform === "win32" ? ["win32", "windows"] : [platform];
+        if (!current.some(p => normalizedPlatforms.includes(p))) {
+            throw new Error(`o pacote do plugin não suporta a plataforma atual (${platform})`);
+        }
+    }
+
+    for (const relative of requiredFilesForPlatform(platform, arch)) {
         const candidate = join(root, relative);
-        let stats: ReturnType<typeof lstatSync>;
+        let stats: Stats;
         try { stats = lstatSync(candidate); }
         catch { throw new Error(`archive do plugin não contém ${relative}`); }
         if (stats.isSymbolicLink() || !stats.isFile() || stats.size <= 0) throw new Error(`archive do plugin contém ${relative} inválido`);
@@ -1237,7 +1668,7 @@ function inspectPendingUpdate(): PendingUpdateInspection {
         };
     }
 
-    const sourceDigest = pending.sourceDigest;
+    const { sourceDigest } = pending;
     if (typeof sourceDigest !== "string") {
         try {
             quarantineLegacyPendingUpdate(pending);
@@ -1356,7 +1787,6 @@ function runPluginUpdateCheck(policy: PluginUpdatePolicy): Promise<PluginUpdateC
     if (pluginUpdateCheckFlight?.policyKey === policyKey) return pluginUpdateCheckFlight.promise;
     const controller = new AbortController();
     const revision = pluginUpdatePolicyRevision;
-    let trackedFlight!: PluginUpdateFlight<PluginUpdateCheckResult>;
     const flight = performPluginUpdateCheck(policy, controller.signal)
         .catch(error => {
             const pending = trustedPendingResultState();
@@ -1376,15 +1806,15 @@ function runPluginUpdateCheck(policy: PluginUpdatePolicy): Promise<PluginUpdateC
             // pode marcar o canal atual como consultado.
             if (revision === pluginUpdatePolicyRevision && policyKey === updatePolicyKey(pluginUpdatePolicy))
                 pluginUpdateLastCheckedAt = Date.now();
-            if (pluginUpdateCheckFlight === trackedFlight) pluginUpdateCheckFlight = null;
+            if (pluginUpdateCheckFlight?.promise === flight) pluginUpdateCheckFlight = null;
         });
-    trackedFlight = { policyKey, revision, controller, promise: flight };
+    const trackedFlight: PluginUpdateFlight<PluginUpdateCheckResult> = { policyKey, revision, controller, promise: flight };
     pluginUpdateCheckFlight = trackedFlight;
     return flight;
 }
 
 async function performPluginUpdateLocked(policy: PluginUpdatePolicy, revision: number, controller: AbortController): Promise<PluginUpdateResult> {
-    const signal = controller.signal;
+    const { signal } = controller;
     assertCurrentPluginUpdatePolicy(policy, revision);
     if (policy.channel === "stable") discardPendingBetaForStable();
     const sourceAtStart = userpluginSource();
@@ -1539,7 +1969,6 @@ function runPluginUpdate(policy: PluginUpdatePolicy, revision = pluginUpdatePoli
         });
     }
     const controller = new AbortController();
-    let trackedFlight!: PluginUpdateFlight<PluginUpdateResult>;
     const flight = performPluginUpdate(policy, revision, controller)
         .catch(error => ({
             ok: false as const,
@@ -1550,9 +1979,9 @@ function runPluginUpdate(policy: PluginUpdatePolicy, revision = pluginUpdatePoli
             error: safeDiagnosticDetail(error, 500),
         }))
         .finally(() => {
-            if (pluginUpdateFlight === trackedFlight) pluginUpdateFlight = null;
+            if (pluginUpdateFlight?.promise === flight) pluginUpdateFlight = null;
         });
-    trackedFlight = { policyKey, revision, controller, promise: flight };
+    const trackedFlight: PluginUpdateFlight<PluginUpdateResult> = { policyKey, revision, controller, promise: flight };
     pluginUpdateFlight = trackedFlight;
     return flight;
 }
@@ -1676,7 +2105,7 @@ function readInstalledPluginVersion(target: string): string {
 
 function currentPluginVersion(): string {
     try { return readInstalledPluginVersion(userpluginSource().target); }
-    catch { return UNKNOWN_PLUGIN_VERSION; }
+    catch { return normalizePluginVersion(PLUGIN_VERSION) ?? UNKNOWN_PLUGIN_VERSION; }
 }
 
 function userpluginSource(allowMissingTarget = false) {

@@ -47,6 +47,7 @@ You will need a ProtonVPN account; a free one works, with the tier caveats noted
 protonvpn-wg-confgen -username <username> -countries <country-codes> [options]
 protonvpn-wg-confgen -username <username> -server <server-name> [options]
 protonvpn-wg-confgen -username <username> -list-servers [-countries <country-codes>]
+protonvpn-wg-confgen -username <username> -route-catalog [-countries <country-codes>] [-auto-ping]
 protonvpn-wg-confgen -username <username> -list-configs
 protonvpn-wg-confgen -username <username> -renew-serial <serial-number>
 protonvpn-wg-confgen -username <username> -check-plan -json
@@ -60,6 +61,7 @@ protonvpn-wg-confgen -username <username> -check-plan -json
 |------|-------------|
 | *(default)* | Generate a WireGuard configuration |
 | `-list-servers` | List available servers (country, name, city, load, score, tier, features) and exit. Honors `-countries`, `-secure-core`, `-p2p-only`, and `-free-only` |
+| `-route-catalog` | List all eligible public routes (country, name, city, load, score, tier) and exit without generating a certificate, tunnel, or profile. Add `-auto-ping` to include bounded regional ping measurements |
 | `-list-configs` | List persistent configurations on the account (SerialNumber, DeviceName, expiry, key fingerprint) and exit |
 | `-renew-serial <serial>` | Renew a persistent certificate by SerialNumber, reusing its existing key. Extends it server-side and writes no `.conf` file |
 | `-check-plan` | Check the saved session's account plan through Proton's authenticated settings API and exit. Does not prompt for a password or open a tunnel |
@@ -154,6 +156,7 @@ Listing and maintenance:
 
 ```bash
 protonvpn-wg-confgen -username myusername -list-servers -countries US,PL
+protonvpn-wg-confgen -username myusername -route-catalog -countries US,PL
 protonvpn-wg-confgen -username myusername -list-servers -secure-core
 protonvpn-wg-confgen -username myusername -list-configs
 protonvpn-wg-confgen -username myusername -renew-serial "SERIAL12345"

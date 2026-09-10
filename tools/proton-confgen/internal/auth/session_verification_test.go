@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,6 +47,69 @@ func TestVerifySessionStatusDistinguishesTemporaryFailure(t *testing.T) {
 				t.Fatalf("session-invalid classification = %v, want %v (err %v)", got, tt.wantInvalid, err)
 			}
 		})
+	}
+}
+
+// A verificação consulta /vpn/v1/logicals, cujo catálogo de servidores já
+// passou do antigo limite de leitura de 256 KB. O envelope Code deve ser lido
+// em streaming sem rejeitar a sessão nem baixar o corpo inteiro.
+func TestVerifySessionStatusReadsCodeFromLargeCatalogBody(t *testing.T) {
+	payload := `{"Code":1000,` + strings.Repeat(`"pad":"x",`, 64) + `"Details":[]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, payload)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = io.Copy(w, strings.NewReader(strings.Repeat("A", 3*1024*1024)))
+	}))
+	defer server.Close()
+
+	valid, err := VerifySessionStatus(server.Client(), server.URL, &api.Session{AccessToken: "access", UID: "uid"})
+	if !valid || err != nil {
+		t.Fatalf("VerifySessionStatus() = (%v, %v); want valid session despite oversized catalog", valid, err)
+	}
+}
+
+func TestVerifySessionStatusRejectsErrorCodeInsideLargeBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"Code":8002}`)
+		_, _ = io.Copy(w, strings.NewReader(strings.Repeat("A", 512*1024)))
+	}))
+	defer server.Close()
+
+	valid, err := VerifySessionStatus(server.Client(), server.URL, &api.Session{AccessToken: "access", UID: "uid"})
+	if valid || !IsSessionInvalid(err) {
+		t.Fatalf("VerifySessionStatus() = (%v, %v); want session-invalid classification", valid, err)
+	}
+}
+
+func TestVerifySessionStatusRejectsEnvelopeWithoutCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"Unexpected":true}`)
+	}))
+	defer server.Close()
+
+	valid, err := VerifySessionStatus(server.Client(), server.URL, &api.Session{AccessToken: "access", UID: "uid"})
+	var protocolErr *ProtocolError
+	if valid || !errors.As(err, &protocolErr) {
+		t.Fatalf("VerifySessionStatus() = (%v, %v); want ProtocolError for missing Code", valid, err)
+	}
+}
+
+func TestVerifySessionStatusKeepsTemporaryOnTruncatedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "4096")
+		_, _ = fmt.Fprint(w, `{"Code":`) // conexão encerrada no meio do envelope
+	}))
+	defer server.Close()
+
+	valid, err := VerifySessionStatus(server.Client(), server.URL, &api.Session{AccessToken: "access", UID: "uid"})
+	if valid || !IsTemporarySessionError(err) {
+		t.Fatalf("VerifySessionStatus() = (%v, %v); want temporary error on truncated body", valid, err)
 	}
 }
 

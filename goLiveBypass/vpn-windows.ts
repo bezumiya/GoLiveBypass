@@ -1,17 +1,23 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+import { execFile, execFileSync } from "child_process";
+import crypto from "crypto";
+import { promises as dns } from "dns";
 import fs from "fs";
+import https from "https";
 import os from "os";
 import path from "path";
-import crypto from "crypto";
-import https from "https";
-import { promises as dns } from "dns";
-import { execFile, execFileSync } from "child_process";
 
 import {
-    VPN_SERVICE_NAMES,
     formatAllowedApps,
     safeDiagnosticDetail,
     sanitizeWireGuardConfig,
     validateWireGuardConfig,
+    VPN_SERVICE_NAMES,
     type WireGuardConfigValidation,
 } from "./vpn-types";
 
@@ -705,7 +711,7 @@ function probePathKey(value: string): string {
 
 function probeErrorCode(error: unknown): string | undefined {
     if (!error || typeof error !== "object") return undefined;
-    const code = (error as { code?: unknown }).code;
+    const { code } = (error as { code?: unknown });
     return typeof code === "string" ? code : undefined;
 }
 

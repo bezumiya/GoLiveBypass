@@ -35,11 +35,23 @@ vi.mock('child_process', () => ({
       return true;
     });
     queueMicrotask(() => {
+      const routeCatalog = args.includes('-route-catalog');
       const routePool = args.includes('-route-pool');
       const outputDirAt = args.indexOf('-route-pool-output-dir');
       const outputDir = outputDirAt >= 0 ? args[outputDirAt + 1] : '';
       const result = state.json !== undefined
         ? state.json
+        : routeCatalog
+        ? {
+          success: state.success,
+          routes: [0, 1, 2].map((index) => ({
+            server: index === 0 ? 'US#1' : index === 1 ? 'NL#2' : 'CH#3',
+            country: index === 0 ? 'US' : index === 1 ? 'NL' : 'CH',
+            city: index === 0 ? 'New York' : index === 1 ? 'Amsterdam' : 'Zurich',
+            tier: 'Free', load: 10 + index, score: 1 + index,
+            ...(args.includes('-auto-ping') ? { pingMs: 80 + index } : {}),
+          })),
+        }
         : routePool
         ? {
           success: state.success,
@@ -84,7 +96,7 @@ vi.mock('child_process', () => ({
   }),
 }));
 
-import { canReuseMeasuredProfile, generateManualProtonConfig, generateOptimalProtonConfig, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, removeStagedProtonConfig, runConfgen } from '../electron/proton';
+import { canReuseMeasuredProfile, generateManualProtonConfig, generateOptimalProtonConfig, generateProtonRouteCatalog, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, removeStagedProtonConfig, runConfgen } from '../electron/proton';
 
 describe('medidor isolado da regra WireSock', () => {
   beforeEach(() => {
@@ -191,6 +203,81 @@ describe('medidor isolado da regra WireSock', () => {
       expect(fs.existsSync(path.dirname(state.executable))).toBe(false);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
+  it('carrega o catálogo completo sem ping, perfil ou arquivo temporário', async () => {
+    state.progressChunks = [
+      'GOLIVE_PROGRESS {"phase":"catalog","total":3,"tested":2,"succeeded":2,"server":"NL#2","country":"NL","city":"Amsterdam","tier":"Free","load":11,"score":2,"status":"success"}\n',
+    ];
+    const progress: any[] = [];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-catalog-'));
+    try {
+      const result = await generateProtonRouteCatalog(dir, {
+        username: 'test',
+        countries: 'US,NL',
+        freeOnly: true,
+        excludeServers: ['OLD#1'],
+        onProgress: (event) => progress.push(event),
+      });
+      expect(result).toEqual({
+        success: true,
+        routes: [
+          { server: 'US#1', country: 'US', city: 'New York', tier: 'Free', load: 10, score: 1 },
+          { server: 'NL#2', country: 'NL', city: 'Amsterdam', tier: 'Free', load: 11, score: 2 },
+          { server: 'CH#3', country: 'CH', city: 'Zurich', tier: 'Free', load: 12, score: 3 },
+        ],
+      });
+      expect(state.args).toEqual(expect.arrayContaining([
+        '-route-catalog', '-json', '-exclude-countries', 'BR', '-countries', 'US,NL',
+        '-free-only', '-exclude-servers', 'OLD#1', '-progress-json',
+      ]));
+      expect(state.args).not.toContain('-route-pool');
+      expect(state.args).not.toContain('-route-pool-output-dir');
+      expect(result.routes?.[0]).not.toHaveProperty('endpoint');
+      expect(result.routes?.[0]).not.toHaveProperty('confFile');
+      expect(progress).toEqual([
+        { phase: 'catalog', total: 3, tested: 2, succeeded: 2, server: 'NL#2', country: 'NL', city: 'Amsterdam', tier: 'Free', load: 11, score: 2, status: 'success' },
+      ]);
+      expect(fs.readdirSync(dir).filter((name) => name.includes('route-pool') || name.includes('manual-proton-route'))).toHaveLength(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('mede ping regional sem gerar perfil temporário', async () => {
+    state.progressChunks = [
+      'GOLIVE_PROGRESS {"phase":"ping","total":2,"tested":1,"succeeded":1,"server":"NL#2","pingMs":81,"status":"success"}\n',
+      'GOLIVE_PROGRESS {"phase":"catalog","total":3,"tested":2,"succeeded":2,"server":"NL#2","country":"NL","city":"Amsterdam","tier":"Free","load":11,"score":2,"pingMs":81,"status":"success"}\n',
+    ];
+    const progress: any[] = [];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-catalog-ping-'));
+    try {
+      const result = await generateProtonRouteCatalog(dir, {
+        username: 'test',
+        countries: 'US,NL',
+        freeOnly: true,
+        measurePing: true,
+        onProgress: (event) => progress.push(event),
+      });
+      expect(result).toMatchObject({
+        success: true,
+        routes: [
+          { server: 'US#1', pingMs: 80 },
+          { server: 'NL#2', pingMs: 81 },
+          { server: 'CH#3', pingMs: 82 },
+        ],
+      });
+      expect(state.args).toEqual(expect.arrayContaining([
+        '-route-catalog', '-json', '-auto-ping', '-progress-json',
+      ]));
+      expect(state.args).not.toContain('-speed-test');
+      expect(state.args).not.toContain('-route-pool');
+      expect(progress).toEqual([
+        { phase: 'ping', total: 2, tested: 1, succeeded: 1, server: 'NL#2', pingMs: 81, status: 'success' },
+        { phase: 'catalog', total: 3, tested: 2, succeeded: 2, server: 'NL#2', country: 'NL', city: 'Amsterdam', tier: 'Free', load: 11, score: 2, pingMs: 81, status: 'success' },
+      ]);
+      expect(fs.readdirSync(dir).filter((name) => name.includes('route-pool') || name.includes('manual-proton-route'))).toHaveLength(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('prepara duas reservas em pasta temporária sem promover o perfil ativo', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-pool-result-'));
     try {
@@ -206,6 +293,28 @@ describe('medidor isolado da regra WireSock', () => {
       expect(fs.readFileSync(path.join(dir, 'wireguard.conf'), 'utf8')).toBe('active profile');
       expect(result.stagingDir).toBeTruthy();
       expect(fs.existsSync(result.routes![0].confFile)).toBe(true);
+      fs.rmSync(result.stagingDir!, { recursive: true, force: true });
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('propaga progresso de ping enquanto prepara reservas', async () => {
+    state.progressChunks = [
+      'GOLIVE_PROGRESS {"phase":"ping","total":24,"tested":1,"succeeded":1,"server":"NL#12","pingMs":42,"status":"success"}\n',
+    ];
+    const progress: any[] = [];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-pool-progress-'));
+    try {
+      const result = await generateProtonRoutePool(dir, {
+        username: 'test',
+        size: 2,
+        countries: 'US,NL',
+        excludeServers: ['OLD#1'],
+        onProgress: (event) => progress.push(event),
+      });
+      expect(result.success).toBe(true);
+      expect(state.args).toContain('-progress-json');
+      expect(progress).toEqual([
+        { phase: 'ping', total: 24, tested: 1, succeeded: 1, server: 'NL#12', pingMs: 42, status: 'success' },
+      ]);
       fs.rmSync(result.stagingDir!, { recursive: true, force: true });
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });

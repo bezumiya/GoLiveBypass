@@ -78,7 +78,7 @@ describe("preferências e painel do updater do plugin", () => {
     const start = blockBetween("start() {", "    stop() {");
     expect(source).toContain("function PluginOnboardingModal");
     expect(source).toContain("1  Conta Proton");
-    expect(source).toContain("2  Rota WireGuard");
+    expect(source).toContain("2  Rota real");
     expect(source).toContain("getProtonOptimizationStatus");
     expect(source).toContain("cancelProtonOptimization");
     expect(source).toContain("Abrir guia de configuração");
@@ -96,7 +96,7 @@ describe("preferências e painel do updater do plugin", () => {
     expect(source).toContain("CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS");
     expect(source).toContain("progressIsIndeterminate");
     expect(source).toContain("Cancelar validação");
-    expect(source).toContain("A configuração foi salva; a ativação da VPN continua sendo uma ação separada.");
+    expect(source).toContain("a ativação da VPN continua sendo uma ação separada no painel");
     expect(source).not.toContain("app.relaunch");
     expect(source).not.toContain("app.quit");
   });

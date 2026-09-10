@@ -1,5 +1,5 @@
 import { ipcRenderer } from 'electron';
-
+import type { ProtonOptimizationProgress } from './proton';
 (window as any).api = {
   platform: process.platform,
   activate: () => ipcRenderer.invoke('activate'),
@@ -49,13 +49,22 @@ import { ipcRenderer } from 'electron';
   logoutProton: () => ipcRenderer.invoke('logout-proton'),
   optimizeProtonRoute: (options?: { country?: string; freeOnly?: boolean; autoPing?: boolean; speedTest?: boolean; reuseMeasured?: boolean; refreshOnStartup?: boolean; requestId?: string }) =>
     ipcRenderer.invoke('optimize-proton-route', options),
+  discoverProtonRoutes: (options?: { requestId?: string; measurePing?: boolean }) =>
+    ipcRenderer.invoke('discover-proton-routes', options),
+  cancelProtonRouteDiscovery: (requestId: string) =>
+    ipcRenderer.invoke('cancel-proton-route-discovery', requestId),
   selectProtonRoute: (options: { measurementId: string; server: string }) =>
     ipcRenderer.invoke('select-proton-route', options),
   cancelProtonOptimization: (requestId: string) => ipcRenderer.invoke('cancel-proton-optimization', requestId),
-  onProtonOptimizationProgress: (callback: (progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, progress: import('./proton').ProtonOptimizationProgress & { requestId: string }) => callback(progress);
+  onProtonOptimizationProgress: (callback: (progress: ProtonOptimizationProgress & { requestId: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: ProtonOptimizationProgress & { requestId: string }) => callback(progress);
     ipcRenderer.on('proton-optimization-progress', listener);
     return () => ipcRenderer.removeListener('proton-optimization-progress', listener);
+  },
+  onProtonRouteDiscoveryProgress: (callback: (progress: ProtonOptimizationProgress & { requestId: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: ProtonOptimizationProgress & { requestId: string }) => callback(progress);
+    ipcRenderer.on('proton-route-discovery-progress', listener);
+    return () => ipcRenderer.removeListener('proton-route-discovery-progress', listener);
   },
   getProtonSettings: () => ipcRenderer.invoke('get-proton-settings'),
   getProtonPlan: (options?: { force?: boolean }) => ipcRenderer.invoke('get-proton-plan', options),

@@ -79,13 +79,17 @@ func Parse() (*Config, error) {
 	// Server listing mode
 	flag.BoolVar(&cfg.ListServers, "list-servers", false, "List available servers and exit (optionally filter by -countries)")
 
+	// Route catalog mode (enumerates all currently eligible public routes)
+	flag.BoolVar(&cfg.RouteCatalog, "route-catalog", false, "List all eligible Proton routes and exit")
+
 	// Renew mode
 	flag.StringVar(&cfg.RenewSerial, "renew-serial", "", "Renew a persistent configuration by SerialNumber (reuses existing key, no config file generated)")
 
-	// Automated GUI & Ping extensions
+	// Keep each flag registered exactly once: the default FlagSet panics on
+	// duplicate names before any command mode can execute.
+	flag.BoolVar(&cfg.ProgressJSON, "progress-json", false, "Emit machine-readable progress events as JSON on stderr")
 	flag.BoolVar(&cfg.SpeedTest, "speed-test", false, "Ping all regional routes, validate twelve, then measure download/upload on up to six healthy finalists (up to 30 MiB, about 3m)")
 	flag.BoolVar(&cfg.ManualProbe, "manual-probe", false, "Validate and generate one explicitly selected server without speed test")
-	flag.BoolVar(&cfg.ProgressJSON, "progress-json", false, "Emit speed-test progress events as JSON on stderr")
 	flag.BoolVar(&cfg.SpeedTestTrace, "speed-test-trace", false, "Print the four speed-test stages in the terminal (ping, shortlist, tunnel, speed)")
 	flag.StringVar(&cfg.TwoFactorCode, "2fa", "", "2FA TOTP code for non-interactive authentication")
 	flag.StringVar(&cfg.SessionFile, "session-file", "", "Custom path for session cache file")
@@ -141,8 +145,8 @@ func Parse() (*Config, error) {
 		return cfg, nil
 	}
 
-	// -list-servers does not need a country filter either.
-	if cfg.ListServers {
+	// -list-servers and -route-catalog do not need a country filter either.
+	if cfg.ListServers || cfg.RouteCatalog {
 		cfg.Username = validation.CleanUsername(cfg.Username)
 		return cfg, nil
 	}

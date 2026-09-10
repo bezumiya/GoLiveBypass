@@ -7,6 +7,7 @@ export type StartupRestoreStatus =
 
 export interface StartupOptimizationResult {
   success: boolean;
+  skipped?: boolean;
   error?: string;
 }
 
@@ -58,10 +59,12 @@ export async function restoreBypassOnStartup(
   }
 
   let optimized = false;
+  let optimizationSkipped = false;
   let optimizationError: string | undefined;
   try {
     const result = await options.optimize(options.signal);
-    optimized = result.success === true;
+    optimizationSkipped = result.skipped === true;
+    optimized = result.success === true && !optimizationSkipped;
     optimizationError = result.error;
   } catch (error) {
     optimizationError = errorMessage(error);
@@ -71,26 +74,26 @@ export async function restoreBypassOnStartup(
     return {
       status: "cancelled",
       optimized,
-      usedFallback: !optimized,
+      usedFallback: !optimized && !optimizationSkipped,
       error: optimizationError,
     };
   }
 
-  if (!optimized) options.onOptimizationFailure?.(optimizationError);
+  if (!optimized && !optimizationSkipped) options.onOptimizationFailure?.(optimizationError);
 
   try {
     await options.activate();
     return {
       status: "activated",
       optimized,
-      usedFallback: !optimized,
+      usedFallback: !optimized && !optimizationSkipped,
       error: optimizationError,
     };
   } catch (error) {
     return {
       status: options.signal?.aborted ? "cancelled" : "failed",
       optimized,
-      usedFallback: !optimized,
+      usedFallback: !optimized && !optimizationSkipped,
       error: errorMessage(error),
     };
   }

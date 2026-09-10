@@ -8,6 +8,10 @@
     }
   ],
   "version": "2.0.0-beta.1",
+  "platforms": [
+    "win32",
+    "linux"
+  ],
   "updater": {
     "type": "github",
     "id": "bezumiya/GoLiveBypass",

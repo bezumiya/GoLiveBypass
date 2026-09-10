@@ -14,18 +14,18 @@ import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import type { RenderModalProps } from "@vencord/discord-types";
 import { findStoreLazy } from "@webpack";
-import { Button, Constants, MaskedLink, Modal, React, RestAPI, SearchableSelect, TextInput, closeModal as closeDiscordModal, openModal, showToast, Toasts, UserStore, useEffect, useState } from "@webpack/common";
+import { Button, closeModal as closeDiscordModal, Constants, MaskedLink, Modal, openModal, React, RestAPI, SearchableSelect, showToast, TextInput, Toasts, useEffect, UserStore, useState } from "@webpack/common";
 
 import {
-    evaluateStreamObservation,
     evaluateStreamClaim,
+    evaluateStreamObservation,
     initialStreamClaimState,
     normalizeStreamClaim,
     type StreamClaimState,
     type StreamObservation,
     type StreamObservationStatus,
 } from "./stability";
-import { protonUsernamesMatch } from "./vpn-types";
+import { protonUsernamesMatch, type VpnPlatform, type VpnState } from "./vpn-types";
 
 type PluginUpdateChannel = "stable" | "beta";
 
@@ -494,8 +494,10 @@ const onboardingBoxStyle = {
 };
 
 function OnboardingSteps({ page, customMode }: { page: OnboardingPage; customMode: boolean }) {
-    const active = page === "account" ? 0 : 1;
-    const labels = customMode ? ["1  Configuração WireGuard", "2  Validação da rota"] : ["1  Conta Proton", "2  Rota WireGuard"];
+    const active = page === "account" ? 0 : page === "route" ? 1 : 2;
+    const labels = customMode
+        ? ["1  Configuração WireGuard", "2  Rota real", "3  Pronto"]
+        : ["1  Conta Proton", "2  Rota real", "3  Pronto"];
     return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }} aria-label="Etapas da configuração" role="list">
             {labels.map((label, index) => (
@@ -504,7 +506,7 @@ function OnboardingSteps({ page, customMode }: { page: OnboardingPage; customMod
                     role="listitem"
                     aria-current={index === active ? "step" : undefined}
                     style={{
-                        flex: "1 1 160px",
+                        flex: "1 1 120px",
                         minWidth: 0,
                         padding: "8px 10px",
                         borderRadius: "6px",
@@ -533,6 +535,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
     const [sessionLoading, setSessionLoading] = useState(true);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [vpnStatus, setVpnStatus] = useState<PluginVpnStatus | null>(null);
     const [optimization, setOptimization] = useState<PluginOptimizationStatus | null>(null);
     const [requestId, setRequestId] = useState<string | null>(null);
     const disposedRef = React.useRef(false);
@@ -582,9 +585,23 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             onClosed();
         };
     }, []);
+    useEffect(() => {
+        let active = true;
+        if (typeof Native?.getVpnStatus === "function") {
+            void Promise.resolve(Native.getVpnStatus()).then(status => {
+                if (active && !disposedRef.current && status) setVpnStatus(status as PluginVpnStatus);
+            }).catch(() => {});
+        }
+        return () => { active = false; };
+    }, []);
 
     useEffect(() => {
-        if (!disposedRef.current) pageHeadingRef.current?.focus({ preventScroll: true });
+        if (!disposedRef.current) {
+            const timer = setTimeout(() => {
+                if (!disposedRef.current) pageHeadingRef.current?.focus({ preventScroll: true });
+            }, 50);
+            return () => clearTimeout(timer);
+        }
     }, [page]);
 
     const closeModal = () => {
@@ -743,7 +760,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 if (loginRequestIdRef.current === loginRequestId) loginRequestIdRef.current = null;
                 if (disposedRef.current || revision !== accountRevisionRef.current) return;
                 if (!loginResult.success) {
-                    const code = loginResult.code;
+                    const { code } = loginResult;
                     if (code === "CANCELLED") setError("Login Proton cancelado. Você pode tentar novamente.");
                     else if (code === "TWO_FACTOR_REQUIRED") setError("Esta conta exige o código 2FA.");
                     else if (code === "NETWORK_ERROR" || code === "TIMEOUT") setError("O login não conseguiu alcançar o Proton. Verifique a rede e tente novamente.");
@@ -920,27 +937,25 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                                 : "preparando a seleção";
 
     const actions = page === "account" ? [
-        { text: busy ? (customMode ? "Validando…" : "Entrando…") : customMode ? "Continuar para validação" : "Continuar para rota", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || (!customMode && !username.trim()) },
+        { text: busy ? (customMode ? "Validando…" : "Entrando…") : customMode ? "Continuar para rota real" : "Continuar para rota real", variant: "primary" as const, onClick: () => void continueToRoute(), disabled: busy || sessionLoading || (!customMode && !username.trim()) },
         ...(busy && !customMode ? [{ text: loginCancelRequested ? "Cancelando…" : "Cancelar login", variant: "danger" as const, onClick: cancelActiveLogin, disabled: loginCancelRequested }] : []),
     ] : page === "route" ? [
         { text: "Voltar", variant: "secondary" as const, onClick: () => { if (!busy) setPage("account"); }, disabled: busy },
         busy
-            ? customMode
-                ? { text: "Cancelar validação", variant: "danger" as const, onClick: cancelOptimization }
-                : { text: "Cancelar otimização", variant: "danger" as const, onClick: () => void cancelOptimization() }
-            : { text: progress?.phase === "completed" ? "Continuar" : customMode ? "Validar configuração" : "Otimizar rota", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
+            ? { text: customMode ? "Cancelar validação" : "Cancelar otimização", variant: "danger" as const, onClick: cancelOptimization }
+            : { text: progress?.phase === "completed" ? "Continuar" : customMode ? "Validar rota real" : "Preparar rota real", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
     ] : [
         { text: "Concluir configuração", variant: "primary" as const, onClick: complete },
     ];
     const pageHeading = page === "account"
-        ? customMode ? "Use sua configuração WireGuard" : "Conecte sua conta ProtonVPN"
+        ? customMode ? "1. Configure sua rota WireGuard" : "1. Conecte sua conta ProtonVPN"
         : page === "route"
-            ? customMode ? "Valide sua rota personalizada" : "Prepare e otimize sua rota"
-            : customMode ? "Configuração personalizada validada" : "Configuração concluída";
+            ? customMode ? "2. Valide sua rota WireGuard real" : "2. Prepare e teste sua rota real"
+            : customMode ? "3. Configuração concluída e validada" : "3. Rota real preparada e pronta";
 
     if (!Native) {
         return <Modal {...modalProps} onClose={closeModal} title="Configuração do GoLiveBypass" size="md" actions={[{ text: "Fechar", variant: "secondary", onClick: closeModal }]}>
-            <Paragraph>O transporte WireGuard do plugin está disponível somente no Discord desktop Windows x64 nesta versão.</Paragraph>
+            <Paragraph>A parte nativa do plugin não está disponível nesta instalação. O transporte WireGuard exige a ponte desktop nos clientes homologados (Windows x64 e Linux x64).</Paragraph>
         </Modal>;
     }
 
@@ -953,7 +968,17 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                     {customMode ? (
                         <>
-                            <Paragraph>O modo personalizado não usa conta Proton nem solicita credenciais. Na etapa seguinte, o plugin validará o arquivo configurado antes de concluir.</Paragraph>
+                            <Paragraph>O modo personalizado não usa conta Proton nem solicita credenciais. Na etapa seguinte, o plugin validará a rota WireGuard real configurada antes de concluir.</Paragraph>
+                            {vpnStatus?.platform === "unsupported" && (
+                                <Paragraph role="alert" aria-live="polite">
+                                    <strong>Plataforma não suportada:</strong> {vpnStatus.externalReason || "O transporte WireGuard exige Windows x64 ou Linux x64."}
+                                </Paragraph>
+                            )}
+                            {Boolean(vpnStatus?.dependencies && vpnStatus.dependencies.length > 0) && (
+                                <Paragraph role="alert" aria-live="polite">
+                                    <strong>Dependências do sistema:</strong> Pacotes ausentes ({vpnStatus!.dependencies!.join(", ")}). Você pode validar o arquivo agora, mas a ativação exigirá a instalação dos pacotes necessários.
+                                </Paragraph>
+                            )}
                             <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={sessionLoading}>
                                 <Paragraph>{typeof settings.store.customConfigPath === "string" && settings.store.customConfigPath.trim() ? "Arquivo WireGuard personalizado configurado." : "Nenhum arquivo WireGuard personalizado foi configurado ainda."}</Paragraph>
                             </div>
@@ -961,7 +986,17 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                         </>
                     ) : (
                         <>
-                            <Paragraph>A sessão é validada e fica somente na pasta privada do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
+                            <Paragraph>A sessão é validada e fica somente no armazenamento protegido do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
+                            {vpnStatus?.platform === "unsupported" && (
+                                <Paragraph role="alert" aria-live="polite">
+                                    <strong>Plataforma não suportada:</strong> {vpnStatus.externalReason || "O transporte WireGuard exige Windows x64 ou Linux x64."}
+                                </Paragraph>
+                            )}
+                            {Boolean(vpnStatus?.dependencies && vpnStatus.dependencies.length > 0) && (
+                                <Paragraph role="alert" aria-live="polite">
+                                    <strong>Dependências do sistema:</strong> Pacotes ausentes ({vpnStatus!.dependencies!.join(", ")}). Você pode preparar a rota agora, mas a ativação exigirá a instalação dos pacotes necessários.
+                                </Paragraph>
+                            )}
                             <TextInput value={username} onChange={value => {
                                 if (!protonUsernamesMatch(value, username)) {
                                     accountRevisionRef.current++;
@@ -993,14 +1028,14 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 )}
                 {page === "route" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <Paragraph>{customMode ? "O plugin vai validar a configuração WireGuard escolhida nas opções. O túnel continua isolado aos executáveis do Discord." : "O plugin vai selecionar uma configuração WireGuard e testar os servidores Proton elegíveis. O túnel continua isolado aos executáveis do Discord."}</Paragraph>
+                    <Paragraph>{customMode ? "O plugin vai validar a configuração WireGuard escolhida nas opções. O túnel WireGuard isola apenas o cliente Discord (via AllowedApps no Windows ou network namespace no Linux); probes de rede são diagnósticos de conectividade e não comprovam localização geográfica." : "O plugin vai selecionar uma configuração WireGuard e testar os servidores Proton elegíveis. O túnel WireGuard isola apenas o cliente Discord (via AllowedApps no Windows ou network namespace no Linux); probes de rede são diagnósticos de conectividade e não comprovam localização geográfica."}</Paragraph>
                     <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={busy}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><strong>Estado da rota</strong><span>{phaseLabel}</span></div>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}><strong>Estado da rota</strong><span>{phaseLabel}</span></div>
                         {(progressPercent !== null || progressIsIndeterminate) && <progress {...(progressPercent === null ? {} : { value: progressPercent })} max={100} aria-label="Progresso da validação da rota" aria-valuetext={progressPercent === null ? "Validação em andamento; total ainda não conhecido" : `${progressPercent}%`} style={{ width: "100%", marginTop: "12px" }} />}
                         {progress && progress.total > 0 && <Paragraph>{progress.tested} de {progress.total} servidores testados · {progress.succeeded} aprovados</Paragraph>}
                         {progress?.server && <Paragraph>Servidor selecionado: {progress.server}</Paragraph>}
                         {typeof progress?.pingMs === "number" && <Paragraph>Latência medida: {progress.pingMs} ms</Paragraph>}
-                        {progress?.phase === "completed" && <Paragraph>{customMode ? "A configuração foi validada; a ativação da VPN continua sendo uma ação separada." : "A configuração foi salva; a ativação da VPN continua sendo uma ação separada."}</Paragraph>}
+                        {progress?.phase === "completed" && <Paragraph>{customMode ? "A rota WireGuard foi validada com sucesso; a ativação da VPN continua sendo uma ação separada no painel." : "A rota real foi selecionada e salva; a ativação da VPN continua sendo uma ação separada no painel."}</Paragraph>}
                     </div>
                     {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
                     </div>
@@ -1008,7 +1043,10 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 {page === "ready" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                     <div style={onboardingBoxStyle} role="status" aria-live="polite">
-                        <Paragraph>{customMode ? "A configuração WireGuard personalizada passou na validação. Ative o túnel quando quiser pelo painel do plugin; o Discord não será reiniciado automaticamente." : "A rota Proton foi preparada com sucesso. Ative o túnel quando quiser pelo painel do plugin; o Discord não será reiniciado automaticamente."}</Paragraph>
+                        <Paragraph>{customMode ? "A configuração WireGuard personalizada passou na validação com sucesso. Ative o túnel quando quiser pelo painel da VPN nas configurações do plugin. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica." : "A rota Proton real foi preparada com sucesso. Ative o túnel quando quiser pelo painel da VPN nas configurações do plugin. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica."}</Paragraph>
+                        {vpnStatus?.platform === "linux" && (
+                            <Paragraph>No Linux, a ativação moverá o cliente Discord para um network namespace exclusivo, solicitando elevação (pkexec) se necessário e relançando o cliente.</Paragraph>
+                        )}
                         {progress?.server && <Paragraph>Servidor escolhido: {progress.server}</Paragraph>}
                         {typeof progress?.downloadMbps === "number" && typeof progress.uploadMbps === "number" && <Paragraph>Teste medido: {progress.downloadMbps} Mbps down · {progress.uploadMbps} Mbps up</Paragraph>}
                     </div>
@@ -1062,7 +1100,7 @@ function AboutPlugin() {
 function PluginUpdateSettings() {
     const { updateChannel, autoUpdate } = settings.use(["updateChannel", "autoUpdate"]);
     const [state, setState] = useState<{ label: string; tone: "neutral" | "success" | "warning"; available?: boolean }>({
-        label: `v${PLUGIN_VERSION} · instalada`, tone: "neutral"
+        label: `v${PLUGIN_VERSION} · instalada`, tone: "neutral", available: false
     });
     const [status, setStatus] = useState<PluginUpdateStatus | null>(null);
     const [busy, setBusy] = useState(false);
@@ -1079,7 +1117,7 @@ function PluginUpdateSettings() {
 
     const isCurrent = (revision: number) => mountedRef.current && revision === policyRevisionRef.current;
 
-    const refreshStatus = async (revision = policyRevisionRef.current): Promise<PluginUpdateStatus | null> => {
+    const refreshStatus = async (revision = policyRevisionRef.current, options?: { preserveAvailable?: boolean }): Promise<PluginUpdateStatus | null> => {
         if (!isCurrent(revision)) return null;
         const request = ++statusRequestRef.current;
         const statusRequest = readPluginUpdateStatus();
@@ -1099,13 +1137,18 @@ function PluginUpdateSettings() {
             if (next.pending) {
                 notifyPendingPluginUpdate(next.current, next.pendingVersion, next.pendingChannel || next.channel);
                 const version = next.pendingVersion ? `v${next.pendingVersion}` : "a nova versão";
-                setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning" });
+                setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning", available: false });
             } else if (next.lastError) {
-                setState({ label: `v${next.current || PLUGIN_VERSION} · atualização falhou`, tone: "neutral" });
+                setState({ label: `v${next.current || PLUGIN_VERSION} · atualização falhou`, tone: "neutral", available: false });
+            } else if (!options?.preserveAvailable) {
+                setState(prev => ({ label: prev.label, tone: prev.tone, available: false }));
             }
             return next;
         } catch (error) {
-            if (isRequestCurrent()) logger.error("Falha ao consultar o estado do updater do plugin", error);
+            if (isRequestCurrent()) {
+                logger.error("Falha ao consultar o estado do updater do plugin", error);
+                setState(prev => ({ ...prev, available: false }));
+            }
             return null;
         }
     };
@@ -1135,21 +1178,23 @@ function PluginUpdateSettings() {
             ) as PluginUpdateCheckResult;
             if (!isOperationMounted()) return;
             const current = result.current || PLUGIN_VERSION;
+            let isAvailable = false;
             if (!result.ok) {
                 const detailText = result.error || "O updater recusou a verificação.";
                 suppressPluginUpdateFailure(result.current, result.channel || selectedUpdatePolicy.channel, detailText);
                 const detail = result.error ? ` · ${result.error.slice(0, 48)}` : "";
-                setState({ label: `v${current} · verificação falhou${detail}`, tone: "neutral" });
+                setState({ label: `v${current} · verificação falhou${detail}`, tone: "neutral", available: false });
             } else if (result.pending) {
                 const version = result.latest ? `v${result.latest}` : "a nova versão";
                 notifyPendingPluginUpdate(result.current, result.latest, result.pendingChannel || result.channel || selectedUpdatePolicy.channel);
-                setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning" });
+                setState({ label: `${version} pronta; recarregue o Discord`, tone: "warning", available: false });
             } else if (result.available) {
+                isAvailable = true;
                 setState({ label: `v${current} · v${result.latest || "nova"} disponível`, tone: "warning", available: true });
             } else {
-                setState({ label: `v${current} · sem atualização disponível`, tone: "success" });
+                setState({ label: `v${current} · sem atualização disponível`, tone: "success", available: false });
             }
-            await refreshStatus(operationRevision);
+            await refreshStatus(operationRevision, { preserveAvailable: isAvailable });
             if (!isOperationMounted()) return;
         } catch (error) {
             if (isOperationMounted()) {
@@ -1157,7 +1202,7 @@ function PluginUpdateSettings() {
                 const currentVersion = status?.current || PLUGIN_VERSION;
                 suppressPluginUpdateFailure(currentVersion, status?.channel || selectedUpdatePolicy.channel, detailText);
                 const detail = error instanceof Error ? ` · ${error.message.slice(0, 48)}` : "";
-                setState({ label: `v${currentVersion} · verificação falhou${detail}`, tone: "neutral" });
+                setState({ label: `v${currentVersion} · verificação falhou${detail}`, tone: "neutral", available: false });
             }
         } finally {
             if (operationId === operationIdRef.current) operationBusyRef.current = false;
@@ -1182,6 +1227,11 @@ function PluginUpdateSettings() {
         const revision = ++policyRevisionRef.current;
         let disposed = false;
         const isRevisionCurrent = () => !disposed && isCurrent(revision);
+        setState({
+            label: `v${status?.current || PLUGIN_VERSION} · instalada`,
+            tone: "neutral",
+            available: false
+        });
         const configure = async () => {
             try {
                 const configureUpdates = Native?.configurePluginUpdates;
@@ -1234,6 +1284,7 @@ function PluginUpdateSettings() {
                 const detail = result.error || "O updater recusou a atualização.";
                 failureContext = { current: result.current, channel: result.channel || selectedUpdatePolicy.channel, detail };
                 suppressPluginUpdateFailure(failureContext.current, failureContext.channel, failureContext.detail);
+                setState({ label: `v${result.current || PLUGIN_VERSION} · atualização falhou`, tone: "warning", available: false });
                 throw new Error(detail);
             }
             if (result.updated || result.pending || result.reloadRequired) {
@@ -1241,12 +1292,13 @@ function PluginUpdateSettings() {
                 notifyPendingPluginUpdate(result.current, version, result.pendingChannel || result.channel || selectedUpdatePolicy.channel);
                 setState({
                     label: version ? `v${version} pronta; recarregue o Discord` : "Atualização pronta; recarregue o Discord",
-                    tone: "warning"
+                    tone: "warning",
+                    available: false
                 });
                 await refreshStatus(operationRevision);
                 if (!isOperationMounted()) return;
             } else {
-                setState({ label: `v${result.current || PLUGIN_VERSION} · sem atualização disponível`, tone: "success" });
+                setState({ label: `v${result.current || PLUGIN_VERSION} · sem atualização disponível`, tone: "success", available: false });
             }
         } catch (error) {
             if (isOperationMounted()) {
@@ -1257,7 +1309,7 @@ function PluginUpdateSettings() {
                     failureContext?.channel || status?.channel || selectedUpdatePolicy.channel,
                     failureContext?.detail || detail,
                 );
-                setState({ label: `v${currentVersion} · atualização falhou`, tone: "warning" });
+                setState({ label: `v${currentVersion} · atualização falhou`, tone: "warning", available: false });
                 showToast(`GoLiveBypass não conseguiu atualizar: ${detail}`, Toasts.Type.FAILURE);
             }
         } finally {
@@ -1273,13 +1325,6 @@ function PluginUpdateSettings() {
     const checkedLabel = typeof status?.lastCheckedAt === "number"
         ? ` · última consulta ${new Date(status.lastCheckedAt).toLocaleTimeString()}`
         : "";
-    const cardVariant: "normal" | "info" | "warning" | "success" = busy
-        ? "info"
-        : state.tone === "warning"
-            ? "warning"
-            : state.tone === "success"
-                ? "success"
-                : "normal";
     const operationLabel = operation === "checking"
         ? "Verificando atualizações…"
         : operation === "updating"
@@ -1287,7 +1332,7 @@ function PluginUpdateSettings() {
             : state.label;
 
     return (
-        <Card variant={cardVariant} defaultPadding>
+        <Card defaultPadding>
             <section aria-label="Estado das atualizações do GoLiveBypass">
                 <div role="status" aria-live="polite" aria-busy={busy} aria-atomic="true">
                     <Paragraph>
@@ -1386,11 +1431,22 @@ const settings = definePluginSettings({
 });
 
 interface PluginVpnStatus {
-    state: string;
+    state: VpnState | string;
+    platform?: VpnPlatform | string;
+    architecture?: string;
+    owned?: boolean;
     active: boolean;
-    message: string;
+    generation?: number;
+    discordPid?: number | null;
+    profilePath?: string | null;
+    configPath?: string | null;
+    namespace?: string | null;
+    interfaceName?: string | null;
+    requiresRelaunch?: boolean;
+    dependencies?: string[];
     externalReason: string | null;
-    lastDiagnostic: { detail: string; ok: boolean; kind: string } | null;
+    lastDiagnostic: { detail: string; ok?: boolean; kind?: string } | null;
+    message: string;
 }
 
 function VpnPanel() {
@@ -1526,11 +1582,86 @@ function VpnPanel() {
     if (!Native) return <Paragraph>A parte desktop do plugin não está disponível nesta instalação.</Paragraph>;
 
     const statusLabel = status?.active ? `Ativa · ${status.message}` : status?.message || "Consultando o estado da VPN…";
+    const platformLabel = status?.platform === "linux"
+        ? `Linux ${status.architecture || "x64"}`
+        : status?.platform === "windows"
+            ? `Windows ${status.architecture || "x64"}`
+            : status?.platform === "unsupported"
+                ? `Plataforma não suportada (${status.architecture || "arquitetura incompatível"})`
+                : "Plataforma desconhecida";
+
+    const missingDependencies = Boolean(status?.dependencies && status.dependencies.length > 0);
+    const requiresRelaunch = Boolean(status?.requiresRelaunch);
+    const isAuthorizing = status?.state === "authorizing";
+    const isBlockedExternal = status?.state === "blocked_external";
+    const isRecoveryRequired = status?.state === "recovery_required";
+    const isDependencyMissing = status?.state === "dependency_missing" || missingDependencies;
+    const isUnsupported = status?.platform === "unsupported";
+
+    const activationBlockReason = isUnsupported
+        ? (status?.externalReason || "Plataforma não suportada")
+        : isDependencyMissing
+            ? (status?.dependencies?.length ? `Dependências ausentes: ${status.dependencies.join(", ")}` : (status?.externalReason || "Dependências ausentes"))
+            : isBlockedExternal
+                ? (status?.externalReason || "Túnel externo ativo")
+                : isRecoveryRequired
+                    ? "Recuperação de rede pendente"
+                    : requiresRelaunch
+                        ? "Reinicialização necessária"
+                        : null;
+
+    const canActivate = Boolean(status && !busy && !optimizing && !status.active && !activationBlockReason);
+
+    const isFlatpak = Boolean(
+        (status?.externalReason && /flatpak/i.test(status.externalReason))
+        || status?.dependencies?.some(d => /flatpak/i.test(d))
+    );
+
     return (
-        <section>
-            <Paragraph><strong>VPN do plugin</strong> — {statusLabel}</Paragraph>
-            {status?.state === "blocked_external" && <Paragraph>WireSock externo detectado. O plugin não vai pará-lo nem assumir seu túnel.</Paragraph>}
-            {status?.state === "recovery_required" && <Paragraph>A última limpeza não foi confirmada. Verifique o log antes de tentar novamente.</Paragraph>}
+        <section aria-label="Painel de controle da VPN do GoLiveBypass">
+            <Paragraph><strong>VPN do plugin</strong> — {statusLabel} ({platformLabel})</Paragraph>
+            {isAuthorizing && status?.platform === "linux" && (
+                <Paragraph role="status" aria-live="assertive" aria-busy="true">
+                    <strong>Autorização necessária:</strong> Uma janela do sistema solicitará a senha administrativa. Informe a senha do sistema, não a senha da conta Proton.
+                </Paragraph>
+            )}
+
+            {isBlockedExternal && (
+                <Paragraph role="alert" aria-live="polite">
+                    <strong>Túnel externo detectado:</strong> {status?.externalReason || "WireSock ou túnel externo detectado. O plugin não vai pará-lo nem assumir seu túnel."}
+                </Paragraph>
+            )}
+
+            {isRecoveryRequired && (
+                <Paragraph role="alert" aria-live="assertive">
+                    <strong>Recuperação necessária:</strong> A última limpeza não foi confirmada. Restaure a rede antes de tentar nova ativação.
+                </Paragraph>
+            )}
+
+            {isDependencyMissing && (
+                <Paragraph role="alert" aria-live="polite">
+                    <strong>Dependências ausentes:</strong> {status?.dependencies?.length ? status.dependencies.join(", ") : (status?.externalReason || "Dependências de rede não encontradas")}. No Linux, certifique-se de que <code>iproute2</code>, <code>wireguard-tools</code> e <code>pkexec</code> estão instalados.
+                </Paragraph>
+            )}
+
+            {isFlatpak && (
+                <Paragraph role="note" aria-live="polite">
+                    <strong>Ambiente Flatpak:</strong> O cliente precisa de permissão para executar comandos no host via <code>flatpak-spawn --host</code>. Se necessário, execute: <code>flatpak override --user --talk-name=org.freedesktop.Flatpak &lt;app-id&gt;</code>.
+                </Paragraph>
+            )}
+
+            {requiresRelaunch && (
+                <Paragraph role="status" aria-live="polite">
+                    <strong>Relaunch necessário:</strong> O namespace de rede da VPN está preparado, mas este processo do Discord ainda está fora dele. Reinicie o cliente para que o Discord entre no namespace isolado.
+                </Paragraph>
+            )}
+
+            {status?.lastDiagnostic && !status.lastDiagnostic.ok && (
+                <Paragraph role="status" aria-live="polite">
+                    <strong>Diagnóstico:</strong> {status.lastDiagnostic.detail}
+                </Paragraph>
+            )}
+
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                 {customMode ? (
                     <Paragraph>{typeof customConfigPath === "string" && customConfigPath.trim() ? "Modo personalizado: arquivo WireGuard configurado; nenhum login Proton é necessário." : "Modo personalizado: configure um arquivo WireGuard nas opções do plugin para continuar."}</Paragraph>
@@ -1539,21 +1670,42 @@ function VpnPanel() {
                         <TextInput value={username} onChange={value => { usernameRef.current = value; setUsername(value); }} placeholder="Usuário ProtonVPN" aria-label="Usuário ProtonVPN" disabled={busy || optimizing} />
                         <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" aria-label="Senha ProtonVPN" type="password" disabled={busy || optimizing} />
                         <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" aria-label="Código 2FA (se solicitado)" disabled={busy || optimizing} />
-                        <div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
                             {loginActive ? <Button onClick={cancelLogin} disabled={loginCancelRequested}>{loginCancelRequested ? "Cancelando…" : "Cancelar login"}</Button> : <Button onClick={() => void login()} disabled={busy || optimizing || !username.trim()}>Entrar no Proton</Button>}{" "}
                             <Button onClick={() => void optimize()} disabled={busy || optimizing || !username.trim()}>{optimizing ? "Otimizando…" : "Otimizar rota"}</Button>{" "}
                             <Button onClick={() => void call(() => Native.logoutProton(), "Sessão Proton removida.")} disabled={busy || optimizing}>Sair</Button>
                         </div>
                     </>
                 )}
-                <div>
-                    <Button onClick={() => void call(() => Native.enable())} disabled={busy || optimizing}>Ativar agora</Button>{" "}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {requiresRelaunch ? (
+                        <Button
+                            onClick={() => void call(() => (typeof Native?.restartDiscord === "function" ? Native.restartDiscord() : Native.enable()), "Reiniciando Discord no namespace…")}
+                            disabled={busy || optimizing}
+                        >
+                            Reiniciar Discord no namespace
+                        </Button>
+                    ) : (
+                        <Button
+                            onClick={() => void call(() => Native.enable())}
+                            disabled={!canActivate}
+                            title={activationBlockReason || undefined}
+                        >
+                            {activationBlockReason ? `Ativar agora (${activationBlockReason})` : "Ativar agora"}
+                        </Button>
+                    )}{" "}
                     <Button onClick={() => void call(() => Native.restoreNetwork(), "Rede restaurada.")} disabled={busy || optimizing}>Restaurar rede</Button>{" "}
                     <Button onClick={() => void call(() => Native.testWireGuardConfig(customConfigPath))} disabled={busy || optimizing}>Testar .conf</Button>
                 </div>
             </div>
             <Paragraph>
-                Windows x64 apenas por enquanto. O túnel usa AllowedApps somente para o executável do Discord e o Update.exe; probes de rota são apenas diagnóstico.
+                {status?.platform === "linux"
+                    ? `Linux ${status.architecture || "x64"}: isolamento por network namespace dedicado (ip netns exec), mantendo o restante do sistema na rota normal. Probes de rota são apenas diagnóstico de conectividade e não comprovam localização geográfica.`
+                    : status?.platform === "windows"
+                        ? `Windows ${status.architecture || "x64"}: o túnel usa AllowedApps somente para o executável do Discord e o Update.exe. Probes de rota são apenas diagnóstico de conectividade e não comprovam localização geográfica.`
+                        : status?.platform === "unsupported"
+                            ? `Plataforma não suportada (${status?.platform || "desconhecido"} ${status?.architecture || ""}). O plugin suporta Windows x64 e Linux x64.`
+                            : "Isolamento por processo (AllowedApps no Windows x64 ou network namespace no Linux x64). Probes de rota são apenas diagnósticos de conectividade e não comprovam localização geográfica."}
             </Paragraph>
         </section>
     );
@@ -1959,7 +2111,7 @@ export default definePlugin({
         // reload pendente ou uma falha nova, inclusive depois da primeira consulta.
         schedulePluginUpdateStatusObservation(lifecycleGeneration);
 
-        // A primeira execução precisa deixar o usuário atravessar as duas etapas do
+        // A primeira execução precisa deixar o usuário atravessar as três etapas do
         // assistente antes de qualquer ativação que possa relançar o Discord.
         if (!onboardingRequired && typeof Native?.enable === "function") {
             void Native.enable().then(result => {

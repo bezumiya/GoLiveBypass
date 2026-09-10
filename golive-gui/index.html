@@ -261,12 +261,7 @@
 
               <div class="proton-step-label">2 <span>Escolha sua rota</span></div>
               <div class="proton-controls-row">
-                <select id="protonCountrySelect" class="proton-select">
-                  <option value="">Automático · menor ping, prioriza América do Sul</option>
-                  <option value="US">Estados Unidos · recomendado</option>
-                  <option value="NL">Holanda</option>
-                  <option value="JP">Japão</option>
-                </select>
+                <div id="protonCountrySelect" class="proton-route-select" aria-label="Escolha uma rota Proton"></div>
                 <button type="button" id="protonOptimizeBtn" class="proton-btn proton-btn--action" title="Com o bypass ativo, o Discord fecha durante a medição e reabre após iniciar a nova rota." aria-label="Otimizar rota. Com o bypass ativo, o Discord fecha durante a medição e reabre após iniciar a nova rota.">
                   <svg class="icon-refresh" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <polyline points="23 4 23 10 17 10"/>
@@ -277,16 +272,6 @@
                 </button>
               </div>
 
-              <div id="protonServerBadge" class="proton-server-badge">
-                <span class="proton-server-caption">Rota selecionada</span>
-                <span class="proton-server-route">
-                  <span class="proton-country-flag proton-server-flag" id="protonServerFlag" aria-hidden="true"></span>
-                  <span class="proton-server-name" id="protonServerName">Servidor otimizado</span>
-                </span>
-                <span class="proton-ping-pill" id="protonServerPing">— ms</span>
-                <span class="proton-load-pill" id="protonServerLoad">—% carga</span>
-                <span class="proton-speed-pill" hidden>Velocidade não medida</span>
-              </div>
             </div>
             <div class="proton-feedback" id="protonFeedback" hidden></div>
           </div>
@@ -357,20 +342,6 @@
               <span id="protonMeasurementCount" class="proton-measurement__count">Preparando servidores…</span>
             </div>
             <div id="protonMeasurementList" class="proton-measurement__list"></div>
-            <section id="protonManualFallback" class="proton-manual-fallback" hidden aria-labelledby="protonManualFallbackTitle">
-              <div class="proton-manual-fallback__heading">
-                <div>
-                  <span class="proton-server-caption">Alternativa manual</span>
-                  <h3 id="protonManualFallbackTitle">Escolha uma rota medida</h3>
-                </div>
-                <span class="proton-manual-fallback__sort">menor ping primeiro</span>
-              </div>
-              <p id="protonManualFallbackHint" class="proton-manual-fallback__hint">A seleção automática falhou. Estas rotas já responderam e serão verificadas novamente antes de aplicar.</p>
-              <div id="protonManualRecommendation" class="proton-manual-recommendation" hidden>
-                <span class="proton-manual-recommendation__label">Rota recomendada</span>
-                <button type="button" id="protonManualRecommendationBtn" class="proton-manual-recommendation__button"></button>
-              </div>
-            </section>
             <div id="protonMeasurementActions" class="proton-measurement__actions" hidden>
               <button type="button" id="protonRetryMeasurementBtn" class="proton-btn proton-btn--action">Tentar novamente</button>
               <button type="button" id="protonContinueMeasurementBtn" class="proton-measurement__continue">Continuar sem medição</button>

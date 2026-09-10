@@ -1,4 +1,10 @@
 /*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+/*
  * Contratos e regras sem efeitos colaterais do transporte VPN do plugin.
  *
  * Este arquivo deliberadamente não importa Electron, Vencord ou Node. Além de
@@ -11,15 +17,17 @@ export const VPN_OWNER_KIND = "golivebypass-plugin-vpn";
 export const VPN_SERVICE_NAMES = ["wiresock-client-service", "wiresock-pro-client-service"] as const;
 
 export type VpnMode = "proton" | "custom";
-export type VpnPlatform = "windows" | "unsupported";
+export type VpnPlatform = "windows" | "linux" | "unsupported";
 export type VpnState =
     | "inactive"
+    | "authorizing"
     | "preparing"
     | "starting"
     | "restart_pending"
     | "active"
     | "stopping"
     | "blocked_external"
+    | "dependency_missing"
     | "recovery_required";
 
 export function normalizeProtonUsername(value: string): string {
@@ -46,13 +54,15 @@ export interface VpnOwnerRecord {
     profilePath: string;
     configPath: string;
     probePath?: string;
+    namespace?: string;
+    interfaceName?: string;
     restarting?: boolean;
     createdAt: number;
 }
 
 export interface VpnDiagnostic {
     at: string;
-    kind: "wireguard" | "network" | "route" | "ownership";
+    kind: "wireguard" | "network" | "route" | "ownership" | "dependency";
     ok: boolean;
     detail: string;
 }
@@ -67,14 +77,24 @@ export interface VpnStatus {
     discordPid: number | null;
     profilePath: string | null;
     configPath: string | null;
+    namespace?: string | null;
+    interfaceName?: string | null;
+    requiresRelaunch?: boolean;
+    dependencies?: string[];
     externalReason: string | null;
     lastDiagnostic: VpnDiagnostic | null;
     message: string;
 }
 
+export type VpnOperationCode =
+    | "AUTHORIZATION_CANCELLED"
+    | "AUTHORIZATION_FAILED"
+    | "AUTHORIZATION_TIMEOUT";
+
 export interface VpnOperationResult {
     success: boolean;
     state: VpnState;
+    code?: VpnOperationCode;
     message?: string;
     error?: string;
 }
@@ -187,6 +207,14 @@ export function validateWireGuardConfig(raw: string): WireGuardConfigValidation 
 
 export function isSupportedWindowsArchitecture(platform: string, arch: string): boolean {
     return platform === "win32" && arch === "x64";
+}
+
+export function isSupportedLinuxArchitecture(platform: string, arch: string): boolean {
+    return platform === "linux" && arch === "x64";
+}
+
+export function isSupportedVpnArchitecture(platform: string, arch: string): boolean {
+    return isSupportedWindowsArchitecture(platform, arch) || isSupportedLinuxArchitecture(platform, arch);
 }
 
 export function safeDiagnosticDetail(value: unknown, max = 300): string {

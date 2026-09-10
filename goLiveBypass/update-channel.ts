@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 export type PluginUpdateChannel = "stable" | "beta";
 
 export interface PluginReleaseCandidate {
@@ -70,7 +76,7 @@ function parsePluginVersion(value: unknown): ParsedPluginVersion | null {
   }
 
   const prerelease = match[4]?.split(".") ?? [];
-  if (prerelease.some((identifier) => NUMERIC_IDENTIFIER.test(identifier) && !VALID_NUMERIC_VERSION_PART.test(identifier))) {
+  if (prerelease.some(identifier => NUMERIC_IDENTIFIER.test(identifier) && !VALID_NUMERIC_VERSION_PART.test(identifier))) {
     return null;
   }
 

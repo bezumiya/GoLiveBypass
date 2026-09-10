@@ -6,10 +6,37 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Ciclo de desativação no Linux não deixava resíduo silencioso
+
+- O `teardown_wireguard_netns` do standalone mascarava falha de elevação com `|| true` e anunciava "Tunel WireGuard encerrado" mesmo quando o `ip netns del` não tinha privilégio para executar; o namespace `discord-vpn` (com o túnel WireGuard vivo e tráfego real do Discord) sobrevivia ao `--uninstall` sem nenhum aviso. Agora o script avisa explicitamente quando não consegue remover o namespace e só declara sucesso quando ele realmente saiu; o retorno continua neutro para não abortar a restauração das injeções do Discord.
+- A amostragem do failover automático Proton na GUI Linux podia registrar `Cannot read properties of null (reading 'observe')` quando a desativação zerava o rastreador de saúde enquanto a amostra esperava `linuxStatus`/`linuxWgStats`. A coleta agora captura a referência localmente e o teste de geração impede que uma amostra velha dispare failover após a parada do monitor.
+
+### Recuperação manual após falha de otimização Proton
+
+- Se a otimização falhar, for cancelada ou lançar uma exceção sem deixar nenhuma candidata manual selecionável, o fechamento do diálogo inicia uma nova varredura somente de ping em segundo plano. A operação reutiliza a triagem regional do helper, não gera certificado, chave, túnel nem perfil, e só libera no dropdown as rotas que responderem com ping válido.
+- Quando a otimização já deixou uma candidata selecionável, a GUI não repete a sondagem de ping; a descoberta normal de metadados continua podendo abastecer outras alternativas sem inventar latência.
+- Remove a seção de fallback, recomendação, contador e retry do diálogo de otimização, restaurando a janela enxuta com progresso, lista e ações originais. A seleção manual permanece exclusivamente no dropdown principal e revalida a rota antes de aplicar.
+
+### Sessão Proton rejeitada por catálogo de servidores grande
+
+- A verificação de sessão do helper Proton (`-check-session`) limitava a leitura da resposta de `/vpn/v1/logicals` a 256 KB; o catálogo de servidores da API cresceu além disso e toda verificação passou a rejeitar uma sessão válida como "expirada ou não encontrada". O login em si funcionava, mas a GUI voltava ao login e novas tentativas recebiam falha embrulhada como erro de autenticação.
+- O helper agora decodifica o envelope em streaming e para no campo `Code`, sem baixar o catálogo inteiro nem tratar catálogo grande como erro de protocolo. Corpo vazio, rejeição 401/403, indisponibilidade temporária e JSON truncado preservam a classificação anterior. Vale para GUI, standalone e plugin, que usam builds do mesmo helper.
+- A GUI passa a honrar os códigos estruturados do JSON do helper (`INVALID_CREDENTIALS`, `NETWORK_ERROR`, `TWO_FACTOR_REQUIRED`, `TWO_FACTOR_INVALID`) e o texto genérico `authentication failed` não é mais classificado como senha incorreta; sem código estruturado, o erro cai em mensagem genérica acionável em vez de culpar a credencial.
+
+### Correção do login Proton no helper
+
+- Remove o registro duplicado da flag `-progress-json`, que fazia o `proton-confgen` abortar com `flag redefined` antes de autenticar ou verificar a sessão.
+- O login e os modos `-check-session`/`-check-plan` voltam a iniciar normalmente; a correção vale para o helper usado pela GUI e pelos demais empacotamentos.
+
+### Filtro de rotas Proton sem ping
+
+- O seletor persistente e o dropdown principal mostram somente rotas com ping válido; servidores sem medição deixam de ocupar espaço com `—`.
+
 ### Fallback manual de rotas Proton na GUI
 
-- Mantém a seleção automática existente e, quando a medição não encontra uma rota aplicável, mostra as candidatas que responderam com ping em ordem crescente.
-- Exibe ping e velocidade medidos quando disponíveis, destaca uma recomendação e permite validar novamente e aplicar uma rota escolhida sem substituir a configuração anterior em caso de falha.
+- Mantém a seleção automática e, quando a medição é cancelada ou falha, carrega progressivamente em segundo plano o catálogo completo de rotas elegíveis da conta, respeitando país, plano, status online e exclusão da rota atual.
+- Exibe país, cidade, tier e carga no dropdown principal; somente rotas com ping medido aparecem como opções manuais, enquanto a seleção preserva as validações de ping, peer WireGuard e preflight antes de aplicar.
+- A seleção manual preserva preflight, geração de perfil, promoção atômica e rollback. O catálogo não gera certificado, chave, túnel ou perfil temporário.
 - A troca manual continua isolada por aplicativo no WireGuard; ela não altera o standalone, o plugin nem promete uma prova geográfica de saída.
 
 ### Atualizações do plugin Vencord/Equicord
@@ -30,6 +57,24 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - Scripts de ativação WireSock preservam caminhos Unicode no Windows PowerShell 5.1 usando BOM; a captura não perde letras `s` e falhas SCM preservam seus códigos sem serem mascaradas pela tentativa direta incompatível.
 - A confirmação do modo direto não espera o processo persistente encerrar; preserva o handle para obter códigos de saída reais e limita o fallback a incompatibilidade explícita de `run`, não de outra opção/comando.
 - Estas mudanças de execução são específicas da GUI Windows. Linux continua com electron-updater; o plugin não recebe automaticamente o updater portable nem os scripts de ativação da GUI. Nomes novos de assets são resolvidos pelo manifesto nas duas plataformas.
+
+## [2.0.6-beta-7] - 2026-09-10
+
+### Seleção manual e recuperação de rotas Proton na GUI
+
+- O dropdown principal passa a oferecer rotas medidas da conta Proton: o catálogo completo é carregado em segundo plano, sem gerar certificado, chave, perfil ou túnel, e só entram opções com ping válido.
+- Quando a otimização falha, é cancelada ou termina sem candidata selecionável, uma nova varredura somente de ping abastece o dropdown; o diálogo de otimização volta ao layout enxuto, sem fallback, recomendação, contador ou retry próprios.
+- A sessão Proton grande volta a ser aceita: o helper decodifica `/vpn/v1/logicals` em streaming e para no campo `Code`, em vez de tratar catálogo acima de 256 KB como sessão expirada. A GUI passa a honrar os códigos estruturados do helper.
+
+### Backend Linux do plugin Vencord/Equicord
+
+- O plugin ganha transporte WireGuard autônomo no Linux x64 com namespace de rede por instância e relançamento pelo helper C `netns-launcher`; o manifesto passa a declarar `win32` e `linux` e o pacote carrega os dois helpers.
+- No Linux a sessão Proton fica no armazenamento seguro do Electron, nunca em JSON plaintext; o helper recebe uma cópia temporária `0600`. A ativação do namespace ainda depende do `pkexec` e não foi concluída em produto real.
+
+### Desativação Linux e sincronização do helper
+
+- O standalone deixa de mascarar falha de elevação na remoção do namespace `discord-vpn` e avisa quando o namespace sobrevive.
+- A amostragem de failover Proton da GUI Linux não dispara mais `Cannot read properties of null` ao ser coletada durante a desativação.
 
 ## [2.0.6-beta-6] - 2026-09-09
 

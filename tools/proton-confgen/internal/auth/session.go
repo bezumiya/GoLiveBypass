@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,7 +49,6 @@ type SavedSession struct {
 const encryptedSessionHeader = "GoLiveBypass-DPAPI-Session-v1\n"
 const maxSessionFileBytes int64 = 1 << 20
 const maxRefreshResponseBytes int64 = 1 << 20
-const maxSessionVerificationResponseBytes int64 = 256 << 10
 
 // sealSessionPayload protects the on-disk representation when the helper is
 // running inside the Windows plugin. Other platforms keep the historical
@@ -623,36 +623,59 @@ func VerifySessionStatusContext(ctx context.Context, httpClient *http.Client, ap
 		return false, &TemporarySessionError{Err: fmt.Errorf("HTTP %d", resp.StatusCode), Operation: "session verification"}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSessionVerificationResponseBytes+1))
-	if err != nil {
-		clear(body)
-		return false, classifyAuthTransportError(ctx, err)
+	// The verification endpoint (/vpn/v1/logicals) is the full server catalog,
+	// which has grown past a bounded-read limit; buffering or capping it would
+	// reject a valid session. Only the envelope Code matters here, so decode
+	// token-wise and stop as soon as Code is seen.
+	dec := json.NewDecoder(resp.Body)
+	classifyReadFailure := func(err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			// Truncated delivery is a transport outcome, not proof that the
+			// cached session is bad; keep it retryable.
+			return classifyAuthTransportError(ctx, err)
+		}
+		return &ProtocolError{Operation: "session verification", StatusCode: resp.StatusCode}
 	}
-	defer clear(body)
-	if int64(len(body)) > maxSessionVerificationResponseBytes {
-		return false, &ProtocolError{Operation: "session verification", StatusCode: resp.StatusCode}
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			if err == io.EOF && depth == 0 {
+				// Some API-compatible test/proxy endpoints return no body. The
+				// successful HTTP status is sufficient in that case.
+				return true, nil
+			}
+			return false, classifyReadFailure(err)
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+			if depth == 0 {
+				// Envelope closed without a top-level Code field.
+				return false, &ProtocolError{Operation: "session verification", StatusCode: resp.StatusCode}
+			}
+		case string:
+			if depth != 1 || t != "Code" {
+				continue
+			}
+			var code int
+			if err := dec.Decode(&code); err != nil {
+				return false, classifyReadFailure(err)
+			}
+			if constants.IsSuccessCode(code) {
+				return true, nil
+			}
+			return false, &SessionInvalidError{Code: code, StatusCode: resp.StatusCode}
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		// Some API-compatible test/proxy endpoints return no body. The successful
-		// HTTP status is sufficient in that case.
-		return true, nil
-	}
-	var envelope struct {
-		Code *int `json:"Code"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return false, &ProtocolError{Operation: "session verification", StatusCode: resp.StatusCode}
-	}
-	if envelope.Code == nil {
-		return false, &ProtocolError{Operation: "session verification", StatusCode: resp.StatusCode}
-	}
-	if constants.IsSuccessCode(*envelope.Code) {
-		return true, nil
-	}
-	return false, &SessionInvalidError{Code: *envelope.Code, StatusCode: resp.StatusCode}
 }
 
 // VerifySession is retained for callers that only need a boolean result.

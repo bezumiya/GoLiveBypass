@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 const TRUSTED_UPDATE_HOSTS = new Set([
   "api.github.com",
   "github.com",
@@ -104,7 +110,7 @@ export function isOfficialPluginManifest(value: unknown, assetName: string): boo
   if (!isJsonRecord(value) || typeof assetName !== "string" || !assetName) return false;
   const manifest = value;
   if (!hasOwn(manifest, "name") || !hasOwn(manifest, "updater")) return false;
-  const updater = manifest.updater;
+  const { updater } = manifest;
   if (!isJsonRecord(updater)) return false;
   const metadata = updater;
   return hasOwn(metadata, "type")
@@ -124,7 +130,7 @@ export function isCompatiblePluginManifest(value: unknown, assetName: string): b
     || !hasOwn(value, "updater")
     || value.name !== "GoLiveBypass"
     || value.version !== LEGACY_RELEASE_MANIFEST.version) return false;
-  const updater = value.updater;
+  const { updater } = value;
   if (!isJsonRecord(updater)
     || !hasOwn(updater, "type")
     || !hasOwn(updater, "id")

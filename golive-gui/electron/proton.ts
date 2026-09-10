@@ -121,11 +121,16 @@ export interface RunConfgenOptions {
 export const MEASUREMENT_CRITERION_VERSION = 5;
 
 export interface ProtonOptimizationProgress {
-  phase: 'ping' | 'preparing' | 'testing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
+  phase: 'ping' | 'catalog' | 'preparing' | 'testing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
   total: number;
   tested: number;
   succeeded: number;
   server?: string;
+  country?: string;
+  city?: string;
+  tier?: string;
+  load?: number;
+  score?: number;
   downloadMbps?: number;
   uploadMbps?: number;
   pingMs?: number;
@@ -141,7 +146,7 @@ export function recordManualMeasurementProgress(
   measurementId: string,
   progress: ProtonOptimizationProgress,
 ): void {
-  if (!session || session.measurementId !== measurementId || !progress.server) return;
+  if (!session || session.measurementId !== measurementId || !progress.server || progress.phase === 'catalog') return;
   const current = session.candidates.get(progress.server) ?? {
     server: progress.server,
     pingStatus: 'not-tested',
@@ -179,16 +184,17 @@ function safeConfgenArgs(args: string[]): string {
 
 function validProgress(value: any): ProtonOptimizationProgress | undefined {
   if (!value || typeof value !== 'object') return undefined;
-  const phases = ['ping', 'preparing', 'testing', 'finalizing', 'completed', 'failed', 'cancelled'];
+  const phases = ['ping', 'catalog', 'preparing', 'testing', 'finalizing', 'completed', 'failed', 'cancelled'];
   if (!phases.includes(value.phase)) return undefined;
   const total = Number.isFinite(value.total) ? Math.max(0, Math.floor(value.total)) : 0;
   const tested = Number.isFinite(value.tested) ? Math.max(0, Math.min(total, Math.floor(value.tested))) : 0;
   const succeeded = Number.isFinite(value.succeeded) ? Math.max(0, Math.min(tested, Math.floor(value.succeeded))) : 0;
   const result: ProtonOptimizationProgress = { phase: value.phase, total, tested, succeeded };
-  for (const key of ['server', 'downloadMbps', 'uploadMbps', 'pingMs'] as const) {
-    if (key === 'server') {
-      if (typeof value[key] === 'string' && value[key].length <= 200) result[key] = value[key];
-    } else if (Number.isFinite(value[key]) && value[key] > 0) result[key] = value[key];
+  for (const key of ['server', 'country', 'city', 'tier'] as const) {
+    if (typeof value[key] === 'string' && value[key].length <= 200) result[key] = value[key];
+  }
+  for (const key of ['downloadMbps', 'uploadMbps', 'pingMs', 'load', 'score'] as const) {
+    if (Number.isFinite(value[key]) && value[key] >= 0) result[key] = value[key];
   }
   if (value.status === 'testing' || value.status === 'success' || value.status === 'failed') result.status = value.status;
   return result;
@@ -351,7 +357,10 @@ export function classifyProtonError(error: unknown, stderr = '', stdout = ''): {
   if (/captcha_required|captcha verification required|human verification required|code 9001/.test(raw)) return { code: 'CAPTCHA_REQUIRED', message: 'O Proton solicitou uma verificação de segurança. Abra o CAPTCHA e tente novamente.', retryable: true };
   if (/2fa_required|two.?factor|required.*2fa/.test(raw)) return { code: 'TWO_FACTOR_REQUIRED', message: 'Esta conta exige autenticação em duas etapas.', retryable: false };
   if (/2fa|two.?factor|totp|verification code/.test(raw)) return { code: 'TWO_FACTOR_INVALID', message: 'O código 2FA está incorreto ou expirou.', retryable: false };
-  if (/invalid credential|invalid password|wrong password|authentication failed|incorrect/.test(raw)) return { code: 'INVALID_CREDENTIALS', message: 'Usuário ou senha incorretos.', retryable: false };
+  // "authentication failed" não é sinal de credencial: o helper Go embrulha
+  // qualquer falha de autenticação (transporte, protocolo, captcha) com esse
+  // prefixo. Só texto explícito de credencial pode acusar senha errada.
+  if (/invalid credential|invalid password|wrong password|incorrect/.test(raw)) return { code: 'INVALID_CREDENTIALS', message: 'Usuário ou senha incorretos.', retryable: false };
   if (/timeout|tempo limite|timed out/.test(raw)) return { code: 'TIMEOUT', message: 'O ProtonVPN demorou demais para responder. Tente novamente em alguns instantes.', retryable: true };
   if (/encontrado|not found|enoent|spawn/.test(raw)) return { code: 'MISSING_EXECUTABLE', message: 'O componente Proton não pôde ser preparado automaticamente. Verifique sua conexão e tente novamente; se persistir, envie um relatório de diagnóstico.', retryable: true };
   if (/network|connection|dns|tls|temporary|unreachable|reset/.test(raw)) return { code: 'NETWORK_ERROR', message: 'Não foi possível conectar aos servidores ProtonVPN. Verifique sua internet e tente novamente.', retryable: true };
@@ -610,10 +619,35 @@ export async function loginProton(
     };
   }
 
+  // O helper Go emite códigos estruturados no JSON (ver jsonErrorResponse).
+  // Eles são a fonte da verdade; o regex de texto é só fallback para saída
+  // sem JSON (binários antigos) e nunca pode mascarar o código estruturado.
+  const structuredCode = typeof res.json?.code === 'string' ? res.json.code : '';
+  const structured = structuredProtonError(structuredCode);
+  if (structured) {
+    logger.warn('proton', 'falha na autenticação ProtonVPN', { codigo_saida: res.code, codigo_estruturado: structuredCode, erro_json: String(res.json?.error || '').slice(0, 300) });
+    return { success: false, code: structuredCode as ProtonLoginErrorCode, ...structured, error: structured.message };
+  }
+
   const errorMsg = res.json?.error || res.stderr || res.stdout || 'Falha na autenticação ProtonVPN.';
   const classified = classifyProtonError(errorMsg, res.stderr, res.stdout);
-  logger.warn('proton', 'falha na autenticação ProtonVPN', { codigo_saida: res.code, resposta_json: Boolean(res.json) });
+  logger.warn('proton', 'falha na autenticação ProtonVPN', { codigo_saida: res.code, resposta_json: Boolean(res.json), erro_json: String(res.json?.error || '').slice(0, 300) });
   return { success: false, ...classified, error: classified.message };
+}
+
+function structuredProtonError(code: string): { message: string; retryable: boolean } | undefined {
+  switch (code) {
+    case 'INVALID_CREDENTIALS':
+      return { message: 'Usuário ou senha incorretos.', retryable: false };
+    case 'TWO_FACTOR_REQUIRED':
+      return { message: 'Esta conta exige autenticação em duas etapas.', retryable: false };
+    case 'TWO_FACTOR_INVALID':
+      return { message: 'O código 2FA está incorreto ou expirou.', retryable: false };
+    case 'NETWORK_ERROR':
+      return { message: 'Não foi possível conectar aos servidores ProtonVPN. Verifique sua internet e tente novamente.', retryable: true };
+    default:
+      return undefined;
+  }
 }
 
 export async function generateOptimalProtonConfig(
@@ -909,6 +943,109 @@ export function promoteStagedProtonConfig(stagedFile: string, outputFile?: strin
   }
 }
 
+export interface ProtonRouteCatalogEntry {
+  server: string;
+  country: string;
+  city: string;
+  tier: string;
+  load: number;
+  score: number;
+  pingMs?: number;
+}
+
+export interface ProtonRouteCatalogResult {
+  success: boolean;
+  routes?: ProtonRouteCatalogEntry[];
+  error?: string;
+}
+
+/**
+ * Fetches public route metadata without issuing a certificate, opening a
+ * tunnel, or creating a temporary profile. The existing session authenticates
+ * the request so the helper can apply the account's route filters. When
+ * measurePing is enabled, the helper also performs its bounded regional ping
+ * scan without creating a profile or tunnel.
+ */
+export async function generateProtonRouteCatalog(
+  installDir: string,
+  options: {
+    username: string;
+    countries?: string;
+    freeOnly?: boolean;
+    excludeServers?: string[];
+    measurePing?: boolean;
+    signal?: AbortSignal;
+    onProgress?: (progress: ProtonOptimizationProgress) => void;
+  },
+): Promise<ProtonRouteCatalogResult> {
+  ensureInstallDir(installDir);
+  let exePath: string;
+  try {
+    exePath = await ensureProtonConfgen(installDir);
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const username = options.username.trim();
+  const sessionFile = getProtonSessionFile(installDir);
+  const args = [
+    '-username', username,
+    '-session-file', sessionFile,
+    '-route-catalog',
+    '-json',
+    '-exclude-countries', 'BR',
+  ];
+  if (options.measurePing) args.push('-auto-ping');
+  if (options.onProgress) args.push('-progress-json');
+  if (options.countries && options.countries.trim()) args.push('-countries', options.countries.trim());
+  if (options.freeOnly !== false) args.push('-free-only');
+  const excluded = (options.excludeServers ?? []).map((item) => item.trim()).filter(Boolean);
+  if (excluded.length > 0) args.push('-exclude-servers', excluded.join(','));
+
+  const res = await runConfgen({
+    args,
+    timeoutMs: 60_000,
+    signal: options.signal,
+    onProgress: options.onProgress,
+    exePath,
+  });
+
+  const rawRoutes = Array.isArray(res.json?.routes) ? res.json.routes : undefined;
+  const routes: ProtonRouteCatalogEntry[] = [];
+  let invalidRoute = false;
+  for (const raw of rawRoutes ?? []) {
+    if (!raw || typeof raw !== 'object') {
+      invalidRoute = true;
+      continue;
+    }
+    const server = typeof raw.server === 'string' ? raw.server.trim() : '';
+    const country = typeof raw.country === 'string' ? raw.country.trim() : '';
+    const city = typeof raw.city === 'string' ? raw.city.trim() : '';
+    const tier = typeof raw.tier === 'string' ? raw.tier.trim() : '';
+    const load = Number(raw.load);
+    const score = Number(raw.score);
+    const pingMs = raw.pingMs === undefined ? undefined : Number(raw.pingMs);
+    if (!server || server.length > 200 || !country || country.length > 32 || city.length > 200 ||
+      !tier || tier.length > 80 || !Number.isFinite(load) || load < 0 || load > 100 ||
+      !Number.isFinite(score) || score < 0 ||
+      (raw.pingMs !== undefined && (!Number.isFinite(pingMs) || pingMs <= 0 || pingMs >= 999))) {
+      invalidRoute = true;
+      continue;
+    }
+    routes.push({ server, country, city, tier, load, score, ...(pingMs === undefined ? {} : { pingMs }) });
+  }
+
+  if (res.code !== 0 || res.json?.success !== true || rawRoutes === undefined || invalidRoute || routes.length === 0) {
+    const rawError = res.json?.error || res.stderr || res.stdout ||
+      'Não foi possível carregar o catálogo de rotas ProtonVPN.';
+    return {
+      success: false,
+      error: redactManualRouteError(rawError, username),
+    };
+  }
+  return { success: true, routes };
+}
+
 export interface ProtonRoutePoolResult {
   success: boolean;
   stagingDir?: string;
@@ -932,6 +1069,7 @@ export async function generateProtonRoutePool(
     size: number;
     excludeServers?: string[];
     signal?: AbortSignal;
+    onProgress?: (progress: ProtonOptimizationProgress) => void;
   },
 ): Promise<ProtonRoutePoolResult> {
   ensureInstallDir(installDir);
@@ -955,14 +1093,20 @@ export async function generateProtonRoutePool(
     '-ipv6',
     '-exclude-countries', 'BR',
     '-auto-ping',
-    '-free-only',
   ];
+  if (options.onProgress) args.push('-progress-json');
   if (options.countries && options.countries.trim()) args.push('-countries', options.countries.trim());
+  if (options.freeOnly !== false) args.push('-free-only');
   const excluded = (options.excludeServers ?? []).map((item) => item.trim()).filter(Boolean);
   if (excluded.length > 0) args.push('-exclude-servers', excluded.join(','));
 
   try {
-    const res = await runConfgen({ args, timeoutMs: 120_000, signal: options.signal, exePath });
+    const res = await runConfgen({
+      args,
+      timeoutMs: 120_000,
+      signal: options.signal,
+      onProgress: options.onProgress,
+    });
     const rawRoutes = Array.isArray(res.json?.routes) ? res.json.routes : [];
     const routes: ProtonRouteMetadata[] = [];
     for (const raw of rawRoutes) {

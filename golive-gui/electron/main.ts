@@ -94,9 +94,9 @@ type ManualMeasurementSession = {
   expiresAt: number;
 };
 
-// A medição automática continua sendo a autoridade. Este cache só fica
-// disponível quando essa medição termina sem rota aplicável, permitindo que o
-// renderer tente uma das candidatas que já respondeu ao ping.
+// A medição automática continua sendo a autoridade. Este cache sanitizado fica
+// disponível por alguns minutos após uma medição com speed-test, permitindo que
+// o renderer ofereça as candidatas medidas para uma escolha manual posterior.
 const MANUAL_MEASUREMENT_TTL_MS = 10 * 60_000;
 const manualMeasurementSessions = new Map<number, ManualMeasurementSession>();
 const manualRouteSelectionsInFlight = new Set<string>();
@@ -2254,6 +2254,7 @@ async function applyProtonRouteResult(
     protonCountry: context.country,
     protonFreeOnly: context.freeOnly,
     protonAutoPing: context.autoPing,
+    protonRoutePreference: "manual",
     protonLastServer: {
       ...saved,
       measurementUsername: context.username.trim().toLocaleLowerCase("en-US"),
@@ -2301,6 +2302,7 @@ async function applyProtonRouteResult(
         protonCountry: previousSettings.protonCountry,
         protonFreeOnly: previousSettings.protonFreeOnly,
         protonAutoPing: previousSettings.protonAutoPing,
+        protonRoutePreference: previousSettings.protonRoutePreference,
         protonLastServer: previousSettings.protonLastServer,
       });
       if (IS_WINDOWS) {
@@ -2474,7 +2476,11 @@ async function attemptProtonFailover(generation: number): Promise<void> {
 }
 
 async function collectProtonFailoverSample(generation: number): Promise<void> {
-  if (generation !== protonFailoverGeneration || !protonFailoverTracker || quitting || protonFailoverDisabled) return;
+  // Captura local: stopProtonFailoverMonitor() pode zerar o tracker enquanto
+  // esta amostra espera linuxStatus/linuxWgStats; o teste de geração abaixo
+  // garante que o gatilho de uma amostra velha nunca dispare failover.
+  const tracker = protonFailoverTracker;
+  if (generation !== protonFailoverGeneration || !tracker || quitting || protonFailoverDisabled) return;
   const settings = readSharedSettings();
   if (settings.vpnMode === "custom" || settings.protonAutoFailover === false) return;
 
@@ -2515,7 +2521,7 @@ async function collectProtonFailoverSample(generation: number): Promise<void> {
   }
 
   const health = classifyFailoverHealth(sample);
-  const observation = protonFailoverTracker.observe(health);
+  const observation = tracker.observe(health);
   if (health === "failed" || observation.trigger) {
     logger.warn("proton", "failover.health", {
       health,
@@ -2822,7 +2828,10 @@ async function ensureProtonActivationProfile() {
     speedTest: false,
   });
   if (!gen.success) throw new Error(gen.error || "Não foi possível preparar uma rota ProtonVPN.");
-  updateSharedSettings({ protonLastServer: { ...gen, measurementUsername: username.trim().toLowerCase() } });
+  updateSharedSettings({
+    protonRoutePreference: "auto",
+    protonLastServer: { ...gen, measurementUsername: username.trim().toLowerCase() },
+  });
 }
 
 // No autostart do Windows nao existe renderer para conduzir a selecao Proton. A
@@ -2844,6 +2853,18 @@ async function optimizeProtonRouteAtStartup(
   }
   if (signal?.aborted || quitting) {
     return { success: false, error: "Otimização de boot cancelada." };
+  }
+  const manualPreference = settings.protonRoutePreference === "manual"
+    || (settings.protonRoutePreference !== "auto" && settings.protonLastServer?.manual === true);
+  if (
+    manualPreference &&
+    settings.protonLastServer?.server &&
+    fs.existsSync(path.join(settingsDir(), "wireguard.conf"))
+  ) {
+    logger.info("proton", "otimizacao de boot ignorada; rota manual salva será preservada", {
+      server: settings.protonLastServer.server,
+    });
+    return { success: true, server: settings.protonLastServer.server, skipped: true };
   }
 
   const country = (settings.protonCountry as string) || "";
@@ -2898,6 +2919,7 @@ async function optimizeProtonRouteAtStartup(
     protonCountry: country,
     protonFreeOnly: freeOnly,
     protonAutoPing: autoPing,
+    protonRoutePreference: "auto",
     protonLastServer: saved,
   })) {
     return { success: false, error: "A rota foi preparada, mas não foi possível salvar suas preferências." };
@@ -4967,7 +4989,7 @@ async function importWgConfFromPath(chosen: string) {
       fs.mkdirSync(targetDir, { recursive: true });
       const targetFile = path.join(targetDir, "wireguard.conf");
       fs.writeFileSync(targetFile, content, { mode: 0o600 });
-      updateSharedSettings({ wgConfOriginalName: originalName, protonLastServer: undefined });
+      updateSharedSettings({ wgConfOriginalName: originalName, protonLastServer: undefined, protonRoutePreference: undefined });
       return { success: true, fileName: originalName, path: targetFile, validation };
     });
   } catch (err) {
@@ -5112,6 +5134,9 @@ ipcMain.handle("get-proton-settings", async () => {
     freeOnly: s.protonFreeOnly !== false,
     autoPing: s.protonAutoPing !== false,
     autoFailover: s.protonAutoFailover !== false,
+    routePreference: s.protonRoutePreference === "manual"
+      ? "manual"
+      : s.protonRoutePreference === "auto" ? "auto" : s.protonLastServer?.manual === true ? "manual" : "auto",
     lastServer: s.protonLastServer,
   };
 });
@@ -5141,6 +5166,9 @@ ipcMain.handle("set-proton-settings", async (_event, settings: any) => {
     if (typeof settings?.freeOnly === "boolean") patch.protonFreeOnly = settings.freeOnly;
     if (typeof settings?.autoPing === "boolean") patch.protonAutoPing = settings.autoPing;
     if (typeof settings?.autoFailover === "boolean") patch.protonAutoFailover = settings.autoFailover;
+    if (settings?.routePreference === "auto" || settings?.routePreference === "manual") {
+      patch.protonRoutePreference = settings.routePreference;
+    }
     return updateSharedSettings(patch);
   });
   if (!filterChanged && settings?.autoFailover === true) startProtonFailoverMonitor();
@@ -5320,20 +5348,145 @@ ipcMain.handle("login-proton", async (event, payload: { username: string; passwo
   return res;
 });
 
-ipcMain.handle("logout-proton", async () => {
+ipcMain.handle("logout-proton", async (event) => {
   protonLoginGeneration++;
   protonOptimizations.invalidate();
   invalidateProtonPlanCache();
   stopProtonFailoverMonitor();
+  manualMeasurementSessions.delete(event.sender.id);
   return withWireSockLifecycle("logout-proton", async () => {
     const sessionFile = proton.getProtonSessionFile(settingsDir());
     try {
       if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
     } catch {}
-    updateSharedSettings({ protonLastServer: undefined });
+    updateSharedSettings({ protonLastServer: undefined, protonRoutePreference: undefined });
     clearProtonRoutePool();
     return true;
   });
+});
+
+type ProtonRouteDiscoveryOptions = {
+  requestId?: string;
+  measurePing?: boolean;
+};
+
+ipcMain.handle("cancel-proton-route-discovery", (event, requestId: string) =>
+  protonOptimizations.cancel(requestId, event.sender.id));
+
+ipcMain.handle("discover-proton-routes", async (event, options?: ProtonRouteDiscoveryOptions) => {
+  if (isMac) return { success: false, error: "A descoberta de rotas Proton não está disponível no macOS." };
+  if (startupRestoreInFlight) {
+    return { success: false, error: "A rota de boot ainda está sendo restaurada." };
+  }
+  const requestId = typeof options?.requestId === "string" && options.requestId.length <= 128
+    ? options.requestId : `proton-discovery-${Date.now()}`;
+  const measurePing = options?.measurePing === true;
+  const operation = protonOptimizations.start(requestId, event.sender.id);
+  if (!operation) return { success: false, error: "Já existe uma seleção de rota em andamento." };
+
+  const signal = operation.controller.signal;
+  const senderDestroyed = () => {
+    protonOptimizations.cancel(requestId, event.sender.id);
+    manualMeasurementSessions.delete(event.sender.id);
+  };
+  const sendDiscoveryProgress = (progress: proton.ProtonOptimizationProgress) => {
+    if (!protonOptimizations.isCurrent(operation) || event.sender.isDestroyed()) return;
+    try {
+      event.sender.send("proton-route-discovery-progress", { ...progress, requestId });
+    } catch {
+      // A janela pode ser destruída entre isDestroyed() e send(); a operação
+      // continua sendo cancelada pelo listener de destroyed abaixo.
+    }
+  };
+  event.sender.once("destroyed", senderDestroyed);
+
+  try {
+    return await withWireSockLifecycle("descoberta-rotas-proton", async () => {
+      if (signal.aborted || quitting) return { success: false, cancelled: true };
+      const settings = readSharedSettings() as any;
+      const username = typeof settings.protonUsername === "string" ? settings.protonUsername.trim() : "";
+      if (!username) return { success: false, error: "Nenhuma conta ProtonVPN conectada." };
+
+      const plan = await resolveProtonPlan(username);
+      if (signal.aborted || quitting) return { success: false, cancelled: true };
+      const freeOnly = plan.status !== "premium";
+      const country = typeof settings.protonCountry === "string" ? settings.protonCountry : "";
+      const previousServer = typeof settings.protonLastServer?.server === "string"
+        ? settings.protonLastServer.server : "";
+      try {
+        const catalog = await proton.generateProtonRouteCatalog(settingsDir(), {
+          username,
+          countries: country || undefined,
+          freeOnly,
+          excludeServers: previousServer ? [previousServer] : [],
+          measurePing,
+          signal,
+          onProgress: sendDiscoveryProgress,
+        });
+        if (signal.aborted || quitting) return { success: false, cancelled: true };
+        const routes = (catalog.routes ?? []).filter((route) =>
+          route &&
+          typeof route.server === "string" &&
+          route.server.trim() !== "" &&
+          route.server !== previousServer &&
+          typeof route.country === "string" &&
+          typeof route.city === "string" &&
+          typeof route.tier === "string" &&
+          Number.isFinite(route.load) &&
+          route.load >= 0 &&
+          route.load <= 100 &&
+          Number.isFinite(route.score) &&
+          route.score >= 0 &&
+          (route.pingMs === undefined ||
+            (Number.isFinite(route.pingMs) && route.pingMs > 0 && route.pingMs < 999)),
+        );
+        if (!catalog.success || routes.length === 0) {
+          return { success: false, error: catalog.error || "Nenhuma outra rota ProtonVPN está disponível." };
+        }
+
+        const candidates = new Map<string, ManualRouteCandidateState>();
+        for (const route of routes) {
+          const hasPing = route.pingMs !== undefined && Number.isFinite(route.pingMs)
+            && route.pingMs > 0 && route.pingMs < 999;
+          candidates.set(route.server, {
+            server: route.server,
+            ...(hasPing ? { pingMs: route.pingMs, pingStatus: "success" as const } : { pingStatus: "not-tested" as const }),
+            preflightStatus: "not-tested",
+            speedStatus: "not-tested",
+          });
+        }
+        manualMeasurementSessions.set(event.sender.id, {
+          measurementId: requestId,
+          ownerId: event.sender.id,
+          username,
+          country,
+          freeOnly,
+          autoPing: settings.protonAutoPing !== false,
+          candidates,
+          expiresAt: Date.now() + MANUAL_MEASUREMENT_TTL_MS,
+        });
+        return {
+          success: true,
+          measurementId: requestId,
+          routes: routes.map((route) => ({
+            server: route.server,
+            country: route.country,
+            city: route.city,
+            tier: route.tier,
+            load: route.load,
+            score: route.score,
+            ...(route.pingMs === undefined ? {} : { pingMs: route.pingMs }),
+          })),
+        };
+      } catch (error) {
+        if (signal.aborted || quitting) return { success: false, cancelled: true };
+        return { success: false, error: String((error as Error)?.message ?? error) };
+      }
+    });
+  } finally {
+    event.sender.removeListener("destroyed", senderDestroyed);
+    protonOptimizations.finish(operation);
+  }
 });
 
 type ProtonOptimizationOptions = {
@@ -5361,6 +5514,8 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
     ? options.requestId : `proton-${Date.now()}`;
   const operation = protonOptimizations.start(requestId, event.sender.id);
   if (!operation) return { success: false, error: "Já existe uma seleção de rota em andamento." };
+  const measurementSessions = typeof manualMeasurementSessions !== "undefined" ? manualMeasurementSessions : undefined;
+  measurementSessions?.delete(event.sender.id);
   const signal = operation.controller.signal;
   let lastProgress: proton.ProtonOptimizationProgress = { phase: "ping", total: 0, tested: 0, succeeded: 0 };
   const sendProgress = (progress: proton.ProtonOptimizationProgress) => {
@@ -5375,7 +5530,10 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
       // continua sendo cancelado pelo listener de destroyed abaixo.
     }
   };
-  const senderDestroyed = () => protonOptimizations.cancel(requestId, event.sender.id);
+  const senderDestroyed = () => {
+    protonOptimizations.cancel(requestId, event.sender.id);
+    measurementSessions?.delete(event.sender.id);
+  };
   event.sender.once("destroyed", senderDestroyed);
   return withWireSockLifecycle("troca-rota-proton", async () => {
       if (signal.aborted || quitting) return { success: false, cancelled: true };
@@ -5422,6 +5580,7 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
             candidates: new sessions.constructor(),
             expiresAt: Date.now() + MANUAL_MEASUREMENT_TTL_MS,
           });
+          event.sender.once("destroyed", () => sessions.delete(event.sender.id));
         }
       }
 
@@ -5497,6 +5656,7 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
         protonCountry: country,
         protonFreeOnly: freeOnly,
         protonAutoPing: autoPing,
+        protonRoutePreference: "auto",
         protonLastServer: saved,
       })) {
         return { success: false, error: "A rota foi preparada, mas não foi possível salvar suas preferências." };
@@ -5575,7 +5735,7 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
       sendProgress({ ...lastProgress, phase: result.success ? "completed" : "failed" });
     }
     const sessions = typeof manualMeasurementSessions !== "undefined" ? manualMeasurementSessions : undefined;
-    if (sessions && (result.success || ("cancelled" in result && result.cancelled) || ("deferred" in result && result.deferred))) {
+    if (sessions && ("deferred" in result && result.deferred)) {
       const current = sessions.get(event.sender.id);
       if (current?.measurementId === requestId) sessions.delete(event.sender.id);
     }
@@ -5624,9 +5784,8 @@ ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelect
     return { success: false, error: "A sessão de medição expirou. Execute a medição novamente." };
   }
   const candidate = session.candidates.get(server);
-  const pingMs = Number(candidate?.pingMs);
-  if (!candidate || !server || !Number.isFinite(pingMs) || pingMs <= 0 || pingMs >= 999 || candidate.pingStatus === "failed") {
-    return { success: false, error: "A rota selecionada não possui um ping válido." };
+  if (!candidate || !server || candidate.pingStatus === "failed") {
+    return { success: false, error: "A rota selecionada não está disponível para seleção." };
   }
   if (candidate.preflightStatus === "failed") {
     return { success: false, error: "A rota selecionada foi reprovada no preflight rápido." };
@@ -5695,7 +5854,6 @@ ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelect
         }
         removeProtonConfigBackup(configBackup);
         proton.removeStagedProtonConfig(stagedFile);
-        manualMeasurementSessions.delete(ownerId);
         return { ...applied, success: true, manual: true };
       } catch (error) {
         restoreProtonConfigBackup(configBackup);

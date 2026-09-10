@@ -1,6 +1,8 @@
 import { protonMeasurementText } from './proton-measurement';
 import { renderProtonCountryFlag } from './proton-flags';
+import { ProtonRouteSelect, type ProtonRouteOption } from './proton-route-select';
 import {
+  isManualRouteActionable,
   isManualRouteSelectable,
   recommendManualRoute,
   reduceManualRouteEvent,
@@ -8,6 +10,24 @@ import {
   type ManualRouteCandidate,
 } from './proton-manual-selection';
 import './style.css'
+
+interface ProtonDiscoveredRoute {
+  server?: string;
+  country?: string;
+  city?: string;
+  tier?: string;
+  load?: number;
+  score?: number;
+  pingMs?: number;
+}
+
+interface ProtonRouteDiscoveryResult {
+  success: boolean;
+  measurementId?: string;
+  routes?: ProtonDiscoveredRoute[];
+  error?: string;
+  cancelled?: boolean;
+}
 
 declare global {
   interface Window {
@@ -115,6 +135,7 @@ declare global {
         deferred?: boolean;
         startup?: boolean;
       }>;
+      discoverProtonRoutes: (options?: { requestId?: string; measurePing?: boolean }) => Promise<ProtonRouteDiscoveryResult>;
       selectProtonRoute: (options: { measurementId: string; server: string }) => Promise<{
         success: boolean;
         manual?: boolean;
@@ -123,6 +144,7 @@ declare global {
         error?: string;
       }>;
       onProtonOptimizationProgress: (callback: (event: ProtonOptimizationProgress) => void) => (() => void) | void;
+      onProtonRouteDiscoveryProgress?: (callback: (event: ProtonOptimizationProgress) => void) => (() => void) | void;
       cancelProtonOptimization: (requestId: string) => Promise<boolean>;
       getProtonSettings: () => Promise<{
         vpnMode: 'proton' | 'custom';
@@ -131,6 +153,7 @@ declare global {
         freeOnly: boolean;
         autoPing: boolean;
         autoFailover: boolean;
+        routePreference?: 'auto' | 'manual';
         lastServer?: any;
       }>;
       getProtonPlan: (options?: { force?: boolean }) => Promise<{
@@ -150,11 +173,16 @@ declare global {
 
 interface ProtonOptimizationProgress {
   requestId: string;
-  phase: 'ping' | 'preparing' | 'testing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
+  phase: 'ping' | 'catalog' | 'preparing' | 'testing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
   total: number;
   tested: number;
   succeeded: number;
   server?: string;
+  country?: string;
+  city?: string;
+  tier?: string;
+  load?: number;
+  score?: number;
   downloadMbps?: number;
   uploadMbps?: number;
   pingMs?: number;
@@ -536,15 +564,13 @@ const protonDot = document.getElementById('protonDot') as HTMLElement | null;
 const protonPlanStatus = document.getElementById('protonPlanStatus') as HTMLElement | null;
 const protonPlanRefreshBtn = document.getElementById('protonPlanRefreshBtn') as HTMLButtonElement | null;
 const protonLogoutBtn = document.getElementById('protonLogoutBtn') as HTMLButtonElement | null;
-const protonCountrySelect = document.getElementById('protonCountrySelect') as HTMLSelectElement | null;
+const protonCountrySelectRoot = document.getElementById('protonCountrySelect');
+const protonCountrySelect = protonCountrySelectRoot
+  ? new ProtonRouteSelect(protonCountrySelectRoot, () => fitWindowToContent())
+  : null;
 const protonOptimizeBtn = document.getElementById('protonOptimizeBtn') as HTMLButtonElement | null;
 const protonOptimizeBtnText = document.getElementById('protonOptimizeBtnText') as HTMLElement | null;
 
-const protonServerBadge = document.getElementById('protonServerBadge') as HTMLElement | null;
-const protonServerFlag = document.getElementById('protonServerFlag') as HTMLElement | null;
-const protonServerName = document.getElementById('protonServerName') as HTMLElement | null;
-const protonServerPing = document.getElementById('protonServerPing') as HTMLElement | null;
-const protonServerLoad = document.getElementById('protonServerLoad') as HTMLElement | null;
 const protonFeedback = document.getElementById('protonFeedback') as HTMLElement | null;
 const protonMeasurementDialog = document.getElementById('protonMeasurementDialog') as HTMLDialogElement | null;
 const protonMeasurement = document.getElementById('protonMeasurement') as HTMLElement | null;
@@ -552,10 +578,6 @@ const protonMeasurementTitle = document.getElementById('protonMeasurementTitle')
 const protonMeasurementProgress = document.getElementById('protonMeasurementProgress') as HTMLElement | null;
 const protonMeasurementCount = document.getElementById('protonMeasurementCount') as HTMLElement | null;
 const protonMeasurementList = document.getElementById('protonMeasurementList') as HTMLElement | null;
-const protonManualFallback = document.getElementById('protonManualFallback') as HTMLElement | null;
-const protonManualFallbackHint = document.getElementById('protonManualFallbackHint') as HTMLElement | null;
-const protonManualRecommendation = document.getElementById('protonManualRecommendation') as HTMLElement | null;
-const protonManualRecommendationBtn = document.getElementById('protonManualRecommendationBtn') as HTMLButtonElement | null;
 const protonMeasurementActions = document.getElementById('protonMeasurementActions') as HTMLElement | null;
 const protonCancelMeasurementBtn = document.getElementById('protonCancelMeasurementBtn') as HTMLButtonElement | null;
 const protonRetryMeasurementBtn = document.getElementById('protonRetryMeasurementBtn') as HTMLButtonElement | null;
@@ -567,12 +589,24 @@ let isProtonAuthenticated = false;
 let protonStateGeneration = 0;
 let protonOptimizationInFlight = false;
 let protonOptimizationRequestId = '';
+let protonRouteDiscoveryInFlight = false;
+let protonRouteDiscoveryRequestId = '';
+let protonRouteDiscoveryRetryPending = false;
+let protonRouteDiscoveryAfterOptimizationPending = false;
+let protonRouteDiscoveryMeasurePingPending = false;
 let protonManualMeasurementId = '';
+type ProtonSelectedRoute = { server: string; pingMs?: number };
+let protonSelectedRoute: ProtonSelectedRoute | null = null;
+type ProtonRoutePreference = 'auto' | 'manual';
+let protonRoutePreference: ProtonRoutePreference = 'auto';
+let protonRememberedManualRoute: { server: string; pingMs?: number } | null = null;
 let protonManualSelectionInFlight = false;
 let protonMeasurementTotal = 0;
 let protonMeasurementTested = 0;
 const protonMeasurementRows = new Map<string, HTMLElement>();
 let protonManualCandidates = new Map<string, ManualRouteCandidate>();
+let protonRouteCatalogCandidates = new Map<string, ManualRouteCandidate>();
+let protonRouteDiscoveryRenderScheduled = false;
 let protonMeasurementDialogLastFocus: HTMLElement | null = null;
 
 function formatMbps(value?: number): string {
@@ -593,6 +627,115 @@ function protonServerCountry(value?: string): string {
   const normalized = formatProtonServerName(value);
   return normalized.match(/^([A-Z]{2})#/)?.[1] ?? '';
 }
+const PROTON_ROUTE_OPTION_PREFIX = 'route:';
+
+
+function protonRouteOptionValue(server: string): string {
+  return `${PROTON_ROUTE_OPTION_PREFIX}${server}`;
+}
+
+function protonRouteFromOptionValue(value: string): string | undefined {
+  return value.startsWith(PROTON_ROUTE_OPTION_PREFIX)
+    ? value.slice(PROTON_ROUTE_OPTION_PREFIX.length)
+    : undefined;
+}
+
+function mergedProtonManualCandidates(): Map<string, ManualRouteCandidate> {
+  const merged = new Map(protonRouteCatalogCandidates);
+  for (const [server, measured] of protonManualCandidates) {
+    const catalog = merged.get(server);
+    merged.set(server, catalog ? { ...catalog, ...measured } : measured);
+  }
+  return merged;
+}
+
+function renderProtonMeasuredRouteOptions() {
+  if (!protonCountrySelect) return;
+
+  const candidates = sortManualRouteCandidates(mergedProtonManualCandidates().values())
+    .filter(isManualRouteSelectable);
+  const recommendedServer = recommendManualRoute(candidates);
+  const orderedCandidates = recommendedServer
+    ? [
+      ...candidates.filter((candidate) => candidate.server === recommendedServer),
+      ...candidates.filter((candidate) => candidate.server !== recommendedServer),
+    ]
+    : candidates;
+  const routes: ProtonRouteOption[] = orderedCandidates.map((candidate) => ({
+    value: protonRouteOptionValue(candidate.server),
+    label: formatProtonServerName(candidate.server),
+    description: candidate.speedStatus === 'success'
+      ? 'Rota medida · velocidade verificada'
+      : 'Rota medida · ping verificado',
+    countryCode: candidate.country
+      || protonServerCountry(candidate.server),
+    pingMs: candidate.pingMs,
+    recommended: candidate.server === recommendedServer,
+  }));
+  const selectedServer = protonSelectedRoute?.server || '';
+  const selectedPing = protonSelectedRoute?.pingMs;
+  const selectedRouteHasPing = Number.isFinite(selectedPing) && selectedPing! > 0 && selectedPing! < 999;
+  if (
+    protonSelectedRoute
+    && selectedRouteHasPing
+    && !candidates.some((candidate) => candidate.server === selectedServer)
+  ) {
+    routes.push({
+      value: protonRouteOptionValue(selectedServer),
+      label: formatProtonServerName(selectedServer),
+      description: protonRoutePreference === 'manual'
+        ? 'Rota manual salva · execute uma nova medição para trocar'
+        : 'Rota escolhida automaticamente · use Otimizar rota para trocar',
+      countryCode: protonServerCountry(selectedServer),
+      pingMs: protonSelectedRoute.pingMs,
+      disabled: true,
+    });
+  }
+  protonCountrySelect.setMeasuredRoutes(routes);
+  const selectedRoute = selectedServer
+    && routes.some((route) => route.value === protonRouteOptionValue(selectedServer))
+    ? protonRouteOptionValue(selectedServer)
+    : '';
+  protonCountrySelect.setValue(selectedRoute);
+}
+
+function clearProtonManualMeasurement() {
+  protonManualMeasurementId = '';
+  protonManualCandidates = new Map();
+}
+
+function clearProtonMeasuredRoutes() {
+  protonRouteCatalogCandidates = new Map();
+  renderProtonMeasuredRouteOptions();
+}
+
+function protonMeasurementDialogIsOpen(): boolean {
+  return protonMeasurementDialog?.open === true || protonMeasurement?.hidden === false;
+}
+
+function flushProtonRouteDiscovery(): void {
+  if (
+    (!protonRouteDiscoveryAfterOptimizationPending && !protonRouteDiscoveryRetryPending)
+    || protonRouteDiscoveryInFlight
+    || protonOptimizationInFlight
+    || protonManualSelectionInFlight
+    || protonMeasurementDialogIsOpen()
+    || !isProtonAuthenticated
+  ) return;
+  const measurePing = protonRouteDiscoveryMeasurePingPending;
+  protonRouteDiscoveryAfterOptimizationPending = false;
+  protonRouteDiscoveryRetryPending = false;
+  protonRouteDiscoveryMeasurePingPending = false;
+  void discoverProtonRoutesInBackground(measurePing);
+}
+
+function queueProtonRouteDiscoveryAfterOptimization(measurePing = false): void {
+  protonRouteDiscoveryAfterOptimizationPending = true;
+  protonRouteDiscoveryMeasurePingPending = protonRouteDiscoveryMeasurePingPending || measurePing;
+  flushProtonRouteDiscovery();
+}
+
+
 
 function updateProtonCountryFlag(element: HTMLElement | null, server?: string) {
   if (!element) return;
@@ -604,137 +747,55 @@ function renderMeasurementList() {
   for (const row of protonMeasurementRows.values()) protonMeasurementList.appendChild(row);
 }
 
-function setManualFallbackVisible(visible: boolean) {
-  if (protonManualFallback) protonManualFallback.hidden = !visible;
-  if (!visible) {
-    if (protonManualRecommendation) protonManualRecommendation.hidden = true;
-    if (protonManualRecommendationBtn) {
-      protonManualRecommendationBtn.disabled = false;
-      protonManualRecommendationBtn.dataset.manualServer = '';
-    }
-  }
-  fitWindowToContent();
-}
 
 function setManualSelectionBusy(busy: boolean) {
   protonManualSelectionInFlight = busy;
-  protonManualFallback?.querySelectorAll<HTMLButtonElement>('[data-manual-server]').forEach((button) => {
-    button.disabled = busy || button.classList.contains('is-unavailable');
-  });
-  if (protonManualRecommendationBtn) protonManualRecommendationBtn.disabled = busy;
-  if (protonRetryMeasurementBtn) protonRetryMeasurementBtn.disabled = busy;
-  if (protonContinueMeasurementBtn) protonContinueMeasurementBtn.disabled = busy;
+  const routeBusy = busy || protonRouteDiscoveryInFlight;
+  protonCountrySelect?.setDisabled(routeBusy || protonOptimizationInFlight);
+  if (protonRetryMeasurementBtn) protonRetryMeasurementBtn.disabled = routeBusy;
+  if (protonContinueMeasurementBtn) protonContinueMeasurementBtn.disabled = routeBusy;
   if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.disabled = busy;
-  if (protonOptimizeBtn) protonOptimizeBtn.disabled = busy || protonOptimizationInFlight;
+  if (protonOptimizeBtn) protonOptimizeBtn.disabled = busy || protonOptimizationInFlight || protonRouteDiscoveryInFlight;
   toggleBtn.disabled = busy || protonOptimizationInFlight;
   if (restoreInternetBtn) restoreInternetBtn.disabled = busy;
 }
 
-function manualRouteMetrics(candidate: ManualRouteCandidate): string {
-  const ping = Number.isFinite(candidate.pingMs) && candidate.pingMs! > 0 && candidate.pingMs! < 999
-    ? `${candidate.pingMs} ms` : '';
-  const speed = Number.isFinite(candidate.downloadMbps) && candidate.downloadMbps! > 0 &&
-    Number.isFinite(candidate.uploadMbps) && candidate.uploadMbps! > 0
-    ? `↓ ${formatMbps(candidate.downloadMbps)} · ↑ ${formatMbps(candidate.uploadMbps)}` : '';
-  if (ping && speed) return `${ping} · ${speed}`;
-  if (ping) return `${ping} · será verificada novamente antes de aplicar`;
-  return candidate.failureReason || 'Sem resposta ao ping';
-}
 
-function manualRouteStatus(candidate: ManualRouteCandidate, selectable: boolean): string {
-  if (candidate.preflightStatus === 'failed') return 'Reprovada no preflight';
-  if (!selectable) return 'Sem resposta';
-  return candidate.speedStatus === 'success' ? 'Disponível · velocidade medida' : 'Disponível';
-}
 
-function makeManualRouteButton(candidate: ManualRouteCandidate, recommended: boolean): HTMLButtonElement {
-  const selectable = isManualRouteSelectable(candidate);
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = `proton-manual-route${selectable ? '' : ' is-unavailable'}${recommended ? ' is-recommended' : ''}`;
-  button.disabled = !selectable;
-  button.dataset.manualServer = candidate.server;
-  button.setAttribute('aria-label', `${formatProtonServerName(candidate.server)}: ${manualRouteMetrics(candidate)}`);
 
-  const top = document.createElement('span');
-  top.className = 'proton-manual-route__top';
-  const flag = document.createElement('span');
-  flag.className = 'proton-country-flag proton-measurement__server-flag';
-  flag.setAttribute('aria-hidden', 'true');
-  updateProtonCountryFlag(flag, candidate.server);
-  const name = document.createElement('span');
-  name.className = 'proton-manual-route__name';
-  name.textContent = formatProtonServerName(candidate.server);
-  top.append(flag, name);
-  if (recommended) {
-    const badge = document.createElement('span');
-    badge.className = 'proton-manual-route__badge';
-    badge.textContent = 'Recomendada';
-    top.appendChild(badge);
-  }
-
-  const status = document.createElement('span');
-  status.className = 'proton-manual-route__status';
-  status.textContent = manualRouteStatus(candidate, selectable);
-  const metrics = document.createElement('span');
-  metrics.className = 'proton-manual-route__metrics';
-  metrics.textContent = manualRouteMetrics(candidate);
-  button.append(top, status, metrics);
-  return button;
-}
-
-function renderManualRouteChoices() {
-  if (!protonMeasurementList) return;
-  const sorted = sortManualRouteCandidates(protonManualCandidates.values());
-  const recommendedServer = recommendManualRoute(sorted);
-  protonMeasurementList.replaceChildren();
-  if (sorted.length === 0) {
-    const empty = document.createElement('p');
-    empty.className = 'proton-manual-fallback__hint';
-    empty.textContent = 'Nenhuma rota participou da medição atual. Tente novamente para obter novas candidatas.';
-    protonMeasurementList.appendChild(empty);
-  } else {
-    for (const candidate of sorted) {
-      protonMeasurementList.appendChild(makeManualRouteButton(candidate, candidate.server === recommendedServer));
-    }
-  }
-
-  if (protonManualRecommendation && protonManualRecommendationBtn && recommendedServer) {
-    const recommended = sorted.find((candidate) => candidate.server === recommendedServer);
-    if (recommended) {
-      protonManualRecommendation.hidden = false;
-      protonManualRecommendationBtn.dataset.manualServer = recommended.server;
-      protonManualRecommendationBtn.textContent = `${formatProtonServerName(recommended.server)} · ${manualRouteMetrics(recommended)}`;
-      protonManualRecommendationBtn.setAttribute('aria-label', `Usar rota recomendada ${formatProtonServerName(recommended.server)}`);
-    }
-  }
-  if (protonManualFallbackHint) {
-    protonManualFallbackHint.textContent = recommendedServer
-      ? 'A seleção automática falhou. Escolha uma rota medida; ela será verificada novamente antes de aplicar.'
-      : 'Nenhuma rota respondeu com um ping utilizável. Tente novamente para obter novas candidatas.';
-  }
-  setManualFallbackVisible(true);
-}
-
-async function selectManualProtonRoute(server: string) {
-  if (protonManualSelectionInFlight || !protonManualMeasurementId || !server) return;
-  const candidate = protonManualCandidates.get(server);
-  if (!candidate || !isManualRouteSelectable(candidate)) return;
+async function selectManualProtonRoute(server: string, previousSelection?: string) {
+  if (protonManualSelectionInFlight || protonRouteDiscoveryInFlight || !protonManualMeasurementId || !server) return;
+  const candidate = mergedProtonManualCandidates().get(server);
+  if (!candidate || !isManualRouteActionable(candidate)) return;
+  const restoreSelection = previousSelection
+    ?? (protonSelectedRoute ? protonRouteOptionValue(protonSelectedRoute.server) : '');
   setManualSelectionBusy(true);
-  if (protonManualFallbackHint) protonManualFallbackHint.textContent = `Validando ${formatProtonServerName(server)} e aplicando a rota…`;
   setProtonFeedback('Validando a rota escolhida e preparando o WireGuard…', 'busy');
   try {
     const result = await window.api.selectProtonRoute({ measurementId: protonManualMeasurementId, server });
     if (!result.success) {
-      if (protonManualFallbackHint) protonManualFallbackHint.textContent = result.error || 'A rota foi reprovada. Escolha outra rota medida.';
-      setProtonFeedback(result.error || 'Não foi possível aplicar a rota escolhida.', 'err');
+      protonCountrySelect?.setValue(restoreSelection);
+      const errorMessage = result.error || 'A rota foi reprovada. Escolha outra rota disponível.';
+      if (/medição expirou|conta Proton mudou|preferências Proton mudaram/i.test(errorMessage)) {
+        clearProtonManualMeasurement();
+        clearProtonMeasuredRoutes();
+      }
+      setProtonFeedback(errorMessage, 'err');
       return;
     }
-    const selectedServerName = formatProtonServerName(result.server || server);
-    protonManualMeasurementId = '';
-    protonManualCandidates = new Map();
-    setManualFallbackVisible(false);
+    const selectedServer = result.server || server;
+    const selectedServerName = formatProtonServerName(selectedServer);
+    const selectedPing = Number.isFinite(result.pingMs) && result.pingMs! > 0 ? result.pingMs : candidate.pingMs;
+    protonRoutePreference = 'manual';
+    protonSelectedRoute = { server: selectedServer, pingMs: selectedPing };
+    protonRememberedManualRoute = {
+      server: selectedServer,
+      pingMs: selectedPing,
+    };
+    renderProtonMeasuredRouteOptions();
     await refreshProtonState();
+    protonSelectedRoute = { server: selectedServer, pingMs: selectedPing };
+    renderProtonMeasuredRouteOptions();
     await atualizarStatusWgConf();
     await updateStatus();
     closeProtonMeasurementDialog();
@@ -745,11 +806,12 @@ async function selectManualProtonRoute(server: string) {
       'ok',
     );
   } catch (error) {
-    if (protonManualFallbackHint) protonManualFallbackHint.textContent = 'Não foi possível aplicar a rota. Escolha outra rota medida ou tente novamente.';
+    protonCountrySelect?.setValue(restoreSelection);
     setProtonFeedback((error as Error)?.message || String(error), 'err');
   } finally {
     setManualSelectionBusy(false);
     await updateStatus();
+    flushProtonRouteDiscovery();
   }
 }
 
@@ -880,18 +942,12 @@ function closeProtonMeasurementDialog(restoreFocus = true) {
     requestAnimationFrame(() => focusTarget?.focus());
   }
   fitWindowToContent();
+  flushProtonRouteDiscovery();
 }
 
-protonMeasurementList?.addEventListener('click', (event) => {
-  const target = (event.target as Element | null)?.closest<HTMLButtonElement>('[data-manual-server]');
-  if (!target || target.disabled || !protonManualFallback || protonManualFallback.hidden) return;
-  void selectManualProtonRoute(target.dataset.manualServer || '');
-});
-protonManualRecommendationBtn?.addEventListener('click', () => {
-  void selectManualProtonRoute(protonManualRecommendationBtn.dataset.manualServer || '');
-});
 
 const removeProtonProgressListener = window.api.onProtonOptimizationProgress?.(updateMeasurementProgress);
+const removeProtonRouteDiscoveryProgressListener = window.api.onProtonRouteDiscoveryProgress?.(updateProtonRouteDiscoveryProgress);
 
 protonPasswordToggle?.addEventListener('click', () => {
   if (!protonPassword) return;
@@ -1014,7 +1070,7 @@ function renderProtonPlan(plan: ProtonPlanView) {
 }
 
 async function switchVpnMode(mode: 'proton' | 'custom') {
-  if (protonOptimizationInFlight || protonManualSelectionInFlight) return;
+  if (protonOptimizationInFlight || protonRouteDiscoveryInFlight || protonManualSelectionInFlight) return;
   currentVpnMode = mode;
   try {
     await window.api.setVpnMode(mode);
@@ -1031,7 +1087,12 @@ async function switchVpnMode(mode: 'proton' | 'custom') {
     panelCustom.hidden = isProton;
   }
 
-  if (mode === 'proton') await refreshProtonState();
+  if (mode === 'proton') {
+    await refreshProtonState();
+    if (isProtonAuthenticated) {
+      void discoverProtonRoutesInBackground();
+    }
+  }
   await atualizarStatusWgConf();
   await updateStatus();
   fitWindowToContent();
@@ -1039,16 +1100,24 @@ async function switchVpnMode(mode: 'proton' | 'custom') {
 
 tabProton?.addEventListener('click', () => switchVpnMode('proton'));
 tabCustom?.addEventListener('click', () => switchVpnMode('custom'));
-
 async function refreshProtonState(forcePlan = false) {
   const generation = ++protonStateGeneration;
   try {
     const s = await window.api.getProtonSettings();
     if (generation !== protonStateGeneration) return;
+    const rememberedServer = typeof s.lastServer?.server === 'string' ? s.lastServer.server : '';
+    const rememberedPing = Number(s.lastServer?.pingMs);
+    const manualPreference = s.routePreference === 'manual'
+      || (s.routePreference !== 'auto' && s.lastServer?.manual === true);
+    protonRoutePreference = manualPreference ? 'manual' : 'auto';
+    protonRememberedManualRoute = manualPreference && rememberedServer
+      ? { server: rememberedServer, pingMs: Number.isFinite(rememberedPing) && rememberedPing > 0 ? rememberedPing : undefined }
+      : null;
+    protonSelectedRoute = rememberedServer
+      ? { server: rememberedServer, pingMs: Number.isFinite(rememberedPing) && rememberedPing > 0 ? rememberedPing : undefined }
+      : null;
     if (autoFailoverToggle) autoFailoverToggle.checked = s.autoFailover !== false;
-    if (protonCountrySelect) {
-      protonCountrySelect.value = s.country || '';
-    }
+    if (protonCountrySelect) renderProtonMeasuredRouteOptions();
 
     if (s.username) {
       if (protonUsername) protonUsername.value = s.username;
@@ -1070,32 +1139,18 @@ async function refreshProtonState(forcePlan = false) {
           renderProtonPlan({ success: false, status: 'unknown' });
         }
 
-        if (s.lastServer?.server && protonServerBadge && protonServerName && protonServerPing && protonServerLoad) {
-          updateProtonCountryFlag(protonServerFlag, s.lastServer.server);
-          protonServerName.textContent = formatProtonServerName(s.lastServer.server);
-          const ping = s.lastServer.pingMs;
-          if (ping > 0) {
-            protonServerPing.textContent = `${ping} ms`;
-            protonServerPing.classList.toggle('proton-ping-pill--high', ping > 180);
-          } else {
-            protonServerPing.textContent = 'Ping: rápido';
-          }
-          protonServerLoad.textContent = `${s.lastServer.load ?? 0}% carga`;
-          const speedBadge = protonServerBadge.querySelector('.proton-speed-pill') as HTMLElement | null;
-          if (speedBadge) {
-            speedBadge.textContent = Number.isFinite(s.lastServer.downloadMbps) && s.lastServer.downloadMbps > 0
-              ? `↓ ${s.lastServer.downloadMbps.toFixed(1)} Mbps` : 'Velocidade não medida';
-            speedBadge.hidden = false;
-          }
-          protonServerBadge.hidden = false;
-        } else if (protonServerBadge) {
-          updateProtonCountryFlag(protonServerFlag);
-          protonServerBadge.hidden = true;
-        }
         return;
       }
     }
 
+    protonRoutePreference = 'auto';
+    protonRememberedManualRoute = null;
+    protonSelectedRoute = null;
+    clearProtonManualMeasurement();
+    clearProtonMeasuredRoutes();
+    protonRouteDiscoveryAfterOptimizationPending = false;
+    protonRouteDiscoveryMeasurePingPending = false;
+    protonRouteDiscoveryRetryPending = false;
     isProtonAuthenticated = false;
     renderProtonPlan({ success: false, status: 'unknown' });
     if (protonAuthForm) protonAuthForm.hidden = false;
@@ -1104,16 +1159,156 @@ async function refreshProtonState(forcePlan = false) {
     if (generation !== protonStateGeneration) return;
     console.error('Falha ao verificar sessão Proton:', err);
     isProtonAuthenticated = false;
+    protonSelectedRoute = null;
+    clearProtonManualMeasurement();
+    clearProtonMeasuredRoutes();
+    protonRouteDiscoveryAfterOptimizationPending = false;
+    protonRouteDiscoveryMeasurePingPending = false;
+    protonRouteDiscoveryRetryPending = false;
     renderProtonPlan({ success: false, status: 'unknown' });
     if (protonAuthForm) protonAuthForm.hidden = false;
     if (protonConnectedView) protonConnectedView.hidden = true;
   }
 }
 
+function shouldOptimizeProtonAutomatically(): boolean {
+  return protonRoutePreference !== 'manual' || !protonRememberedManualRoute;
+}
+
+function applyProtonDiscoveredRoutes(routes: readonly ProtonDiscoveredRoute[]): void {
+  const candidates = new Map<string, ManualRouteCandidate>();
+  for (const route of routes) {
+    const server = typeof route.server === 'string' ? route.server.trim() : '';
+    if (!server || server === protonSelectedRoute?.server) continue;
+    const candidate: ManualRouteCandidate = {
+      server,
+      pingStatus: 'not-tested',
+      preflightStatus: 'not-tested',
+      speedStatus: 'not-tested',
+    };
+    if (typeof route.country === 'string' && route.country.trim()) candidate.country = route.country.trim();
+    if (typeof route.city === 'string' && route.city.trim()) candidate.city = route.city.trim();
+    if (typeof route.tier === 'string' && route.tier.trim()) candidate.tier = route.tier.trim();
+    if (Number.isFinite(route.load) && route.load! >= 0 && route.load! <= 100) candidate.load = route.load;
+    if (Number.isFinite(route.score) && route.score! >= 0) candidate.score = route.score;
+    if (Number.isFinite(route.pingMs) && route.pingMs! > 0 && route.pingMs! < 999) {
+      candidate.pingMs = route.pingMs;
+      candidate.pingStatus = 'success';
+    }
+    candidates.set(server, candidate);
+  }
+  protonRouteCatalogCandidates = candidates;
+  renderProtonMeasuredRouteOptions();
+}
+
+function scheduleProtonRouteDiscoveryRender(): void {
+  if (protonRouteDiscoveryRenderScheduled) return;
+  protonRouteDiscoveryRenderScheduled = true;
+  const render = () => {
+    protonRouteDiscoveryRenderScheduled = false;
+    renderProtonMeasuredRouteOptions();
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(render);
+  else setTimeout(render, 0);
+}
+
+function updateProtonRouteDiscoveryProgress(event: ProtonOptimizationProgress): void {
+  if (
+    !protonRouteDiscoveryInFlight
+    || event.requestId !== protonRouteDiscoveryRequestId
+    || event.phase !== 'catalog'
+  ) return;
+  if (event.server && event.status === 'success') {
+    const server = event.server.trim();
+    const loadValid = event.load === undefined || (Number.isFinite(event.load) && event.load >= 0 && event.load <= 100);
+    const scoreValid = event.score === undefined || (Number.isFinite(event.score) && event.score >= 0);
+    if (server && server !== protonSelectedRoute?.server && loadValid && scoreValid) {
+      const current = protonRouteCatalogCandidates.get(server) ?? {
+        server,
+        pingStatus: 'not-tested' as const,
+        preflightStatus: 'not-tested' as const,
+        speedStatus: 'not-tested' as const,
+      };
+      const pingValid = event.pingMs !== undefined
+        && Number.isFinite(event.pingMs)
+        && event.pingMs > 0
+        && event.pingMs < 999;
+      protonRouteCatalogCandidates.set(server, {
+        ...current,
+        country: typeof event.country === 'string' ? event.country.trim() : current.country,
+        city: typeof event.city === 'string' ? event.city.trim() : current.city,
+        tier: typeof event.tier === 'string' ? event.tier.trim() : current.tier,
+        load: event.load ?? current.load ?? 0,
+        score: event.score ?? current.score ?? 0,
+        pingMs: pingValid ? event.pingMs : current.pingMs,
+        pingStatus: pingValid ? 'success' : current.pingStatus,
+      });
+    }
+  }
+  scheduleProtonRouteDiscoveryRender();
+}
+
+async function discoverProtonRoutesInBackground(measurePing = false): Promise<void> {
+  if (
+    protonRouteDiscoveryInFlight
+    || protonOptimizationInFlight
+    || protonManualSelectionInFlight
+    || !isProtonAuthenticated
+  ) return;
+
+  protonRouteDiscoveryAfterOptimizationPending = false;
+  protonRouteDiscoveryRetryPending = false;
+  protonRouteDiscoveryMeasurePingPending = false;
+  const requestId = typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `proton-discovery-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  protonRouteDiscoveryInFlight = true;
+  protonRouteDiscoveryRequestId = requestId;
+  protonRouteCatalogCandidates = new Map();
+  renderProtonMeasuredRouteOptions();
+  protonCountrySelect?.setLoading(true);
+  if (protonOptimizeBtn) protonOptimizeBtn.disabled = true;
+
+  try {
+    const result = await window.api.discoverProtonRoutes({
+      requestId,
+      ...(measurePing ? { measurePing: true } : {}),
+    });
+    if (requestId !== protonRouteDiscoveryRequestId) return;
+    if (result.success && result.measurementId && result.routes?.length) {
+      protonManualMeasurementId = result.measurementId;
+      applyProtonDiscoveredRoutes(result.routes);
+    } else {
+      protonRouteDiscoveryRetryPending = /rota de boot ainda está sendo restaurada/i.test(result.error ?? '');
+      protonRouteCatalogCandidates = new Map();
+      renderProtonMeasuredRouteOptions();
+    }
+  } catch (error) {
+    if (requestId !== protonRouteDiscoveryRequestId) return;
+    protonRouteDiscoveryRetryPending = /rota de boot ainda está sendo restaurada/i.test(String(error));
+    protonRouteCatalogCandidates = new Map();
+    renderProtonMeasuredRouteOptions();
+    console.error('Falha ao buscar o catálogo de rotas Proton:', error);
+  } finally {
+    if (requestId === protonRouteDiscoveryRequestId) {
+      protonRouteDiscoveryInFlight = false;
+      protonRouteDiscoveryRequestId = '';
+      protonCountrySelect?.setLoading(false);
+      renderProtonMeasuredRouteOptions();
+      if (protonOptimizeBtn) {
+        protonOptimizeBtn.disabled = protonManualSelectionInFlight || protonOptimizationInFlight;
+      }
+    }
+  }
+}
+
 protonPlanRefreshBtn?.addEventListener('click', async () => {
-  if (protonOptimizationInFlight || protonManualSelectionInFlight || !isProtonAuthenticated) return;
+  if (protonOptimizationInFlight || protonRouteDiscoveryInFlight || protonManualSelectionInFlight || !isProtonAuthenticated) return;
   setProtonPlanLoading();
   await refreshProtonState(true);
+  if (isProtonAuthenticated) {
+    void discoverProtonRoutesInBackground();
+  }
 });
 
 async function submitProtonLogin() {
@@ -1152,7 +1347,11 @@ async function submitProtonLogin() {
         await refreshProtonState();
         await atualizarStatusWgConf();
         await updateStatus();
-        void optimizeProtonRoute(true);
+        if (shouldOptimizeProtonAutomatically()) {
+          void optimizeProtonRoute(true);
+        } else {
+          void discoverProtonRoutesInBackground();
+        }
       } else {
         if (res.code === 'TWO_FACTOR_REQUIRED' || res.code === 'TWO_FACTOR_INVALID' || protonNeeds2FA(res.error)) {
           setProtonFeedback(
@@ -1194,8 +1393,16 @@ proton2FAConfirmBtn?.addEventListener('click', () => {
 
 if (protonLogoutBtn) {
   protonLogoutBtn.addEventListener('click', async () => {
-    if (protonOptimizationInFlight || protonManualSelectionInFlight) return;
+    if (protonOptimizationInFlight || protonRouteDiscoveryInFlight || protonManualSelectionInFlight) return;
     protonStateGeneration += 1;
+    protonRoutePreference = 'auto';
+    protonRememberedManualRoute = null;
+    protonSelectedRoute = null;
+    clearProtonManualMeasurement();
+    clearProtonMeasuredRoutes();
+    protonRouteDiscoveryAfterOptimizationPending = false;
+    protonRouteDiscoveryMeasurePingPending = false;
+    protonRouteDiscoveryRetryPending = false;
     await window.api.logoutProton();
     setProtonFeedback('');
     await refreshProtonState();
@@ -1204,22 +1411,31 @@ if (protonLogoutBtn) {
   });
 }
 
-if (protonCountrySelect) {
-  protonCountrySelect.addEventListener('change', async () => {
-    if (protonOptimizationInFlight || protonManualSelectionInFlight) return;
-    const country = protonCountrySelect.value;
-    await window.api.setProtonSettings({ country });
-    protonOptimizeBtn?.click();
-  });
+async function handleProtonRouteChange(selectedValue: string) {
+  if (protonOptimizationInFlight || protonRouteDiscoveryInFlight || protonManualSelectionInFlight) return;
+  const server = protonRouteFromOptionValue(selectedValue);
+  if (!server) return;
+  if (!protonManualMeasurementId) {
+    renderProtonMeasuredRouteOptions();
+    setProtonFeedback('Execute uma nova medição para escolher uma rota manualmente.', 'err');
+    return;
+  }
+  await selectManualProtonRoute(server);
 }
 
+protonCountrySelect?.setOnChange((selectedValue) => {
+  void handleProtonRouteChange(selectedValue);
+});
+
 async function optimizeProtonRoute(onStartup = false, speedTest = true) {
-  if (protonOptimizationInFlight || protonManualSelectionInFlight || !isProtonAuthenticated) return;
+  if (protonOptimizationInFlight || protonRouteDiscoveryInFlight || protonManualSelectionInFlight || !isProtonAuthenticated) return;
 
   protonOptimizationInFlight = true;
-  protonManualMeasurementId = '';
-  protonManualCandidates = new Map();
-  setManualFallbackVisible(false);
+  clearProtonManualMeasurement();
+  clearProtonMeasuredRoutes();
+  protonRouteDiscoveryAfterOptimizationPending = false;
+  protonRouteDiscoveryMeasurePingPending = false;
+  let needsManualPingRecovery = false;
   protonMeasurementTotal = 0;
   protonMeasurementTested = 0;
   protonOptimizationRequestId = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `proton-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1240,7 +1456,7 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
   openProtonMeasurementDialog();
   if (tabProton) tabProton.disabled = true;
   if (tabCustom) tabCustom.disabled = true;
-  if (protonCountrySelect) protonCountrySelect.disabled = true;
+  protonCountrySelect?.setDisabled(true);
   if (protonLogoutBtn) protonLogoutBtn.disabled = true;
   toggleBtn.disabled = true;
   if (protonOptimizeBtn) protonOptimizeBtn.disabled = true;
@@ -1251,8 +1467,7 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
   );
 
   try {
-    const country = protonCountrySelect?.value || '';
-    const res = await window.api.optimizeProtonRoute({ country, autoPing: true, speedTest, refreshOnStartup: onStartup, requestId: protonOptimizationRequestId });
+    const res = await window.api.optimizeProtonRoute({ country: '', autoPing: true, speedTest, refreshOnStartup: onStartup, requestId: protonOptimizationRequestId });
 
     if (res.deferred) {
       closeProtonMeasurementDialog(!onStartup);
@@ -1263,9 +1478,12 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
         'busy',
       );
     } else if (res.success) {
-      protonManualMeasurementId = '';
-      protonManualCandidates = new Map();
-      setManualFallbackVisible(false);
+      const selectedPing = Number.isFinite(res.pingMs) && res.pingMs! > 0 ? res.pingMs : undefined;
+      if (res.server) protonSelectedRoute = { server: res.server, pingMs: selectedPing };
+      protonRoutePreference = 'auto';
+      protonRememberedManualRoute = null;
+      protonManualMeasurementId = protonOptimizationRequestId;
+      renderProtonMeasuredRouteOptions();
       const pingStr = protonMeasurementText(res);
       await refreshProtonState();
       await atualizarStatusWgConf();
@@ -1289,14 +1507,9 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
       if (protonMeasurementActions) protonMeasurementActions.hidden = false;
       if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.hidden = true;
       if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.hidden = false;
-      if (res.cancelled) {
-        protonManualMeasurementId = '';
-        protonManualCandidates = new Map();
-        setManualFallbackVisible(false);
-      } else {
-        protonManualMeasurementId = protonOptimizationRequestId;
-        renderManualRouteChoices();
-      }
+      needsManualPingRecovery = ![...protonManualCandidates.values()].some(isManualRouteSelectable);
+      protonManualMeasurementId = protonOptimizationRequestId;
+      renderProtonMeasuredRouteOptions();
       setProtonFeedback(res.error || 'Falha ao buscar servidor.', 'err');
       await updateStatus();
     }
@@ -1307,7 +1520,8 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
     if (protonCancelMeasurementBtn) protonCancelMeasurementBtn.hidden = true;
     if (protonCloseMeasurementBtn) protonCloseMeasurementBtn.hidden = false;
     protonManualMeasurementId = protonOptimizationRequestId;
-    renderManualRouteChoices();
+    needsManualPingRecovery = ![...protonManualCandidates.values()].some(isManualRouteSelectable);
+    renderProtonMeasuredRouteOptions();
     if (protonMeasurementCount && !protonMeasurementCount.textContent?.includes('de')) protonMeasurementCount.textContent = 'Nenhum servidor foi testado.';
     setProtonFeedback((err as Error)?.message || String(err), 'err');
     await updateStatus();
@@ -1316,11 +1530,12 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
     protonOptimizationRequestId = '';
     if (tabProton) tabProton.disabled = false;
     if (tabCustom) tabCustom.disabled = false;
-    if (protonCountrySelect) protonCountrySelect.disabled = false;
+    protonCountrySelect?.setDisabled(false);
     if (protonLogoutBtn) protonLogoutBtn.disabled = false;
     if (protonOptimizeBtn) protonOptimizeBtn.disabled = false;
     if (protonOptimizeBtnText) protonOptimizeBtnText.textContent = 'Otimizar rota';
     await updateStatus();
+    queueProtonRouteDiscoveryAfterOptimization(needsManualPingRecovery);
   }
 }
 
@@ -1345,6 +1560,7 @@ protonMeasurementDialog?.addEventListener('cancel', (event) => {
 
 window.addEventListener('beforeunload', () => {
   if (typeof removeProtonProgressListener === 'function') removeProtonProgressListener();
+  if (typeof removeProtonRouteDiscoveryProgressListener === 'function') removeProtonRouteDiscoveryProgressListener();
 });
 
 async function atualizarStatusWgConf() {
@@ -1380,8 +1596,10 @@ async function initVpnSection() {
     }
     await refreshProtonState();
     await atualizarStatusWgConf();
-    if (currentVpnMode === 'proton' && isProtonAuthenticated) {
+    if (currentVpnMode === 'proton' && isProtonAuthenticated && shouldOptimizeProtonAutomatically()) {
       void optimizeProtonRoute(true);
+    } else if (currentVpnMode === 'proton' && isProtonAuthenticated) {
+      void discoverProtonRoutesInBackground();
     }
   } catch (err) {
     console.error('Erro ao inicializar seção VPN:', err);
@@ -1618,9 +1836,29 @@ try {
   /* ignore */
 }
 
+let protonRouteDiscoveryRetryInFlight = false;
+async function retryProtonRouteDiscoveryAfterBoot(): Promise<void> {
+  if (
+    !protonRouteDiscoveryRetryPending
+    || protonRouteDiscoveryRetryInFlight
+    || currentVpnMode !== 'proton'
+  ) return;
+  protonRouteDiscoveryRetryInFlight = true;
+  try {
+    await refreshProtonState();
+    if (protonRouteDiscoveryRetryPending && isProtonAuthenticated) {
+      flushProtonRouteDiscovery();
+    }
+  } finally {
+    protonRouteDiscoveryRetryInFlight = false;
+  }
+}
+
 // A bandeja tambem tem esses controles; sem os avisos, os dois ficariam dessincronizados.
 window.api.onRefreshStartup(refreshStartup);
-window.api.onRefreshStatus(updateStatus);
+window.api.onRefreshStatus(() => {
+  void updateStatus().then(() => retryProtonRouteDiscoveryAfterBoot());
+});
 
 // ---------------------------------------------------------------------------
 // Report de bug — dialog + IPC

@@ -5,6 +5,7 @@ export type ManualCandidateStatus =
   | 'failed';
 
 export type ManualRouteProgressPhase =
+  | 'catalog'
   | 'ping'
   | 'preparing'
   | 'testing'
@@ -15,6 +16,11 @@ export type ManualRouteProgressPhase =
 
 export interface ManualRouteCandidate {
   server: string;
+  country?: string;
+  city?: string;
+  tier?: string;
+  load?: number;
+  score?: number;
   pingMs?: number;
   downloadMbps?: number;
   uploadMbps?: number;
@@ -27,6 +33,11 @@ export interface ManualRouteCandidate {
 export interface ManualRouteProgressEvent {
   phase: ManualRouteProgressPhase;
   server?: string;
+  country?: string;
+  city?: string;
+  tier?: string;
+  load?: number;
+  score?: number;
   pingMs?: number;
   downloadMbps?: number;
   uploadMbps?: number;
@@ -112,8 +123,10 @@ export function reduceManualRouteEvent(
     candidate.pingStatus = status;
   } else if (event.phase === 'preparing') {
     candidate.preflightStatus = status;
-  } else {
+  } else if (event.phase === 'testing') {
     candidate.speedStatus = status;
+  } else {
+    return next;
   }
 
   next.set(server, candidate);
@@ -138,15 +151,29 @@ export function sortManualRouteCandidates(
   });
 }
 
-export function isManualRouteSelectable(
+export function isManualRouteActionable(
   candidate: ManualRouteCandidate,
 ): boolean {
   return Boolean(
     candidate
     && candidate.server.trim() !== ''
-    && isValidPing(candidate.pingMs)
     && candidate.pingStatus !== 'failed'
     && candidate.preflightStatus !== 'failed',
+  );
+}
+
+export function hasValidManualRoutePing(
+  candidate: ManualRouteCandidate,
+): boolean {
+  return candidate.pingStatus !== 'failed' && isValidPing(candidate.pingMs);
+}
+
+export function isManualRouteSelectable(
+  candidate: ManualRouteCandidate,
+): boolean {
+  return Boolean(
+    isManualRouteActionable(candidate)
+    && hasValidManualRoutePing(candidate)
   );
 }
 

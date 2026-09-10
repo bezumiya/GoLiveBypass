@@ -123,7 +123,7 @@ describe("updater nativo do plugin", () => {
 
   it("não usa fallback enganoso quando a fonte instalada é inválida", () => {
     expect(native).toContain('const UNKNOWN_PLUGIN_VERSION = "unknown"');
-    expect(native).toContain("catch { return UNKNOWN_PLUGIN_VERSION; }");
+    expect(native).toContain("catch { return normalizePluginVersion(PLUGIN_VERSION) ?? UNKNOWN_PLUGIN_VERSION; }");
     expect(native).toContain("validatePluginSourceTree(target)");
   });
 });

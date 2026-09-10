@@ -28,6 +28,22 @@ describe("restauração do bypass no autostart", () => {
     expect(calls).toEqual(["optimize", "activate"]);
   });
 
+  it("ativa rota salva sem substituir uma escolha manual marcada como preservada", async () => {
+    const calls: string[] = [];
+    const onOptimizationFailure = vi.fn();
+    const result = await restoreBypassOnStartup({
+      enabled: true,
+      isActive: async () => false,
+      optimize: async () => { calls.push("skip-optimize"); return { success: true, skipped: true }; },
+      activate: async () => { calls.push("activate"); },
+      onOptimizationFailure,
+    });
+
+    expect(result).toMatchObject({ status: "activated", optimized: false, usedFallback: false });
+    expect(calls).toEqual(["skip-optimize", "activate"]);
+    expect(onOptimizationFailure).not.toHaveBeenCalled();
+  });
+
   it("ativa usando fallback quando a otimização falha", async () => {
     const calls: string[] = [];
     const result = await restoreBypassOnStartup({

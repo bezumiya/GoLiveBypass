@@ -233,6 +233,8 @@ func run() error {
 	switch {
 	case cfg.ListConfigs:
 		return listConfigs(vpnClient)
+	case cfg.RouteCatalog:
+		return catalogServers(cfg, vpnClient)
 	case cfg.ListServers:
 		return listServers(cfg, vpnClient)
 	case cfg.RenewSerial != "":
@@ -525,7 +527,32 @@ func generateRoutePool(cfg *config.Config, vpnClient *vpn.Client) error {
 		}
 	}
 	selector := vpn.NewServerSelector(cfg)
-	candidates, pings, err := selector.SpeedCandidatesWithProgressExcluding(servers, cfg.RoutePoolSize, excluded, nil)
+	var pingProgress vpn.PingProgressFunc
+	if cfg.ProgressJSON || cfg.SpeedTestTrace {
+		emitProgress := func(event speedtest.ProgressEvent) {
+			if cfg.ProgressJSON {
+				data, _ := json.Marshal(event)
+				fmt.Fprintf(os.Stderr, "GOLIVE_PROGRESS %s\n", data)
+			}
+			if cfg.SpeedTestTrace {
+				printSpeedTrace(event)
+			}
+		}
+		emitProgress(speedtest.ProgressEvent{Phase: "ping", Total: 0, Tested: 0, Succeeded: 0})
+		pingProgress = func(event vpn.PingProgressEvent) {
+			emitProgress(speedtest.ProgressEvent{
+				Phase:     "ping",
+				Total:     event.Total,
+				Tested:    event.Tested,
+				Succeeded: event.Succeeded,
+				Server:    event.Server,
+				PingMs:    event.PingMs,
+				ElapsedMs: event.ElapsedMs,
+				Status:    event.Status,
+			})
+		}
+	}
+	candidates, pings, err := selector.SpeedCandidatesWithProgressExcluding(servers, cfg.RoutePoolSize, excluded, pingProgress)
 	if err != nil {
 		return err
 	}
@@ -759,6 +786,150 @@ func listServers(cfg *config.Config, vpnClient *vpn.Client) error {
 	}
 	fmt.Printf("\n%d servers found across %d countries.\n", len(filtered), len(seen))
 	return nil
+}
+
+type routeCatalogEntry struct {
+	Server  string  `json:"server"`
+	Country string  `json:"country"`
+	City    string  `json:"city"`
+	Tier    string  `json:"tier"`
+	Load    int     `json:"load"`
+	Score   float64 `json:"score"`
+	PingMs  int     `json:"pingMs,omitempty"`
+}
+
+type routeCatalogResult struct {
+	Success bool                `json:"success"`
+	Routes  []routeCatalogEntry `json:"routes"`
+}
+
+func eligibleRouteServers(cfg *config.Config, servers []api.LogicalServer) []api.LogicalServer {
+	filtered := vpn.EligibleServers(cfg, servers)
+	filtered = slices.DeleteFunc(filtered, func(server api.LogicalServer) bool {
+		return slices.Contains(cfg.ExcludedServers, server.Name)
+	})
+	slices.SortFunc(filtered, func(a, b api.LogicalServer) int {
+		if c := cmp.Compare(a.ExitCountry, b.ExitCountry); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.City, b.City); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Score, b.Score); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Load, b.Load); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return filtered
+}
+
+func routeCatalogEntries(servers []api.LogicalServer) []routeCatalogEntry {
+	entries := make([]routeCatalogEntry, len(servers))
+	for i := range servers {
+		entries[i] = routeCatalogEntry{
+			Server:  servers[i].Name,
+			Country: servers[i].ExitCountry,
+			City:    servers[i].City,
+			Tier:    api.GetTierName(servers[i].Tier),
+			Load:    servers[i].Load,
+			Score:   servers[i].Score,
+		}
+	}
+	return entries
+}
+
+func eligibleRouteCatalog(cfg *config.Config, servers []api.LogicalServer) []routeCatalogEntry {
+	return routeCatalogEntries(eligibleRouteServers(cfg, servers))
+}
+
+func attachRouteCatalogPings(entries []routeCatalogEntry, pings map[string]int) {
+	for i := range entries {
+		ping := pings[entries[i].Server]
+		if ping > 0 && ping < 999 {
+			entries[i].PingMs = ping
+		}
+	}
+}
+
+func emitRouteCatalogProgress(entries []routeCatalogEntry, emit func(speedtest.ProgressEvent)) {
+	if emit == nil {
+		return
+	}
+	emit(speedtest.ProgressEvent{
+		Phase: "catalog",
+		Total: len(entries),
+	})
+	for index, entry := range entries {
+		emit(speedtest.ProgressEvent{
+			Phase:     "catalog",
+			Total:     len(entries),
+			Tested:    index + 1,
+			Succeeded: index + 1,
+			Server:    entry.Server,
+			Country:   entry.Country,
+			City:      entry.City,
+			Tier:      entry.Tier,
+			Load:      entry.Load,
+			Score:     entry.Score,
+			PingMs:    entry.PingMs,
+			Status:    "success",
+		})
+	}
+}
+
+func catalogServers(cfg *config.Config, vpnClient *vpn.Client) error {
+	servers, err := vpnClient.GetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get servers: %w", err)
+	}
+
+	eligible := eligibleRouteServers(cfg, servers)
+	entries := routeCatalogEntries(eligible)
+	if len(entries) == 0 {
+		if len(cfg.Countries) > 0 {
+			return fmt.Errorf("no online servers found for countries: %v", cfg.Countries)
+		}
+		return fmt.Errorf("no online servers found")
+	}
+	if cfg.AutoPing {
+		_, pings, _ := vpn.NewServerSelector(cfg).SpeedCandidatesWithProgress(eligible, len(eligible), nil)
+		attachRouteCatalogPings(entries, pings)
+	}
+
+	if cfg.ProgressJSON {
+		emitRouteCatalogProgress(entries, func(event speedtest.ProgressEvent) {
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(os.Stderr, "GOLIVE_PROGRESS %s\n", data)
+		})
+	}
+
+	if cfg.JSONOutput {
+		data, _ := json.Marshal(routeCatalogResult{Success: true, Routes: entries})
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("%-7s  %-14s  %-18s  %5s  %6s  %-10s\n",
+		"Country", "Server", "City", "Load", "Score", "Tier")
+	fmt.Println(strings.Repeat("-", 86))
+	for i := range entries {
+		entry := &entries[i]
+		fmt.Printf("%-7s  %-14s  %-18s  %3d%%  %6.2f  %-10s\n",
+			entry.Country, entry.Server, entry.City, entry.Load, entry.Score, entry.Tier)
+	}
+	fmt.Printf("\n%d routes found across %d countries.\n", len(entries), countCatalogCountries(entries))
+	return nil
+}
+
+func countCatalogCountries(entries []routeCatalogEntry) int {
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		seen[entry.Country] = struct{}{}
+	}
+	return len(seen)
 }
 
 func renewSerial(cfg *config.Config, vpnClient *vpn.Client) error {

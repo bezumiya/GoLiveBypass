@@ -106,6 +106,11 @@ describe("ProtonVPN Integration & Sidecar", () => {
     expect(classifyProtonError("CAPTCHA_INVALID").code).toBe("CAPTCHA_INVALID");
     expect(classifyProtonError("invalid password").code).toBe("INVALID_CREDENTIALS");
     expect(classifyProtonError("Tempo limite excedido").code).toBe("TIMEOUT");
+    // O prefixo genérico do helper cobre falha de transporte/protocolo também;
+    // sem texto explícito de credencial, não pode acusar senha errada.
+    const wrappedProtocol = classifyProtonError("authentication failed: Proton session verification returned an invalid HTTP status (200)");
+    expect(wrappedProtocol.code).toBe("UNKNOWN");
+    expect(wrappedProtocol.retryable).toBe(true);
     const missing = classifyProtonError("spawn proton-confgen ENOENT");
     expect(missing.code).toBe("MISSING_EXECUTABLE");
     expect(missing.retryable).toBe(true);
@@ -140,10 +145,11 @@ describe("ProtonVPN Integration & Sidecar", () => {
     }
   });
 
-  it("executa proton-confgen e processa JSON retornado", async () => {
+  it("inicia proton-confgen sem duplicar flags globais", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "proton-test-"));
     try {
       const sessionFile = path.join(tmpDir, "dummy-session.json");
+      // Regra de regressão: uma flag repetida aborta o helper antes de autenticar.
       const res = await runConfgen({
         args: [
           "-username", "teste_golive",
@@ -154,6 +160,7 @@ describe("ProtonVPN Integration & Sidecar", () => {
         timeoutMs: 5000,
       });
 
+      expect(res.code).toBe(0);
       expect(res.json).toBeDefined();
       expect(res.json.valid).toBe(false);
       expect(typeof res.json.error).toBe("string");

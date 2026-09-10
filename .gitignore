@@ -8,3 +8,9 @@ api/api
 
 # config local do agente
 .commandcode/
+.codex/
+.superpowers/
+
+# artefatos locais de build/validação (o CI gera os helpers no zip do plugin)
+/tmp/
+goLiveBypass/bin/

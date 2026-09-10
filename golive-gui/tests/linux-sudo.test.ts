@@ -50,4 +50,17 @@ describe("elevacao sudo no Linux", () => {
     const health = main.slice(main.indexOf("async function checkLinuxTunnelHealth"), main.indexOf("function stopLinuxHealthWatchdog"));
     expect(health).toContain('runScript(["--probe", "--json", "--non-interactive"])');
   });
+
+  it("nao anuncia tunel encerrado quando a elevacao falha no teardown", () => {
+    const teardown = source.slice(
+      source.indexOf("teardown_wireguard_netns() {"),
+      source.indexOf("graphics_backend()"),
+    );
+    // Falha de elevacao nao pode ser mascarada: o operador precisa do aviso
+    // com o comando manual porque o tunel pode continuar ativo.
+    expect(teardown).toContain('warn "Nao consegui remover o namespace');
+    // Sucesso so e anunciado quando o namespace realmente saiu.
+    expect(teardown).toContain("if ! netns_exists; then");
+    expect(teardown).toContain('ok "Tunel WireGuard encerrado."');
+  });
 });

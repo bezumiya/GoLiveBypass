@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  hasValidManualRoutePing,
+  isManualRouteActionable,
   isManualRouteSelectable,
   recommendManualRoute,
   reduceManualRouteEvent,
@@ -135,9 +137,21 @@ describe('agregado de seleção manual de rotas Proton', () => {
   it('permite ping válido ainda sem preflight concluído', () => {
     const route = candidate('US#8', 188);
 
+    expect(hasValidManualRoutePing(route)).toBe(true);
     expect(isManualRouteSelectable(route)).toBe(true);
+    expect(hasValidManualRoutePing(candidate('US#8', undefined))).toBe(false);
+    expect(hasValidManualRoutePing(candidate('US#8', 999))).toBe(false);
+    expect(hasValidManualRoutePing(candidate('US#8', 188, 'failed'))).toBe(false);
     expect(isManualRouteSelectable(candidate('US#8', undefined))).toBe(false);
     expect(isManualRouteSelectable(candidate('US#8', 999))).toBe(false);
+  });
+  it('permite ação para rota catalogada sem ping e mantém recomendação medida', () => {
+    const cataloged = candidate('NL#2', undefined, 'not-tested');
+    expect(isManualRouteActionable(cataloged)).toBe(true);
+    expect(isManualRouteSelectable(cataloged)).toBe(false);
+    expect(isManualRouteActionable({ ...cataloged, pingStatus: 'failed' })).toBe(false);
+    expect(isManualRouteActionable({ ...cataloged, preflightStatus: 'failed' })).toBe(false);
+    expect(recommendManualRoute([cataloged])).toBeUndefined();
   });
 
   it('ordena ping válido crescente e deixa desconhecidos no fim', () => {

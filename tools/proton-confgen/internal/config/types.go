@@ -46,6 +46,9 @@ type Config struct {
 	// List servers mode
 	ListServers bool
 
+	// Route catalog mode lists public route metadata without generating profiles.
+	RouteCatalog bool
+
 	// Renew certificate by serial number
 	RenewSerial string
 

@@ -1,20 +1,28 @@
 # GoLiveBypass — plugin do Vencord/Equicord
 
 Este zip traz os arquivos fonte do plugin (`index.tsx`, `native.ts`, `stability.ts`,
-`vpn-*.ts` e `manifest.json`) e, nos releases oficiais, o helper x64
-`bin/win32-x64/proton-confgen.exe`. Ele não é um instalador: os arquivos entram dentro de um
-**checkout (código-fonte) do Equicord ou do Vencord**, que compila o plugin.
+`vpn-*.ts` e `manifest.json`) e os helpers x64 necessários para o transporte WireGuard:
+`bin/win32-x64/proton-confgen.exe` no Windows e `bin/linux-x64/proton-confgen` com
+`bin/linux-x64/netns-launcher` no Linux. Ele não é um instalador: os arquivos entram
+dentro de um **checkout (código-fonte) do Equicord ou do Vencord**, que compila o plugin.
 
-Por enquanto a VPN do plugin funciona somente em Windows x64. Ela é autônoma: não depende da
-GUI Electron, não compartilha o estado de rede do standalone e não altera o `app.asar` vanilla.
+A VPN do plugin funciona em Windows x64 e Linux x64. Ela é autônoma: não depende da GUI
+Electron, não compartilha o estado de rede do standalone e não altera o `app.asar` vanilla.
 O standalone continua sendo um caminho separado e não é modificado por esta migração.
 
 ## Linha v2 beta
 
 A versão atual do plugin é **2.0.0-beta.1**. Nesta linha, a VPN WireGuard/WireSock é
 iniciada e controlada pelo próprio plugin, com estado privado em
-`%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn`. O watchdog e as probes de rede são diagnósticos:
-eles registram evidências sem derrubar o Discord por uma leitura transitória.
+`%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn` no Windows ou
+`$XDG_DATA_HOME/GoLiveBypass/plugin-vpn` no Linux (por padrão `~/.local/share/GoLiveBypass/plugin-vpn`).
+O watchdog e as probes de rede são diagnósticos: eles registram evidências sem derrubar o
+Discord por uma leitura transitória.
+Em clientes Linux empacotados, o bundle pode não copiar arquivos arbitrários de
+`src/userplugins`. Por isso, o `vpn-proton.ts` contém os helpers Linux comprimidos e os
+materializa, após conferir SHA-256, dentro da pasta privada do plugin com modo 0700. Um
+checkout fonte continua preferindo os arquivos de `bin/`; nenhuma variável de ambiente é
+necessária para o build empacotado.
 
 O beta ainda não é um release estável. O updater ignora prereleases quando consulta o
 canal estável; para testar esta linha, instale o código-fonte do plugin e recompile o
@@ -65,7 +73,9 @@ ação do Toolbox do Vencord/Equicord.
 
 ## Instalação resumida
 
-1. Tenha o **Git**, **Node.js 22+** e **pnpm** instalados.
+1. Tenha o **Git**, **Node.js 22+** e **pnpm** instalados. No Linux, instale também
+   `iproute2`, `wireguard-tools` e `polkit`; o cliente precisa de uma sessão `systemd --user`
+   quando o relaunch sair da namespace.
 2. Baixe o código do Equicord (ou Vencord):
    `git clone https://github.com/Equicord/Equicord` (ou Vencord/Vencord)
 3. Copie **esta pasta** (`goLiveBypass`) para dentro de `src/userplugins/`
@@ -77,7 +87,14 @@ ação do Toolbox do Vencord/Equicord.
    (escolha o seu Discord quando perguntar).
 5. Reinicie o Discord por completo e ative **GoLiveBypass** nas
    configurações de plugins. Ao ativar, a VPN WireGuard sobe automaticamente; ao desativar,
-   o plugin para somente o WireSock que ele próprio iniciou e restaura a rede.
+   o plugin para somente o WireSock/namespace que ele próprio iniciou e restaura a rede.
+
+No Linux, ao clicar em **Ativar agora**, o plugin verifica as dependências sem alterar a
+rede e abre o diálogo nativo do polkit para autorização administrativa. Informe a senha
+do sistema nessa janela — nunca a senha da conta Proton. Se não houver agente gráfico
+polkit no desktop, o próprio `pkexec` será aberto em um terminal nativo disponível para
+fazer a mesma solicitação. Cancelar ou fechar o diálogo não cria namespace/interface nem
+encerra o Discord. O plugin não amplia o túnel para os demais aplicativos.
 
 No Windows, a beta também pode ser instalada pelo PowerShell do repositório:
 
@@ -91,10 +108,11 @@ baixa o helper Proton x64 da beta mais recente com validação SHA-256. O standa
 alterado por esse caminho.
 
 Para usar o modo Proton, informe o usuário e a senha na seção da VPN. O CAPTCHA, quando
-solicitado, abre em uma janela isolada e a sessão fica em `%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn`.
+solicitado, abre em uma janela isolada; a sessão fica na pasta privada indicada acima e
+é protegida pelo armazenamento seguro do Electron. Senhas e códigos não entram em logs.
 Para um perfil próprio, escolha **Arquivo WireGuard personalizado** e informe o caminho do
-`.conf`; o plugin copia o perfil para sua pasta privada, remove DNS do perfil e injeta
-`AllowedApps` somente para o executável do Discord e o `Update.exe` da instalação atual.
+`.conf`; o plugin copia o perfil para sua pasta privada, remove DNS do perfil e isola somente
+o executável do Discord e o `Update.exe` da instalação atual (ou o cliente dentro da namespace Linux).
 
 ## Tutorial completo
 

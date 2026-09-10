@@ -2627,9 +2627,18 @@ wait_for_tunnel_startup() {
 teardown_wireguard_netns() {
     if netns_exists; then
         step "Removendo namespace de rede '$NETNS_NAME' e interface WireGuard"
-        elevate ip netns del "$NETNS_NAME" 2>/dev/null || true
-        elevate rm -rf "/etc/netns/$NETNS_NAME" 2>/dev/null || true
-        ok "Tunel WireGuard encerrado."
+        if ! elevate ip netns del "$NETNS_NAME" 2>/dev/null; then
+            warn "Nao consegui remover o namespace '$NETNS_NAME' (sem privilegio?). O tunel pode continuar ativo; rode: sudo ip netns del $NETNS_NAME"
+        fi
+        if ! elevate rm -rf "/etc/netns/$NETNS_NAME" 2>/dev/null; then
+            warn "Nao consegui remover /etc/netns/$NETNS_NAME."
+        fi
+        # Apenas anuncia sucesso quando o namespace realmente saiu; o retorno
+        # continua 0 para nao abortar o uninstall (set -e) antes de restaurar
+        # as injecoes do Discord.
+        if ! netns_exists; then
+            ok "Tunel WireGuard encerrado."
+        fi
     fi
 }
 
