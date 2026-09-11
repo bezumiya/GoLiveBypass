@@ -129,7 +129,7 @@ describe("escolherAssetWindows (portable da release)", () => {
 describe("wiring do canal no updater e no workflow", () => {
   it("o updater liga allowPrerelease no Linux e usa escolherRelease no Windows", () => {
     const updater = fs.readFileSync(path.resolve(process.cwd(), "electron/updater.ts"), "utf8");
-    expect(updater).toContain('const REPO = "pdl-clay/GoLiveBypass"');
+    expect(updater).toContain('const REPO = "bezumiya/GoLiveBypass"');
     expect(updater).toContain('autoUpdater.allowPrerelease = canalAtual() === "beta"');
     expect(updater).toContain("autoUpdater.autoInstallOnAppQuit = false");
     expect(updater).toContain("escolherRelease(releases, app.getVersion(), canal)");
@@ -150,7 +150,7 @@ describe("wiring do canal no updater e no workflow", () => {
     expect(workflow).toContain("canal:");
     expect(workflow).toContain("--config.publish.channel=beta --config.publish.releaseType=prerelease");
     expect(workflow).toContain("beta-marcar");
-    expect(workflow).toContain("--repo pdl-clay/GoLiveBypass");
+    expect(workflow).toContain("--repo bezumiya/GoLiveBypass");
   });
 
   it("o updater nunca usa showMessageBoxSync (bloqueia o watchdog do Tor enquanto o dialogo espera resposta)", () => {

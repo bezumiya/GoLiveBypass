@@ -192,9 +192,9 @@ if [ -f "$manifest" ]; then
     else
         bad "version do zip = $actual_version (esperado $VERSION)"
     fi
-    # Origem esperada do updater: a do checkout testado (fork no canal dev,
-    # bezumiya em produção). O teste acompanha o patch de release, sem fixar id.
-    expected_repo=$(git -C "$REPO" config --get remote.origin.url | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')
+    # Origem esperada do updater: a declarada no manifest-fonte do checkout
+    # (fonte da verdade, acompanha patch dev/produção), não o remote git.
+    expected_repo=$(python3 -c "import json; print(json.load(open('$REPO/goLiveBypass/manifest.json'))['updater']['id'])")
     if grep -q "$expected_repo" "$manifest"; then
         ok "updater.id = $expected_repo"
     else

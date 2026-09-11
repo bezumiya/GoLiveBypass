@@ -30,7 +30,7 @@ vi.mock("https", () => ({ request: (url: unknown, options: unknown, callback?: (
 
 const tag = "v2.0.6-beta-6";
 const name = "GoLiveBypass-2.0.6-beta-6.exe";
-const url = `https://github.com/pdl-clay/GoLiveBypass/releases/download/${tag}/${name}`;
+const url = `https://github.com/bezumiya/GoLiveBypass/releases/download/${tag}/${name}`;
 function pe(subsystem = 2, size = 512): Buffer {
   const b = Buffer.alloc(size);
   b.writeUInt16LE(0x5a4d, 0); b.writeUInt32LE(64, 0x3c);
@@ -72,7 +72,7 @@ afterEach(() => {
 it("vincula nome, repositorio, tag, URL, tamanho e digest antes do download", async () => {
   expect(validWindowsIdentity(tag, identity())).toBe(true);
   for (const extra of [{ assetName: "helper.exe" }, { size: 0 }, { size: 1.5 }, { digest: "sha256:abc" },
-    { url: url.replace("pdl-clay", "outro") }, { url: url.replace(tag, "v2.0.6") }, { url: `${url}?x=1` }]) {
+    { url: url.replace("bezumiya", "outro") }, { url: url.replace(tag, "v2.0.6") }, { url: `${url}?x=1` }]) {
     expect(validWindowsIdentity(tag, { ...identity(), ...extra })).toBe(false);
   }
   state.assets = [{ name, browser_download_url: url, digest: identity().digest }];

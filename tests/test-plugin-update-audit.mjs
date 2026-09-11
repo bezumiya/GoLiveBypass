@@ -193,14 +193,11 @@ test("fonte instalada inválida vira versão desconhecida, sem fallback beta", (
     assert.doesNotMatch(currentBlock, /return PLUGIN_VERSION/);
 });
 
-test("os módulos de canal e origem apontam para a origem declarada no checkout", () => {
-    // Canal dev: origin aponta ao fork (pdl-clay). Após o revert do patch dev,
-    // volta a exigir bezumiya/GoLiveBypass — acompanha o patch de release.
-    const expectedRepo = "pdl-clay/GoLiveBypass";
+test("os módulos de canal e origem continuam ligados ao repositório oficial", () => {
     assert.match(channelSource, /export function choosePluginRelease/);
     assert.match(channelSource, /channel === "stable" && isPrerelease/);
     assert.match(channelSource, /compareParsedPluginVersions\(version, currentVersion\) <= 0/);
-    assert.match(securitySource, new RegExp(`const OFFICIAL_UPDATE_REPOSITORY = "${expectedRepo.replace("/", "\\/")}"`));
+    assert.match(securitySource, /const OFFICIAL_UPDATE_REPOSITORY = "bezumiya\/GoLiveBypass"/);
     assert.match(securitySource, /metadata\.id === OFFICIAL_UPDATE_REPOSITORY/);
     assert.match(nativeSource, /releaseAssetUrl\(/);
     assert.match(nativeSource, /isCompatiblePluginManifest\(manifest, PLUGIN_ASSET\)/);

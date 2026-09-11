@@ -20,7 +20,7 @@ function updateBlock(): string {
 
 describe("updater nativo do plugin", () => {
   it("consulta a coleção de releases e seleciona pelo canal", () => {
-    expect(native).toContain("/repos/pdl-clay/GoLiveBypass/releases?per_page=20");
+    expect(native).toContain("/repos/bezumiya/GoLiveBypass/releases?per_page=20");
     expect(native).not.toContain("/repos/pdl-clay/GoLiveBypass/releases/latest");
     expect(native).toContain("choosePluginRelease(candidates, currentVersion, channel)");
     expect(native).toContain("if (release.draft === true");

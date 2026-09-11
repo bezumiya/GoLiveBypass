@@ -12,7 +12,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 - Ciclo de teste do auto-update do userplugin: a origem de update do plugin (`manifest.updater.id`, URL da API de releases e allowlist de caminhos em `update-security.ts`) aponta temporariamente para o fork `pdl-clay/GoLiveBypass`, para exercitar o ciclo beta-8 → beta-9 fora da produção.
 - Nenhuma mudança funcional no plugin além da origem de update; a beta-9 carrega o mesmo código da beta-8 (correção do login Proton sem armazenamento seguro, onboarding que ativa a VPN e reinicia o Discord, inspeção do WireSock em consulta única).
-- Esta origem dev será revertida em commit separado antes da próxima beta de produção.
+- Resultado do ciclo (host, sem VM): release publicada no fork com todos os jobs verdes, zip + SHA-256 conferidos, seleção do updater contra a API real oferece `2.0.6-beta-9` para o instalado `2.0.6-beta-7` no canal beta opt-in, `tests/test-userplugin-e2e.sh` 53/53 e suíte de update da GUI verde. Reload visual pendente da UI do cliente.
+- Origem dev **revertida** em commit separado no mesmo dia; o updater volta a apontar a produção (`bezumiya/GoLiveBypass`) na próxima release. A tag `v2.0.6-beta-9` do fork permanece publicada e imutável para retestes.
 
 ### Atualizações do plugin Vencord/Equicord
 
