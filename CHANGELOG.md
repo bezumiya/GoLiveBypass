@@ -6,6 +6,23 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Plugin Windows: Discord travava aberto e a interface não voltava
+
+- Relato: depois de injetar e ativar, fechar o Discord não o encerrava (só pelo gerenciador de tarefas) e a interface não voltava mais. Reproduzido na VM: 8 processos vivos por 90s com `comJanela=0`, ou seja, processos sem nenhuma janela — o "não fecha e não abre" do relato.
+- **O quit era cancelado e depois abandonado.** O `before-quit` do plugin chama `event.preventDefault()` para restaurar a rede, mas quando a restauração não confirmava ele fazia `quitting = false` e desistia: as janelas já tinham sido destruídas, então o app ficava vivo sem interface, não fechava e ainda segurava o lugar da instância. Agora a saída acontece de qualquer forma (`shutdown(false)` → log → `finally app.exit(0)`), espelhando o `before-quit` da GUI. O que não confirmou fica no log e o boot seguinte adota `owner.lock` + WireSock.
+- **O lock da VPN era dado como perdido quando outra instância o assumia.** Cadeia exata, do log do plugin na VM:
+  ```
+  18:24:07 [info]  abrindo plugin VPN              <- a instância nova do relaunch sobe
+  18:24:08 [info]  probe ... stage=adoption        <- ela adota o WireSock e grava o próprio pid
+  18:24:14 [info]  WireSock próprio, lock e processo verificados como parados
+  18:24:14 [error] fechamento aguardou porque a restauração da VPN não foi confirmada
+                   erro=A rede foi restaurada, mas o lock da VPN ficou pendente
+  18:24:19 [error] Outra instância do GoLiveBypass já controla a VPN   <- a VPN nunca mais ativava
+  ```
+  O processo que saía tentava liberar um lock que a instância nova já tinha assumido; `releaseOwnership` devolvia falso, o estado virava `recovery_required` e a VPN ficava inutilizável até limpeza manual. Agora `ownershipTakenOver` distingue "não consegui liberar" (falha real, segue reportando) de "o lock passou para outra instância" (nada a liberar — quem manda no túnel agora é ela). Vale nos três caminhos de parada: rede ativa, rede já inativa e o caminho Linux.
+- `tests/test-plugin-lifecycle.mjs` ganhou as duas regressões. Contra o código anterior a suíte falha (4 passam, 2 falham); com as correções, 6/6. A asserção de `shutdown` que exigia o literal `shutdown(false)` estava obsoleta desde que o argumento virou `process.platform === "linux"` — falhava sem que o comportamento tivesse mudado.
+- Limite: o X do Discord com `minimizeToTray` apenas esconde a janela e o `before-quit` não roda nesse caso (comportamento do próprio Discord, não do plugin). Para o caminho de quit ser exercido, o teste desliga a bandeja. E o log registra `Discord HTTPS inacessivel pela rota` de forma repetida no watchdog — é diagnóstico log-only, fora do escopo desta correção.
+
 ### Seletor de alvo do instalador Linux não oferecia escolha
 
 - Relato: quem tem Equibop, Vesktop e Legcord não recebia a opção de escolher em qual instalar o plugin. Eram quatro defeitos somados, e o primeiro sozinho já bastava:

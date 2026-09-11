@@ -1131,9 +1131,15 @@ export class PluginVpnController {
         if (!inspection.active && !needsInactiveCleanup) {
             await this.removeProbe({ staleOwner: owner, sweep: true });
             if (owner && !await this.releaseOwnership(owner)) {
-                this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
-                return { success: false, state: this.state, error: "A rede está inativa, mas o lock da VPN ficou pendente." };
+                // Mesmo caso do caminho com a rede ativa: o lock pode ter passado para a
+                // instancia nova do relaunch, e isso nao e falha nossa.
+                if (this.ownershipTakenOver(owner)) {
+                    this.options.log("info", "lock da VPN assumido por outra instância; nada a liberar");
+                } else {
+                    this.state = "recovery_required";
+                    this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
+                    return { success: false, state: this.state, error: "A rede está inativa, mas o lock da VPN ficou pendente." };
+                }
             }
             this.state = "inactive";
             this.discordPid = null;
@@ -1153,9 +1159,18 @@ export class PluginVpnController {
         }
         await this.removeProbe({ sweep: true });
         if (owner && !await this.releaseOwnership(owner)) {
-            this.state = "recovery_required";
-            this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
-            return { success: false, state: this.state, error: "A rede foi restaurada, mas o lock da VPN ficou pendente." };
+            // "Nao consegui liberar o lock" e "o lock passou para outra instancia" sao coisas
+            // diferentes: no relaunch o processo novo sobe e adota o lock enquanto este ainda
+            // esta saindo. Tratar isso como falha marcava recovery_required e abortava o
+            // fechamento -- a origem do processo zumbi sem interface. Apagar o lock da outra
+            // instancia seria pior: quem manda no tunel agora e ela.
+            if (this.ownershipTakenOver(owner)) {
+                this.options.log("info", "lock da VPN assumido por outra instância; nada a liberar");
+            } else {
+                this.state = "recovery_required";
+                this.setDiagnostic("ownership", false, "não foi possível liberar o lock durante a restauração");
+                return { success: false, state: this.state, error: "A rede foi restaurada, mas o lock da VPN ficou pendente." };
+            }
         }
         this.discordPid = null;
         this.state = "inactive";
@@ -1220,9 +1235,15 @@ export class PluginVpnController {
                 return { success: false, state: this.state, error: cleanup.error || "Não foi possível restaurar a rede Linux." };
             }
             if (owner && !await this.releaseOwnership(owner)) {
-                this.state = "recovery_required";
-                this.setDiagnostic("ownership", false, "não foi possível liberar o owner Linux durante a restauração");
-                return { success: false, state: this.state, error: "A rede foi restaurada, mas o owner Linux ficou pendente." };
+                // O relaunch Linux tambem deixa a instancia nova assumir o owner enquanto esta
+                // sai (o bridge pede o relaunch externo e grava o owner antes do exit).
+                if (this.ownershipTakenOver(owner)) {
+                    this.options.log("info", "owner Linux assumido por outra instância; nada a liberar");
+                } else {
+                    this.state = "recovery_required";
+                    this.setDiagnostic("ownership", false, "não foi possível liberar o owner Linux durante a restauração");
+                    return { success: false, state: this.state, error: "A rede foi restaurada, mas o owner Linux ficou pendente." };
+                }
             }
         }
         this.discordPid = null;
@@ -1869,6 +1890,15 @@ export class PluginVpnController {
             this.options.log("warn", "não consegui remover lock da VPN", { erro: errorMessage(error) });
             return false;
         }
+    }
+
+    // Verdadeiro quando o lock deixou de ser nosso porque OUTRA instancia o assumiu. Acontece
+    // de verdade no relaunch: o processo novo sobe, adota o WireSock e grava o proprio pid
+    // enquanto o antigo ainda esta no before-quit. Nao ha o que liberar -- quem manda no tunel
+    // agora e a outra instancia, e apagar o lock dela seria pior.
+    private ownershipTakenOver(owner: VpnOwnerRecord): boolean {
+        const current = this.readOwner();
+        return current !== null && !sameOwnership(current, owner);
     }
 
     private writeProfileAtomically(raw: string): void {

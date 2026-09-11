@@ -19,7 +19,12 @@ test("start e stop toleram bridge nativa ausente", () => {
 test("desativar o plugin não solicita relaunch automático", () => {
     const shutdown = nativeSource.slice(nativeSource.indexOf("export function shutdown"), nativeSource.indexOf("export function restoreNetwork"));
     const restart = nativeSource.slice(nativeSource.indexOf("export function restartDiscord"), nativeSource.indexOf("export function getVpnStatus"));
-    assert.match(shutdown, /controller\.shutdown\(false\)/);
+    // Desativar o userplugin não reinicia o Discord no Windows (para não interromper chamadas
+    // em andamento); só o Linux pede o relaunch externo, porque um processo dentro do netns
+    // não consegue voltar à rede host sozinho. A asserção antiga exigia o literal
+    // `shutdown(false)` e ficou obsoleta quando o argumento virou a condição de plataforma --
+    // ela falhava sem que o comportamento tivesse mudado.
+    assert.match(shutdown, /controller\.shutdown\(process\.platform === "linux"\)/);
     assert.match(shutdown, /controller\.cancelProtonLogin\(\)/);
     assert.doesNotMatch(shutdown, /controller\.shutdown\(true\)/);
     assert.match(restart, /controller\.restartDiscord\(\)/);
@@ -54,4 +59,58 @@ test("start e stop invalidam callbacks assíncronos de uma geração anterior", 
     assert.match(stopBlock, /lastSuppressedUpdateErrorKey = null/);
 });
 
-console.log("plugin lifecycle source tests: 4/4");
+test("o fechamento do Discord sempre conclui, mesmo sem confirmar a restauração", () => {
+    // Relato real: com a VPN ativa, fechar o Discord cancelava o quit (event.preventDefault)
+    // e, quando a restauração não confirmava, o quit era ABANDONADO -- `quitting = false` e
+    // nada re-tentava. Como as janelas já tinham sido destruídas, o app ficava vivo sem
+    // interface: não fechava (só pelo gerenciador de tarefas) e não reabria, porque o processo
+    // antigo continuava segurando o lugar. O log do plugin registrava
+    // "fechamento aguardou porque a restauração da VPN não foi confirmada".
+    //
+    // A referência é o before-quit da GUI: restore.catch(log).finally(app.quit). O quit
+    // completa sempre; o que sobrar é adotado no boot seguinte.
+    const beforeQuit = nativeSource.slice(
+        nativeSource.indexOf('app.on("before-quit"'),
+        nativeSource.indexOf('app.whenReady()'),
+    );
+    assert.ok(beforeQuit.length > 0, "before-quit não encontrado");
+
+    // A restauração continua sendo tentada antes da saída.
+    assert.match(beforeQuit, /controller\.shutdown\(false\)/);
+    assert.match(beforeQuit, /event\.preventDefault\(\)/);
+
+    // Nenhuma saída de emergência pode reverter o quit: era isso que deixava o processo vivo.
+    assert.doesNotMatch(beforeQuit, /quitting = false/);
+
+    // E a saída precisa acontecer nos dois caminhos (sucesso e falha).
+    assert.match(beforeQuit, /\.finally\(\(\) => \{\s*app\.exit\(0\);\s*\}\)/);
+});
+
+test("lock assumido por outra instância não vira falha de restauração", () => {
+    // Cadeia real do relato (log do plugin na VM):
+    //   18:24:07 abrindo plugin VPN            -> a instância nova do relaunch sobe
+    //   18:24:08 probe ... stage=adoption      -> ela adota o WireSock e grava o próprio pid
+    //   18:24:14 WireSock ... verificados como parados
+    //   18:24:14 erro=A rede foi restaurada, mas o lock da VPN ficou pendente
+    //   18:24:19 Outra instância do GoLiveBypass já controla a VPN (a VPN nunca mais ativou)
+    //
+    // A instância que sai tentava liberar um lock que a nova já tinha assumido. Tratar isso
+    // como falha marcava recovery_required e (com o quit abandonado no before-quit) deixava o
+    // processo vivo sem interface -- só matável pelo gerenciador de tarefas.
+    const controllerSource = readFileSync(new URL("../goLiveBypass/vpn-controller.ts", import.meta.url), "utf8");
+
+    assert.match(controllerSource, /private ownershipTakenOver\(owner: VpnOwnerRecord\): boolean/);
+    assert.match(controllerSource, /const current = this\.readOwner\(\);\s*return current !== null && !sameOwnership\(current, owner\);/);
+
+    // Cada caminho de parada precisa distinguir "não consegui liberar" de "passou para outra":
+    // rede ativa, rede já inativa e o caminho Linux.
+    const guards = controllerSource.match(/if \(this\.ownershipTakenOver\(owner\)\) \{/g) ?? [];
+    assert.equal(guards.length, 3, `guarda de handover esperada nos três caminhos de parada, achei ${guards.length}`);
+
+    // E o caso legítimo (lock inválido que não é de ninguém) continua falhando.
+    assert.match(controllerSource, /A rede foi restaurada, mas o lock da VPN ficou pendente\./);
+    assert.match(controllerSource, /A rede está inativa, mas o lock da VPN ficou pendente\./);
+    assert.match(controllerSource, /A rede foi restaurada, mas o owner Linux ficou pendente\./);
+});
+
+console.log("plugin lifecycle source tests: 6/6");

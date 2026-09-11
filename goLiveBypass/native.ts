@@ -2199,17 +2199,28 @@ app.on("before-quit", event => {
     if (!controller.hasCleanupWork()) return;
     event.preventDefault();
     quitting = true;
-    void controller.shutdown(false).then(result => {
-        if (result.success) {
+    // A limpeza precisa terminar antes de o processo morrer, mas o fechamento NAO pode ficar
+    // pendurado. `event.preventDefault()` cancela o quit com as janelas ja destruidas: se a
+    // restauracao nao confirmar, o app vira um processo SEM interface -- nao fecha (so pelo
+    // gerenciador de tarefas) e nao reabre, porque o processo antigo continua segurando o
+    // lugar. Relato real no Windows, com o log do plugin registrando
+    // "fechamento aguardou porque a restauracao da VPN nao foi confirmada".
+    //
+    // Por isso a saida acontece de qualquer forma, como no before-quit da GUI
+    // (restore.catch(log).finally(app.quit)): o que falhou fica no log e o boot seguinte
+    // adota owner.lock + WireSock para concluir a restauracao. Continuar vivo nao restaura
+    // nada -- so esconde o erro e deixa o usuario sem conseguir fechar nem reabrir.
+    void controller.shutdown(false)
+        .then(result => {
+            if (!result.success)
+                log("error", "fechamento seguiu sem confirmar a restauração da VPN", { estado: result.state, erro: result.error });
+        })
+        .catch(error => {
+            log("error", "falha ao restaurar a rede antes do fechamento", { erro: safeDiagnosticDetail(error, 500) });
+        })
+        .finally(() => {
             app.exit(0);
-            return;
-        }
-        quitting = false;
-        log("error", "fechamento aguardou porque a restauração da VPN não foi confirmada", { estado: result.state, erro: result.error });
-    }).catch(error => {
-        quitting = false;
-        log("error", "falha ao restaurar a rede antes do fechamento", { erro: safeDiagnosticDetail(error, 500) });
-    });
+        });
 });
 
 app.whenReady().then(async () => {
