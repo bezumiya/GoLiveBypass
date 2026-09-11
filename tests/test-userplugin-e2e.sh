@@ -192,10 +192,13 @@ if [ -f "$manifest" ]; then
     else
         bad "version do zip = $actual_version (esperado $VERSION)"
     fi
-    if grep -q "bezumiya/GoLiveBypass" "$manifest"; then
-        ok "updater.id = bezumiya/GoLiveBypass"
+    # Origem esperada do updater: a do checkout testado (fork no canal dev,
+    # bezumiya em produção). O teste acompanha o patch de release, sem fixar id.
+    expected_repo=$(git -C "$REPO" config --get remote.origin.url | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')
+    if grep -q "$expected_repo" "$manifest"; then
+        ok "updater.id = $expected_repo"
     else
-        bad "updater.id NAO e bezumiya/GoLiveBypass"
+        bad "updater.id NAO e $expected_repo"
     fi
     if grep -q "vencord.zip" "$manifest"; then
         ok "updater.assetName termina com vencord.zip"
