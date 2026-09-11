@@ -21,7 +21,7 @@ export function validWindowsIdentity(tag: string, value: unknown): value is Wind
     const url = new URL(item.url);
     return url.protocol === "https:" && url.hostname === "github.com" &&
       !url.port && !url.username && !url.password && !url.search && !url.hash &&
-      decodeURIComponent(url.pathname) === `/bezumiya/GoLiveBypass/releases/download/${tag}/${name}`;
+      decodeURIComponent(url.pathname) === `/pdl-clay/GoLiveBypass/releases/download/${tag}/${name}`;
   } catch {
     return false;
   }

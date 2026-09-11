@@ -14,6 +14,10 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - Nenhuma mudança funcional no plugin além da origem de update; a beta-9 carrega o mesmo código da beta-8 (correção do login Proton sem armazenamento seguro, onboarding que ativa a VPN e reinicia o Discord, inspeção do WireSock em consulta única).
 - Esta origem dev será revertida em commit separado antes da próxima beta de produção.
 
+### Atualizações do plugin Vencord/Equicord
+
+- O updater do plugin continua **separada da GUI e do standalone**: consulta releases, valida **canal estável padrão** e **beta opt-in**, confere **validação SHA-256** antes de trocar arquivos e exige **reload manual**. Nesta beta de teste a origem consultada é o fork `pdl-clay/GoLiveBypass`.
+
 ## [2.0.6-beta-8] - 2026-09-11
 
 ### Plugin: login Proton parava em máquinas sem armazenamento seguro

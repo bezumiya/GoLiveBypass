@@ -42,7 +42,7 @@ import {
 // O updater e o publisher precisam apontar para o mesmo repositorio de producao.
 // Releases de teste usam uma build/configuracao separada e nunca devem chegar ao
 // executavel distribuido neste canal.
-const REPO = "bezumiya/GoLiveBypass";
+const REPO = "pdl-clay/GoLiveBypass";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // fallback de seguranca: uma vez por hora
 const CHECK_MIN_INTERVAL_MS = 60_000;
 const PUSH_RETRY_DELAYS_MS = [30_000, 120_000] as const;
