@@ -641,11 +641,23 @@ export async function stopOwnedWireSock(configPath: string, log: WireSockLogger)
         log("warn", "flushdns falhou", { erro: logError(error) });
     }
     const residual = inspectWireSock(configPath);
-    const stopped = residual.reliable && !residual.active && networkLockReset;
-    if (stopped) log("info", "WireSock próprio, lock e processo verificados como parados");
-    else if (!residual.reliable) log("error", "limpeza não confirmou o estado final do WireSock", { motivo: residual.reason || UNKNOWN_WIRESOCK_STATE });
-    else if (residual.active) log("error", "limpeza deixou resíduo WireSock próprio", { services: residual.services, pids: residual.processIds });
-    else log("error", "processo WireSock parou, mas o network-lock não foi confirmado como restaurado");
+    // O veredito e' o mesmo da GUI (electron/wiresock.ts: `!isWireSockActive() && residual.length === 0`)
+    // e o mesmo que o README promete: o tunel acabou quando servico E processos proprios
+    // sumiram, com leitura confiavel. `active` cobre exatamente esses dois (services/processIds);
+    // o network-lock nao entra.
+    //
+    // O reset do network-lock continua sendo TENTADO logo acima e reportado no resultado, mas
+    // nao decide mais nada: ele exige elevacao (UAC) e a config do plugin instala o servico com
+    // "-network-lock disabled" (vpn-windows.ts:469/477, confirmado por
+    // tests/test-distribution-parity.cjs), entao a nossa sessao nunca engata esse lock. Exigi-lo
+    // fazia a limpeza falhar em maquina onde o UAC nao era aceito no momento da saida -- com o
+    // tunel ja derrubado e a rede restaurada --, o que virava recovery_required, mantinha o
+    // lock do plugin e (antes da correcao do before-quit) deixava o Discord preso sem janela.
+    const stopped = residual.reliable && !residual.active;
+    if (!stopped && !residual.reliable) log("error", "limpeza não confirmou o estado final do WireSock", { motivo: residual.reason || UNKNOWN_WIRESOCK_STATE });
+    else if (!stopped) log("error", "limpeza deixou resíduo WireSock próprio", { services: residual.services, pids: residual.processIds });
+    else if (networkLockReset) log("info", "WireSock próprio, lock e processo verificados como parados");
+    else log("warn", "WireSock próprio parado (serviço e processos); o reset do network-lock não foi confirmado -- exige elevação e o plugin não habilita esse lock", { networkLockReset });
     return {
         stopped,
         servicesResidual: residual.services,
@@ -653,12 +665,12 @@ export async function stopOwnedWireSock(configPath: string, log: WireSockLogger)
         networkLockReset,
         dnsCleared,
         dnsFlushed,
+        // So ha erro quando o veredito falhou. O reset do network-lock nao entra aqui: virou
+        // aviso, porque nao diz nada sobre o tunel ter parado.
         ...(stopped ? {} : {
             error: !residual.reliable
                 ? residual.reason || UNKNOWN_WIRESOCK_STATE
-                : residual.active
-                    ? "O WireSock próprio ainda permanece ativo."
-                    : "Não foi possível confirmar a restauração do network-lock do WireSock."
+                : "O WireSock próprio ainda permanece ativo.",
         }),
     };
 }

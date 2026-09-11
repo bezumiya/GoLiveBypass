@@ -6,6 +6,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Limpeza do WireSock no plugin não depende mais do reset do network-lock
+
+- **A limpeza exigia o reset do network-lock para se declarar concluída.** `stopped` era `residual.reliable && !residual.active && networkLockReset`, mas o reset exige elevação (UAC) — verificado na VM sem elevação: `reset-network-lock` sai com código 1 e `Failed to reset network lock. Error code: 0x0000001f / Make sure you are running with administrator privileges`. Numa saída em que o UAC não fosse aceito, a limpeza seria dada como falha **com o túnel já derrubado e a rede restaurada**, virando `recovery_required` e mantendo o lock do plugin. O veredito agora é `residual.reliable && !residual.active` — o mesmo da GUI (`!isWireSockActive() && residual.length === 0`) e o que o README promete. `active` cobre serviço e processos próprios, então nada foi enfraquecido: a config instala o serviço com `-network-lock disabled` (o próprio `test-distribution-parity.cjs` garante isso), logo a sessão do plugin nunca engata esse lock. O reset continua sendo tentado e reportado; quando falha agora é `warn`, não erro.
+- `tests/test-plugin-windows-inspection.mjs` ganhou a regressão do veredito. O teste que já mirava essa linha usava regex solta (`const stopped = residual.reliable && !residual.active`) e **passava com o bug** — foi endurecido; contra o código anterior a suíte falha (3 passam, 2 falham) e com a correção fica 5/5.
+
 ### Plugin Windows: Discord travava aberto e a interface não voltava
 
 - Relato: depois de injetar e ativar, fechar o Discord não o encerrava (só pelo gerenciador de tarefas) e a interface não voltava mais. Reproduzido na VM: 8 processos vivos por 90s com `comJanela=0`, ou seja, processos sem nenhuma janela — o "não fecha e não abre" do relato.

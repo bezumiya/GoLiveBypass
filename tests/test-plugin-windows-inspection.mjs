@@ -33,7 +33,30 @@ test("inspeção própria só é confirmada quando todos os processos conhecidos
 
 test("limpeza não assume ausência quando a inspeção é desconhecida", () => {
     assert.match(source, /const initial = inspectWireSock\(configPath\);[\s\S]*?if \(!initial\.reliable\) \{[\s\S]*?stopped: false/);
-    assert.match(source, /const residual = inspectWireSock\(configPath\);[\s\S]*?const stopped = residual\.reliable && !residual\.active/);
+    assert.match(source, /const residual = inspectWireSock\(configPath\);[\s\S]*?const stopped = residual\.reliable && !residual\.active;/);
 });
 
-console.log("plugin Windows inspection source tests: 4/4");
+test("o veredito da limpeza não exige o reset do network-lock", () => {
+    // O reset exige elevação (UAC) e a config do plugin instala o serviço com
+    // "-network-lock disabled" — a sessão própria nunca engata esse lock. Exigi-lo fazia a
+    // limpeza falhar com o túnel já derrubado e a rede restaurada, o que virava
+    // recovery_required, mantinha o lock do plugin e deixava o Discord preso sem janela.
+    //
+    // A referência é a GUI: `const stopped = !isWireSockActive() && residual.length === 0`
+    // (electron/wiresock.ts), com resetNetworkLock apenas REPORTADO no resultado.
+    const veredito = source.match(/const stopped = ([^;]+);/);
+    assert.ok(veredito, "linha do veredito não encontrada");
+    assert.match(veredito[1], /residual\.reliable/);
+    assert.match(veredito[1], /!residual\.active/);
+    assert.doesNotMatch(veredito[1], /networkLockReset/);
+
+    // O reset continua sendo tentado e reportado; a falha vira aviso, não erro.
+    assert.match(source, /resetNetworkLock\(executable, log\)/);
+    assert.match(source, /^\s+networkLockReset,$/m);
+    assert.match(source, /o reset do network-lock não foi confirmado/);
+
+    // E o erro do resultado só fala do que sobrou de verdade.
+    assert.doesNotMatch(source, /Não foi possível confirmar a restauração do network-lock do WireSock\./);
+});
+
+console.log("plugin Windows inspection source tests: 5/5");
