@@ -1359,7 +1359,12 @@ function Invoke-Install($root) {
         if (-not $inj -or -not $inj.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $oficialPendente = $true }
     }
 
-    if ($oficialPendente -or $paralelos.Count -gt 0) {
+    # Nos injetamos = havia alvo pendente entre os escolhidos. Esta gravacao e o que o modo
+    # temporario le no fim da funcao: sem ela $weInjected fica nulo, o instalador cai sempre
+    # no aviso de "ja estava injetado" e a injecao sobrevive ao fechamento do Discord — o
+    # modo temporario virava permanente. (perdida no commit da multi-selecao de alvos)
+    $weInjected = $oficialPendente -or $paralelos.Count -gt 0
+    if ($weInjected) {
         Invoke-Injection $root $targets
     } else {
         Write-Step 'O Discord ja carrega deste checkout, so reiniciando'

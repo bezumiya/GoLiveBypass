@@ -2234,8 +2234,12 @@ do_install() {
     local root="${1:-}"
     root="$(select_target "$root")"
 
-    local permanent=0
-    select_persistence || permanent=1
+    # select_persistence responde 0 para permanente e 1 para temporario. Guardamos na forma
+    # positiva: a variavel invertida ("permanent=1 quando temporario") funciona por dupla
+    # negacao, mas e exatamente a armadilha que deixou o temporario preso no instalador
+    # PowerShell, onde a leitura do estado se perdeu e ninguem notou.
+    local permanente=0
+    if select_persistence; then permanente=1; fi
 
     ensure_toolchain 0
     install_plugin_source "$root"
@@ -2278,7 +2282,10 @@ do_install() {
         esac
     fi
 
-    [ "$permanent" -eq 1 ] && wait_discord_exit "$root"
+    # Modo temporario: desfaz quando o Discord fechar, como o proprio menu promete.
+    if [ "$permanente" -eq 0 ]; then
+        wait_discord_exit "$root"
+    fi
     return 0
 }
 

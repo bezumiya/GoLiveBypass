@@ -6,6 +6,12 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Modo temporário do instalador Windows voltava a ser permanente
+
+- Escolhendo **Temporário** no instalador PowerShell, a injeção não era desfeita ao fechar o Discord: o instalador avisava "O Discord ja estava injetado antes de eu rodar, entao nao vou desfazer isso" e o mod continuava ativo. `$weInjected` era lido no fim de `Invoke-Install` e **nunca atribuído** — a atribuição (`$weInjected = -not (Test-InjectedFromCheckout $root)`) sumiu quando o bloco de multi-seleção de alvos entrou no lugar dela. Nulo é falso em PowerShell, então o ramo do aviso era sempre o escolhido e `Wait-DiscordExit` nunca rodava. A gravação foi restaurada com a semântica atual (`$oficialPendente -or $paralelos.Count -gt 0`): só quem injetou é que espera para desfazer. Uma varredura do arquivo confirma que era a única variável lida e nunca atribuída.
+- No instalador Linux a variável equivalente estava **invertida** (`permanent=1` quando a escolha era temporária). O comportamento sempre esteve certo por dupla negação, mas era a mesma armadilha do defeito acima; a leitura agora é positiva (`permanente`) e o caso temporário continua chamando `wait_discord_exit`.
+- `tests/test-installer-persistence.sh` cobre o caminho: exercita `do_install` de verdade com os efeitos colaterais em stubs (temporário desfaz, permanente não) e confere no `.ps1` que `$weInjected` é gravado antes de lido — o CI Linux não tem `pwsh`. Contra o código anterior o teste falha nos dois pontos do Windows; contra o corrigido, passa.
+
 ### Seletor de saída removido do instalador do plugin
 
 - Os dois instaladores (`installer/golivebypass-installer.sh` e `installer/GoLiveBypass-Installer.ps1`) param de perguntar "como o bypass vai sair para fora do Brasil". A saída agora é a conta Proton, configurada dentro do plugin na primeira ativação: nenhum arquivo de `goLiveBypass/` lê a chave `proxy` do `settings.json`, e a pergunta só existia para o transporte SOCKS/PAC legado.
