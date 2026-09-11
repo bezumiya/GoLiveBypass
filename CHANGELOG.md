@@ -17,6 +17,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - Instalador do plugin: o download da beta passa a preferir `proton-confgen-manifest.json` para obter o nome canônico e o hash do helper, mantendo o padrão de nome e o `.sha256` como fallback; o cabeçalho `Accept` de API não é mais enviado no download direto do asset.
 - Release: o job `release-assets` compilava o helper sem `-buildid=`, divergindo do `build-proton.mjs` que gera o manifesto. Na `v2.0.6-beta-7` isso produziu dois binários diferentes para a mesma versão: o helper dentro de `goLiveBypass-vencord.zip` (`ced12d2d…`) e o asset declarado no manifesto (`84c88bbb…`). As flags foram alinhadas; a paridade byte a byte do próximo release ainda precisa ser conferida no artefato publicado.
 
+Investigação, evidência e limites por issue: [triagem das issues de produção](docs/testing/2026-09-10-production-issue-triage.md).
+
 ### Ciclo de desativação no Linux não deixava resíduo silencioso
 
 - O `teardown_wireguard_netns` do standalone mascarava falha de elevação com `|| true` e anunciava "Tunel WireGuard encerrado" mesmo quando o `ip netns del` não tinha privilégio para executar; o namespace `discord-vpn` (com o túnel WireGuard vivo e tráfego real do Discord) sobrevivia ao `--uninstall` sem nenhum aviso. Agora o script avisa explicitamente quando não consegue remover o namespace e só declara sucesso quando ele realmente saiu; o retorno continua neutro para não abortar a restauração das injeções do Discord.
