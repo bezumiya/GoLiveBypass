@@ -157,6 +157,29 @@ test("instalador Windows libera explicitamente a linha beta", () => {
     assert.doesNotMatch(banner, /Nenhuma instalacao foi realizada/);
 });
 
+test("instalador Linux libera explicitamente a linha beta", () => {
+    const banner = linuxInstaller.slice(0, linuxInstaller.indexOf("\nset -eu"));
+    assert.match(banner, /\[BETA\]/);
+    assert.match(banner, /canal beta WireGuard/);
+    assert.match(banner, /nao e estavel/);
+    assert.match(banner, /GoLiveBypass\/issues/);
+    // O aviso e convite a reportar bug, nao bloqueio: sem saida antecipada.
+    assert.doesNotMatch(banner, /^\s*exit\b/m);
+    assert.doesNotMatch(banner, /temporariamente fora do ar/);
+    assert.doesNotMatch(banner, /Nenhuma instalacao foi realizada/);
+});
+
+test("instalador Linux copia todas as fontes exigidas pelo plugin", () => {
+    // native.ts e a fonte da verdade: o que requiredFilesForPlatform exige precisa estar na
+    // lista que o instalador baixa, senao o pnpm build do checkout quebra (o import de
+    // vpn-linux/vpn-controller/update-* some junto).
+    const required = section(pluginNative, "function requiredFilesForPlatform", "const files =");
+    const files = [...required.matchAll(/"([A-Za-z0-9_.-]+\.(?:ts|tsx|json))"/g)].map(match => match[1]);
+    assert.ok(files.length >= 10, `fontes comuns esperadas em native.ts, achei ${files.length}`);
+    const list = section(linuxInstaller, "PLUGIN_FILES=", "\nPLUGIN_DIR_NAME=");
+    for (const file of files) assert.ok(list.includes(`goLiveBypass/${file}`), `PLUGIN_FILES sem ${file}`);
+});
+
 test("instalador Windows distribui todas as fontes do plugin WireGuard", () => {
     for (const file of [
         "goLiveBypass/index.tsx",
@@ -168,6 +191,7 @@ test("instalador Windows distribui todas as fontes do plugin WireGuard", () => {
         "goLiveBypass/vpn-proton.ts",
         "goLiveBypass/vpn-types.ts",
         "goLiveBypass/vpn-windows.ts",
+        "goLiveBypass/vpn-linux.ts",
         "goLiveBypass/manifest.json",
     ]) {
         assert.match(windowsInstaller, new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -176,6 +200,22 @@ test("instalador Windows distribui todas as fontes do plugin WireGuard", () => {
     assert.match(windowsInstaller, /Copy-PluginHelper/);
     assert.match(windowsInstaller, /Get-LatestBetaHelperAsset/);
     assert.match(windowsInstaller, /Get-FileHash.*SHA256/);
+});
+
+test("instaladores do plugin nao distribuem o seletor de saida legado", () => {
+    // A saida e a conta Proton, configurada dentro do plugin: nenhum arquivo de goLiveBypass/
+    // le a chave `proxy`, entao o instalador nao deve grava-la — reescrever a chave de uma
+    // instalacao antiga com "" apagaria o que estava la — nem oferecer a escolha de saida.
+    assert.doesNotMatch(linuxInstaller, /plugin\.proxy =/);
+    assert.doesNotMatch(windowsInstaller, /NotePropertyName proxy/);
+    assert.doesNotMatch(linuxInstaller, /^select_proxy\(\) \{/m);
+    assert.doesNotMatch(windowsInstaller, /^function Select-Proxy \{/m);
+    assert.doesNotMatch(linuxInstaller, /socks5:\/\//);
+    assert.doesNotMatch(windowsInstaller, /socks5:\/\//);
+    // A limpeza do que a versao anterior registrou continua: sem ela, o servico do usuario e
+    // a Run key do Tor ficariam para tras em quem escolheu aquela opcao.
+    assert.match(linuxInstaller, /^remove_tor\(\) \{/m);
+    assert.match(windowsInstaller, /^function Remove-Tor \{/m);
 });
 
 test("manifesto local e linha v2 beta", () => {

@@ -4,10 +4,10 @@
 # arquivos) o `New-Item -Path <chave> -Force` numa chave que JA EXISTE apaga a
 # chave e a recria vazia, levando junto todos os valores. Set-RunKey usava esse
 # padrao em HKCU\Software\Microsoft\Windows\CurrentVersion\Run, entao toda
-# execucao do instalador ou do standalone limpava as entradas de inicializacao
-# da maquina e deixava so a nossa.
+# execucao do standalone limpava as entradas de inicializacao da maquina e
+# deixava so a nossa.
 #
-# Este teste extrai a Set-RunKey dos dois scripts via AST, aponta ela para uma
+# Este teste extrai a Set-RunKey do standalone via AST, aponta ela para uma
 # chave descartavel em HKCU e verifica que os vizinhos sobrevivem. Nao toca na
 # chave Run real em nenhum momento.
 
@@ -15,7 +15,6 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
 
-$installerPath  = Join-Path $repoRoot 'installer\GoLiveBypass-Installer.ps1'
 $standalonePath = Join-Path $repoRoot 'standalone\GoLiveBypass-Standalone.ps1'
 
 # Literal exatamente como aparece no codigo, para redirecionar a funcao.
@@ -24,8 +23,8 @@ $DestructiveCall   = "New-Item -Path $RealRunKeyLiteral -Force"
 $ScratchRoot       = 'HKCU:\Software\GoLiveBypassTest'
 $ScratchKey        = 'HKCU:\Software\GoLiveBypassTest\RunKeyRegression'
 
-# Valores do Tor usados pela versao standalone (script scope) e pela do
-# instalador (parametros). Caminhos falsos: Set-RunKey so grava string.
+# Valores do Tor usados pela versao standalone (script scope). Caminhos falsos:
+# Set-RunKey so grava string.
 $TorExe   = 'C:\GoLiveBypassTest\tor\tor.exe'
 $TorTorrc = 'C:\GoLiveBypassTest\torrc'
 
@@ -136,11 +135,10 @@ try {
     # teste precisa existir para o WriteAllText nao falhar.
     New-Item -ItemType Directory -Path 'C:\GoLiveBypassTest' -Force | Out-Null
 
-    # Standalone: Set-RunKey sem parametros, le $TorExe/$TorTorrc do escopo.
+    # Standalone: Set-RunKey sem parametros, le $TorExe/$TorTorrc do escopo. O instalador
+    # nao tem mais Tor nem Set-RunKey: a escolha de saida saiu e a conta Proton e configurada
+    # dentro do plugin.
     Test-SetRunKey 'Standalone' $standalonePath @()
-
-    # Instalador: Set-RunKey($exe, $torrc).
-    Test-SetRunKey 'Instalador' $installerPath @($TorExe, $TorTorrc)
 } finally {
     Remove-Item -LiteralPath $ScratchRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath 'C:\GoLiveBypassTest' -Recurse -Force -ErrorAction SilentlyContinue

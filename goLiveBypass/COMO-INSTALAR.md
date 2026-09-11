@@ -1,14 +1,17 @@
 # GoLiveBypass — plugin do Vencord/Equicord
 
 Este zip traz os arquivos fonte do plugin (`index.tsx`, `native.ts`, `stability.ts`,
-`vpn-*.ts` e `manifest.json`) e os helpers x64 necessários para o transporte WireGuard:
-`bin/win32-x64/proton-confgen.exe` no Windows e `bin/linux-x64/proton-confgen` com
-`bin/linux-x64/netns-launcher` no Linux. Ele não é um instalador: os arquivos entram
-dentro de um **checkout (código-fonte) do Equicord ou do Vencord**, que compila o plugin.
+`vpn-*.ts` e `manifest.json`) e o helper x64 do Windows
+(`bin/win32-x64/proton-confgen.exe`), que não tem equivalente embutido. No Linux o pacote
+não carrega binário nenhum: o `vpn-proton.ts` já leva os dois helpers comprimidos e o
+runtime os materializa quando não há `bin/linux-x64/` (veja **Linha v2 beta**). Ele não é um
+instalador: os arquivos entram dentro de um **checkout (código-fonte) do Equicord ou do
+Vencord**, que compila o plugin.
 
 A VPN do plugin funciona em Windows x64 e Linux x64. Ela é autônoma: não depende da GUI
 Electron, não compartilha o estado de rede do standalone e não altera o `app.asar` vanilla.
-O standalone continua sendo um caminho separado e não é modificado por esta migração.
+O standalone continua sendo um caminho separado — e segue pausado nesta linha — e não é
+modificado por esta migração.
 
 ## Linha v2 beta
 
@@ -96,16 +99,24 @@ polkit no desktop, o próprio `pkexec` será aberto em um terminal nativo dispon
 fazer a mesma solicitação. Cancelar ou fechar o diálogo não cria namespace/interface nem
 encerra o Discord. O plugin não amplia o túnel para os demais aplicativos.
 
-No Windows, a beta também pode ser instalada pelo PowerShell do repositório:
+O instalador do plugin existe nos dois sistemas e entrega a linha beta:
 
 ```powershell
+# Windows (PowerShell)
 irm https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/GoLiveBypass-Installer.ps1 -OutFile $env:TEMP\glb-beta.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\glb-beta.ps1" -Mode Install -Mod Vencord -Yes
 ```
 
-O instalador mostra explicitamente o aviso de beta, copia todas as fontes do plugin e
-baixa o helper Proton x64 da beta mais recente com validação SHA-256. O standalone não é
-alterado por esse caminho.
+```sh
+# Linux
+curl -fsSL https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main/installer/golivebypass-installer.sh -o /tmp/glb-beta.sh && chmod +x /tmp/glb-beta.sh && /tmp/glb-beta.sh --install --mod vencord --yes
+```
+
+Os dois abrem com o aviso de beta e baixam o pacote da release (`goLiveBypass-vencord.zip`)
+conferindo o **SHA-256** publicado antes de extrair; não copiam arquivos soltos da `main`, que
+pode estar atrás da tag. O Windows baixa também o helper Proton x64 da beta mais recente, com
+validação de SHA-256 contra o manifesto publicado. O standalone não é alterado por esse
+caminho — ele segue pausado.
 
 Para usar o modo Proton, informe o usuário e a senha na seção da VPN. O CAPTCHA, quando
 solicitado, abre em uma janela isolada; a sessão fica na pasta privada indicada acima e
@@ -124,6 +135,6 @@ https://github.com/bezumiya/GoLiveBypass#instala%C3%A7%C3%A3o-passo-a-passo-comp
 
 O plugin **convive** com o seu Vencord/Equicord atual, mas o caminho acima
 compila tudo do zero: seus plugins atuais ficam salvos e você os reativa nas
-configurações depois do build. Se não quiser compilar, a alternativa é
-continuar usando o **standalone** (que substitui o mod — e aí você perde os
-plugins dele).
+configurações depois do build. Substituir o mod pelo standalone — que era a
+alternativa sem compilação — não vale hoje: o **standalone está pausado** nesta
+linha e só volta depois da portabilidade para o WireGuard.

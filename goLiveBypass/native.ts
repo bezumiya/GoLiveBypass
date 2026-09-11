@@ -70,10 +70,6 @@ function resolvePlatformHelperRelativePath(platform: NodeJS.Platform = process.p
     return `bin/${platformKey}-${arch}/${exeName}`;
 }
 
-function resolvePlatformLauncherRelativePath(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string | null {
-    return platform === "linux" && arch === "x64" ? `bin/linux-${arch}/netns-launcher` : null;
-}
-
 function requiredFilesForPlatform(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string[] {
     const common = [
         "index.tsx",
@@ -88,9 +84,13 @@ function requiredFilesForPlatform(platform: NodeJS.Platform = process.platform, 
         "vpn-linux.ts",
         "manifest.json",
     ];
-    const files = [...common, resolvePlatformHelperRelativePath(platform, arch)];
-    const launcher = resolvePlatformLauncherRelativePath(platform, arch);
-    if (launcher) files.push(launcher);
+    const files = [...common];
+    // Os helpers de Linux (proton-confgen e netns-launcher) NAO entram na lista: eles vao
+    // comprimidos dentro do vpn-proton.ts e o runtime os materializa quando nao existe bin/
+    // (materializeEmbeddedLinuxAsset) — foi por isso que o pacote deixou de carrega-los. Exigir
+    // o arquivo aqui rejeitava o proprio zip do release em Linux, que traz so o helper do
+    // Windows: a arvore instalada e o update preparado nunca passavam da validacao.
+    if (platform === "win32") files.push(resolvePlatformHelperRelativePath(platform, arch));
     return files;
 }
 function findLinuxNetnsLauncher(): string {

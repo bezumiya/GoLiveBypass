@@ -38,7 +38,10 @@ param(
 Write-Host ''
 Write-Host '  [BETA] GoLiveBypass para Equicord/Vencord — canal beta WireGuard.' -ForegroundColor Yellow
 Write-Host '         Este instalador entrega a versao beta atual do plugin; resultados podem mudar.' -ForegroundColor DarkGray
-Write-Host '         O standalone continua separado e nao e alterado por este instalador.' -ForegroundColor DarkGray
+Write-Host '         O sistema ainda nao e estavel e so chega la com gente testando: cada bug reportado' -ForegroundColor DarkGray
+Write-Host '         vira uma issue e encurta o caminho. Se algo falhar, deixe o relatorio automatico' -ForegroundColor DarkGray
+Write-Host '         seguir — ou abra em https://github.com/bezumiya/GoLiveBypass/issues.' -ForegroundColor DarkGray
+Write-Host '         O standalone continua separado, indisponivel e nao e alterado por este instalador.' -ForegroundColor DarkGray
 Write-Host ''
 
 $ErrorActionPreference = 'Stop'
@@ -59,6 +62,7 @@ $PluginFiles = @(
     'goLiveBypass/vpn-proton.ts',
     'goLiveBypass/vpn-types.ts',
     'goLiveBypass/vpn-windows.ts',
+    'goLiveBypass/vpn-linux.ts',
     'goLiveBypass/manifest.json'
 )
 $PluginHelperRelative = 'bin\win32-x64\proton-confgen.exe'
@@ -84,18 +88,6 @@ function Get-EffectiveLocalApp {
 $Mods = @{
     Equicord = @{ Git = 'https://github.com/Equicord/Equicord'; Label = 'Equicord'; Note = 'recomendado, inclui tudo do Vencord e mais plugins' }
     Vencord  = @{ Git = 'https://github.com/Vendicated/Vencord'; Label = 'Vencord'; Note = 'o original, mais enxuto' }
-}
-
-# Tor embutido: mesma versao e mesmos hashes da GUI (golive-gui/electron/main.ts), para os
-# instaladores de linha de comando entregarem exatamente o mesmo daemon que ela usa. A porta
-# dedicada 9060 evita conflito com um Tor do sistema (9050) ou do Tor Browser (9150).
-$TorBundle = '13.5'
-$TorPort = 9060
-$TorUrls = @{
-    'tor-expert-bundle-windows-x86_64-13.5.tar.gz' = @{
-        Url = 'https://archive.torproject.org/tor-package-archive/torbrowser/13.5/tor-expert-bundle-windows-x86_64-13.5.tar.gz'
-        Sha256 = '5978ccc2a7fed783c329474888e87f5e6349aa132d9c43016418bff296c7becb'
-    }
 }
 
 function Write-Step($text) { Write-Host "  [*] $text" -ForegroundColor DarkGray }
@@ -221,8 +213,6 @@ function Invoke-SanitizeBug([string]$text) {
     $text = [regex]::Replace($text, '([a-z][a-z0-9+.-]*://)([^/ @:]+):([^/@]+)@', '$1$2:***@')
     $text = [regex]::Replace($text, '\b(mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,})\b', '***')
     $text = [regex]::Replace($text, '(https://gateway[^ ?]+)\?[^ ]*', '$1?<params>')
-    # proxy personalizada digitada na instalacao (nunca sai)
-    if ($script:UltimaProxy) { $text = $text.Replace($script:UltimaProxy, '<proxy-pessoal>') }
     return $text
 }
 
@@ -309,8 +299,6 @@ function Test-ShouldReport([string]$msg) {
     if ($msg -like 'O Discord nao fechou*') { return $false }
     # input / uso do usuario
     if ($msg -like 'Opcao desconhecida: *') { return $false }
-    if ($msg -like 'Formato invalido. Use socks5://*') { return $false }
-    if ($msg -like 'Endereco da proxy invalido*') { return $false }
     if ($msg -like 'Nao consegui baixar *') { return $false }
     # dependencia faltando (ambiente)
     if ($msg -like 'Instale *') { return $false }
@@ -539,14 +527,6 @@ function Tui-MenuMulti([string]$title, [string[]]$items) {
     return $out
 }
 
-function Tui-Input([string]$label, [string]$initial = '') {
-    Write-Host "$($script:TuiBg)$($script:TuiFg)  ${label}: $($script:TuiAccent)$initial" -NoNewline
-    Tui-ShowCursor
-    $v = Read-Host
-    Tui-HideCursor
-    return ($v -replace '\s+$', '')
-}
-
 function Tui-Confirm([string]$question) {
     if (-not (Test-TuiInteractive)) { return (Confirm-Action $question) }
     $ans = Read-Host "$($script:TuiBg)$($script:TuiFg)  $question [s/N]"
@@ -583,16 +563,6 @@ function Get-RepoFile($relativePath) {
 
 function Test-Tool($name) {
     return [bool] (Get-Command $name -ErrorAction SilentlyContinue)
-}
-
-# O endereco da proxy pode carregar usuario e senha, e ele e mostrado na tela e em resumo de
-# instalacao. A senha some daqui.
-function Hide-ProxySecret($proxy) {
-    if ($proxy -match '^([a-z0-9]+)://(?:([^:@]+)(?::[^@]*)?@)?(.+)$') {
-        $user = if ($matches[2]) { "$($matches[2]):***@" } else { '' }
-        return "$($matches[1])://$user$($matches[3])"
-    }
-    return $proxy
 }
 
 # O corepack cria o atalho do pnpm antes de saber que versao usar. Na primeira execucao ele
@@ -1206,7 +1176,7 @@ function Copy-PluginHelper($target) {
     }
 }
 
-function Copy-Plugin($root) {
+function Copy-PluginFromRepo($root) {
     if (-not $root) { throw 'Caminho do checkout invalido para copiar o plugin.' }
     $target = Join-Path $root "src\userplugins\$PluginDirName"
     Write-Step "Instalando o plugin em $target"
@@ -1244,6 +1214,41 @@ function Copy-Plugin($root) {
     if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
         Write-Warn "Plugin copiado de $PluginSource, e nao do GitHub."
     }
+}
+
+# De onde vem o plugin instalado. O zip da release e a fonte normal: e o mesmo artefato que
+# o updater do proprio plugin instala, com SHA-256 publicado ao lado, e a tag entrega a linha
+# beta inteira (o main pode nao ter todas as fontes dela — foi o caso da vpn-linux.ts, que so
+# existia no zip). Tres casos caem nas fontes uma a uma: -PluginSource, um checkout do
+# repositorio ao lado do script e, por ultimo, a release inalcancavel (rede ou rate limit).
+function Install-PluginSource($root) {
+    if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
+        Copy-PluginFromRepo $root
+        return
+    }
+
+    if ($PSScriptRoot) {
+        $parent = Split-Path -Parent $PSScriptRoot
+        if ($parent -and (Test-Path -LiteralPath (Join-Path $parent "$PluginDirName\index.tsx"))) {
+            Write-Step 'Usando o checkout do repositorio que esta ao lado do instalador'
+            Copy-PluginFromRepo $root
+            return
+        }
+    }
+
+    $release = Get-PluginInstallRelease
+    if ($release -and $release.AssetUrl) {
+        Write-Step "Instalando o plugin da release v$($release.Tag)"
+        Invoke-UpdateFromZip $root $release.AssetUrl $release.Tag
+        # O zip ja traz o helper do Windows, mas quem manda e o helper da release validado
+        # contra o SHA-256 publicado (mesma garantia do #260).
+        Copy-PluginHelper (Join-Path $root "src\userplugins\$PluginDirName")
+        return
+    }
+
+    Write-Warn 'Nao consegui consultar a release do plugin (rede ou rate limit do GitHub).'
+    Write-Warn 'Caindo no download arquivo a arquivo da branch main.'
+    Copy-PluginFromRepo $root
 }
 
 function Build-Mod($root) {
@@ -1337,11 +1342,10 @@ function Invoke-Install($root) {
     if (-not $root -or -not (Test-Path -LiteralPath $root)) {
         throw 'Nao consegui preparar a pasta do Equicord/Vencord. Rode de novo, ou use -Source "C:\caminho\do\Equicord" apontando para um checkout que voce ja tenha.'
     }
-    $proxy = Select-Proxy
     $permanent = Select-Persistence
 
     Install-Toolchain $false
-    Copy-Plugin $root
+    Install-PluginSource $root
     Build-Mod $root
 
     $targets = @(Select-InjectionTargets @(Get-PatchTargets))
@@ -1364,19 +1368,13 @@ function Invoke-Install($root) {
 
     # Com o Discord fechado: aberto, ele regrava o settings.json a partir da memoria e
     # apaga o que escrevemos aqui.
-    Set-PluginSettings $root $proxy
+    Set-PluginSettings $root
 
     Start-Discord
 
     Write-Host ''
     Write-Ok 'Pronto. O plugin ja vem ativado, nao precisa mexer em nada.'
-    if ($proxy) {
-        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
-        # deu certo.
-        Write-Host "  Proxy: $(Hide-ProxySecret $proxy)" -ForegroundColor DarkGray
-    } else {
-        Write-Host '  Proxy: gratuita, escolhida e testada sozinha a cada abertura' -ForegroundColor DarkGray
-    }
+    Write-Host '  Na primeira ativacao o plugin pede a conta Proton, dentro do Discord.' -ForegroundColor DarkGray
     Write-Host '  Entre numa call e use Go Live ou a camera.' -ForegroundColor DarkGray
 
     if (-not $permanent) {
@@ -1440,7 +1438,7 @@ function Get-ModSettingsFile($root) {
     return (Join-Path $env:APPDATA "$mod\settings\settings.json")
 }
 
-function Set-PluginSettings($root, $proxy) {
+function Set-PluginSettings($root) {
     $file = Get-ModSettingsFile $root
 
     $settings = $null
@@ -1468,7 +1466,6 @@ function Set-PluginSettings($root, $proxy) {
     $plugin = if ($existing) { $existing.Value } else { [pscustomobject]@{} }
 
     $plugin | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
-    $plugin | Add-Member -NotePropertyName proxy -NotePropertyValue $proxy -Force
     if (-not $plugin.PSObject.Properties['excludedCountries']) {
         $plugin | Add-Member -NotePropertyName excludedCountries -NotePropertyValue 'BR' -Force
     }
@@ -1534,7 +1531,12 @@ function Select-Target($root) {
     }
 }
 
-# =============================================================== Tor embutido
+# =============================================================== Tor legado
+
+# O instalador nao oferece mais escolha de saida: a conta Proton e configurada dentro do
+# plugin na primeira ativacao, e o plugin WireGuard nao le `proxy` do settings.json. O que
+# sobra aqui e a limpeza do que as versoes anteriores deste instalador deixaram na maquina
+# de quem escolheu aquela opcao.
 
 function Get-TorBaseDir {
     return (Join-Path (Get-EffectiveLocalApp) 'GoLiveBypass\Tor')
@@ -1544,172 +1546,16 @@ function Get-TorExe {
     return (Join-Path (Get-TorBaseDir) 'tor\tor.exe')
 }
 
-function Test-TorReady {
-    # O probe barato: se a porta 9060 aceita conexao, um Tor ja esta escutando. Quem instalou
-    # o Tor por aqui tem o daemon verificado na hora; se for o Tor da GUI, ele tambem serve.
-    try {
-        $client = New-Object System.Net.Sockets.TcpClient
-        $task = $client.ConnectAsync('127.0.0.1', $TorPort)
-        if (-not $task.Wait(1500)) { $client.Close(); return $false }
-        if (-not $client.Connected) { $client.Close(); return $false }
-        $client.Close()
-        return $true
-    } catch { return $false }
-}
-
-function Get-TorServiceStatus {
-    try {
-        $svc = Get-CimInstance Win32_Service -Filter "Name='tor'" -ErrorAction SilentlyContinue
-        if ($svc -and $svc.State -eq 'Running') { return 'running' }
-        return 'absent'
-    } catch { return 'unknown' }
-}
-
-function Install-Tor {
-    $base = Get-TorBaseDir
-    $exe = Get-TorExe
-    $torrc = Join-Path $base 'torrc'
-
-    # Ja esta pondo a luz? Nada a fazer. Isso cobre um Tor do sistema (9050/9150) e o da GUI
-    # (9060) que ja esteja rodando — a GUI morre com ela, mas se esta de pe agora, serve.
-    if (Test-TorReady) {
-        Write-Ok "Tor ja esta atendendo em 127.0.0.1:$TorPort — reaproveitando."
-        return $true
-    }
-
-    # Primeiro tenta achar um Tor do sistema para reaproveitar o binario (sem baixar nada).
-    if (Test-Tool 'tor') {
-        Write-Step 'Tor do sistema encontrado; verificando se ele atende'
-        # Um tor do sistema usa a porta dele; o nosso servicio usa a 9060. O daemon do sistema
-        # so vale se ele ja estiver escutando na 9060 — senao, baixamos o nosso.
-        if (-not (Test-TorReady)) {
-            Write-Step 'Tor do sistema nao atende na porta 9060; baixando o bundle'
-        }
-    }
-
-    if (-not (Test-Path -LiteralPath $exe)) {
-        Write-Step 'Baixando o Tor (tor-expert-bundle 13.5, ~30 MB)'
-        $asset = $TorUrls.Values | Select-Object -First 1
-        $temp = if ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $archive = Join-Path $temp $asset.Url.Split('/')[-1]
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri $asset.Url -OutFile $archive
-        } catch {
-            Write-Warn "Falha ao baixar o Tor: $($_.Exception.Message)"
-            return $false
-        }
-
-        Write-Step 'Conferindo SHA-256'
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
-        if ($hash -ne $asset.Sha256.ToLower()) {
-            Remove-CaminhoSilencioso $archive
-            Write-Warn 'O download do Tor veio corrompido (SHA-256 diferente). Abortando.'
-            return $false
-        }
-
-        Write-Step 'Extraindo o Tor'
-        New-Item -ItemType Directory -Path $base -Force | Out-Null
-        # O bundle compacta um único diretório "tor"; tar.exe do Windows 11+ extrai direto.
-        & tar -xzf $archive -C $base --exclude 'tor/pluggable_transports/*' --exclude 'debug/*'
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn 'Falha ao extrair o bundle do Tor.'
-            return $false
-        }
-        Remove-CaminhoSilencioso $archive
-    }
-
-    if (-not (Test-Path -LiteralPath $exe)) {
-        Write-Warn "O binario do Tor nao apareceu em $exe."
-        return $false
-    }
-
-    # torrc com a porta dedicada, como a GUI usa.
-    $dataDir = Join-Path $base 'data-state'
-    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-    $geoip = Join-Path $base 'tor\data'
-    $torrcText = @"
-SocksPort $TorPort
-DataDirectory $($dataDir -replace '\\','\')
-$(
-    if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip')) {
-        "GeoIPFile $(Join-Path $base 'tor\data\geoip')"
-    }
-)
-$(
-    if (Test-Path -LiteralPath (Join-Path $base 'tor\data\geoip6')) {
-        "GeoIPv6File $(Join-Path $base 'tor\data\geoip6')"
-    }
-)
-Log notice stdout
-"@
-    Save-Text $torrc $torrcText
-
-    # O caminho do Windows: o servico (tor.exe --service install) roda como LocalService e
-    # nao tem acesso a %LOCALAPPDATA% do usuario, entao o Tor nao consegue escrever no
-    # DataDirectory e o servico fica parado. A Run key sobe o Tor no logon do USUARIO — mesmo
-    # contexto da GUI — e e o caminho que funciona aqui, com ou sem admin. So vale a pena o
-    # servico se o DataDirectory morar em ProgramData (caso da GUI), nao dos instaladores.
-    Write-Step 'Registrando o Tor na inicializacao do usuario (sobe no logon)'
-    Set-RunKey $exe $torrc
-
-    # A Run key so vale no proximo logon; para a sessao atual, sobe o daemon agora.
-    Write-Step 'Iniciando o Tor'
-    Start-Process -FilePath $exe -ArgumentList '-f', $torrc -WindowStyle Hidden
-
-    # Espera subir e valida com um tunel SOCKS de verdade.
-    Write-Step 'Esperando o Tor subir'
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 1000
-        if (Test-TorReady) { break }
-    }
-
-    if (-not (Test-TorReady)) {
-        Write-Warn 'Tor nao subiu em 30s. Veja o log em tor/data-state.'
-        return $false
-    }
-    Write-Ok "Tor atendendo em 127.0.0.1:$TorPort"
-    return $true
-}
-
-function Set-RunKey($exe, $torrc) {
-    try {
-        # ATENCAO: nada de "New-Item -Path <chave> -Force" aqui. No provider de
-        # registro (diferente do de arquivos) o -Force numa chave que ja existe
-        # APAGA a chave e recria vazia, levando junto todas as entradas de
-        # inicializacao do usuario (Spotify, Steam, Discord...).
-        # A chave Run sempre existe no Windows; so criamos se realmente faltar.
-        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        if (-not (Test-Path -LiteralPath $key)) {
-            New-Item -Path $key -Force | Out-Null
-        }
-        # O tor.exe e binario CONSOLE: a Run key apontando direto para ele abre uma
-        # janela de terminal visivel a cada logon. O wrapper .vbs via wscript.exe
-        # (aplicacao GUI-subsystem) lanca o tor com janela 0 = invisivel, sem o
-        # flash de console.
-        $vbs = Join-Path (Split-Path -Parent $torrc) 'GoLiveBypassTor.vbs'
-        $inner = "`"$exe`" -f `"$torrc`"".Replace('"', '""')
-        # Unicode (UTF-16 com BOM): wscript detecta o BOM e le caminhos com acento
-        # que o ANSI do sistema nao representaria.
-        [System.IO.File]::WriteAllText($vbs, "CreateObject(`"WScript.Shell`").Run `"$inner`", 0, False", [System.Text.Encoding]::Unicode)
-        $command = "`"$env:SystemRoot\System32\wscript.exe`" `"$vbs`""
-        Set-ItemProperty -Path $key -Name 'GoLiveBypassTor' -Value $command
-        Write-Ok 'Tor registrado para subir no proximo logon, sem janela de terminal (GoLiveBypassTor).'
-        return $true
-    } catch {
-        Write-Warn "Nao consegui registrar a inicializacao: $($_.Exception.Message)"
-        return $false
-    }
-}
-
 function Remove-Tor {
-    # Desinstala o que este instalador criou: a Run key. Se existir um servico "tor" apontando
-    # para a nossa pasta (instalacao anterior), remove tambem; se for de outra pessoa, nao mexe.
+    # Desinstala o que as versoes anteriores deste instalador criaram: a Run key e o wrapper
+    # .vbs. Se existir um servico "tor" apontando para a nossa pasta, remove tambem; se for de
+    # outra pessoa, nao mexe.
     $exe = Get-TorExe
     try {
         $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         Remove-ItemProperty -Path $key -Name 'GoLiveBypassTor' -ErrorAction SilentlyContinue
     } catch { }
-    # O wrapper invisivel que o Set-RunKey gravou ao lado do torrc tambem sai.
+    # O wrapper invisivel gravado ao lado do torrc tambem sai.
     try {
         Remove-Item -LiteralPath (Join-Path (Get-TorBaseDir) 'GoLiveBypassTor.vbs') -Force -ErrorAction SilentlyContinue
     } catch { }
@@ -1728,68 +1574,6 @@ function Remove-Tor {
     # O binario fica: a GUI usa o mesmo e sem ela nao faz mal.
     if (Test-Path -LiteralPath $exe) {
         Write-Host '  [*] O binario do Tor em %LOCALAPPDATA%\GoLiveBypass\Tor permanece (usado tambem pela GUI).' -ForegroundColor DarkGray
-    }
-}
-
-function Select-Proxy {
-    if ($Yes) { return '' }
-
-    if (Test-TuiInteractive) {
-        $tui = Tui-Menu 'Como o bypass vai sair para fora do Brasil?' @(
-            'Proxy gratuita (escolhida e testada sozinha)',
-            'Tor automatico (baixa e sobe sozinho)',
-            'Proxy minha (socks5://host:porta)'
-        )
-        switch ($tui) {
-            2 {
-                if (-not (Install-Tor)) {
-                    Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
-                    return ''
-                }
-                return "socks5://127.0.0.1:$TorPort"
-            }
-            3 {
-                $manual = (Tui-Input 'Endereco da proxy').Trim()
-                if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
-                    throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
-                }
-                return $manual
-            }
-            default { return '' }
-        }
-    }
-
-    Write-Host ''
-    Write-Host '  Como o bypass vai sair para fora do Brasil?' -ForegroundColor White
-    Write-Host ''
-    Write-Host '    [1] Proxy gratuita, escolhida e testada sozinha' -ForegroundColor Green
-    Write-Host '        Nao precisa instalar nada. O plugin testa varias e usa a que passar.' -ForegroundColor DarkGray
-    Write-Host '    [2] Tor automatico' -ForegroundColor Cyan
-    Write-Host '        Baixa e instala o Tor sozinho (uma vez) e deixa ele sempre rodando.' -ForegroundColor DarkGray
-    Write-Host '    [3] Proxy minha' -ForegroundColor Cyan
-    Write-Host '        Voce informa o endereco, no formato socks5://host:porta.' -ForegroundColor DarkGray
-    Write-Host ''
-
-    switch (Read-Escolha '  Escolha') {
-        '2' {
-            if (-not (Install-Tor)) {
-                Write-Warn 'Nao deu para preparar o Tor. Seguindo com proxy gratuita.'
-                return ''
-            }
-            return "socks5://127.0.0.1:$TorPort"
-        }
-        '3' {
-            Write-Host '  Se a sua proxy pedir login, use socks5://usuario:senha@host:porta' -ForegroundColor DarkGray
-            Write-Host '  Senha com @ ou : precisa vir codificada (@ vira %40, : vira %3A)' -ForegroundColor DarkGray
-            $manual = (Read-Escolha '  Endereco da proxy').Trim()
-            # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
-            # : codificados. Recusar isso aqui deixaria o suporte a login existindo so no plugin.
-            if ($manual -notmatch '^(socks5|https?)://(?:.+@)?[a-z0-9.-]{1,253}:\d{1,5}(?:-\d{1,5})?$') {
-                throw 'Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta.'
-            }
-            return $manual
-        }
-        default { return '' }
     }
 }
 
@@ -1997,6 +1781,37 @@ function Get-LatestBetaHelperAsset {
     return $null
 }
 
+# Release que serve a INSTALACAO do plugin: a mais recente publicada que tenha o zip do
+# userplugin e o .sha256 ao lado, prerelease incluida. A linha atual do plugin e beta e
+# /releases/latest (usado pelo -Mode CheckUpdate/Update, que seguem o canal estavel) esconde
+# prerelease — por isso a listagem aqui. A API devolve da mais nova para a mais antiga e nao
+# lista rascunhos para quem nao tem acesso de escrita, entao a primeira release com o asset e
+# a mais nova que realmente tem pacote publicado. Falha silenciosa: quem chama cai no RepoRaw.
+function Get-PluginInstallRelease {
+    try {
+        $headers = @{ 'User-Agent' = 'GoLiveBypass-Installer'; 'Accept' = 'application/vnd.github+json' }
+        $releases = Invoke-RestMethod -Uri "$GitHubApi/releases?per_page=30" -Headers $headers -TimeoutSec 15
+        foreach ($release in @($releases)) {
+            if ($release.draft) { continue }
+            $asset = @($release.assets) |
+                Where-Object { $_.name -match '^goLiveBypass-vencord.*\.zip$' } |
+                Select-Object -First 1
+            if (-not $asset) { continue }
+            $shaAsset = @($release.assets) |
+                Where-Object { $_.name -eq "$($asset.name).sha256" } |
+                Select-Object -First 1
+            if (-not $shaAsset) { continue }
+            return [PSCustomObject]@{
+                Tag = ($release.tag_name -replace '^v', '')
+                AssetUrl = $asset.browser_download_url
+            }
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
 # Consulta a release mais recente. Devolve um objeto com .Tag e .AssetUrl
 # (pode ser $null para qualquer um). RC=0 mesmo se a consulta falhou: o
 # --check-update nao pode derrubar o instalador por falta de rede.
@@ -2169,7 +1984,7 @@ function Invoke-Update {
     } else {
         # Fallback: a release nao tem o asset do userplugin
         Write-Warn "Release v$($release.Tag) nao tem o zip do userplugin. Caindo no download via RepoRaw."
-        Copy-Plugin $root
+        Copy-PluginFromRepo $root
     }
 
     Build-Mod $root
@@ -2179,9 +1994,10 @@ function Invoke-Update {
     Write-Ok "Atualizado para v$($release.Tag). Reinicie o Discord para carregar a nova versao."
 }
 
-# Baixa o zip, valida SHA-256, extrai por cima do plugin atual.
+# Baixa o zip do userplugin, valida SHA-256 e extrai. Serve a instalacao (Install-PluginSource)
+# e o -Mode Update; o destino e sempre src\userplugins\<plugin>, nunca o dist do mod.
 function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
-    $tempDir = Join-Path $env:TEMP "GoLiveBypass-update-$expectedVersion"
+    $tempDir = Join-Path $env:TEMP "GoLiveBypass-plugin-$expectedVersion"
     if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
     $zipFile = Join-Path $tempDir 'plugin.zip'

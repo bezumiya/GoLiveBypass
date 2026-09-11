@@ -19,7 +19,7 @@ A arquitetura atual da GUI Windows/Linux é **WireGuard por aplicativo**: todo o
 | WireSock Windows e prova de rota | `golive-gui/electron/wiresock.ts`, `route-proof.ts`, `discord-scope-proof.ts` no mesmo diretório |
 | Linux e standalone | `golive-gui/electron/linux-helper.ts`, `standalone/golivebypass-standalone.sh` |
 | Proton e geração de perfil | `golive-gui/electron/proton.ts`, `tools/proton-confgen/` |
-| Plugin Vencord/Equicord WireGuard | `goLiveBypass/vpn-controller.ts`, `vpn-windows.ts`, `vpn-proton.ts`, `native.ts` |
+| Plugin Vencord/Equicord WireGuard | `goLiveBypass/vpn-controller.ts`, `vpn-windows.ts`, `vpn-linux.ts`, `vpn-proton.ts`, `native.ts`; instaladores em `installer/` |
 | Proxy legado e standalone | `standalone/golivebypass.js`, `standalone/golivebypass-standalone.sh` |
 | API de suporte | `api/README.md`, `api/` |
 | Releases e atualizações | `.github/workflows/build-gui.yml`, `golive-gui/electron/updater*.ts`, `CHANGELOG.md` |
@@ -27,7 +27,8 @@ A arquitetura atual da GUI Windows/Linux é **WireGuard por aplicativo**: todo o
 ## Invariantes
 
 - Preserve o isolamento por aplicativo e a restauração da rede. No Windows/Linux, probes de IP, HTTP e telemetria são apenas diagnóstico nos logs: não bloqueiam ativação, não exibem aviso nem derrubam o Discord. Estado ativo indica túnel/processo iniciados, não prova geográfica de saída. Não ampliar o filtro para todo PowerShell ou para a máquina inteira.
-- O plugin Vencord/Equicord tem transporte WireGuard/WireSock autônomo, Windows x64 por enquanto, com estado em `GoLiveBypass/plugin-vpn`; não depende da GUI, não compartilha estado do standalone e recusa assumir ou parar um WireSock externo. A migração do plugin não autoriza alterações no standalone.
+- O plugin Vencord/Equicord tem transporte WireGuard/WireSock autônomo, Windows x64 e Linux x64, com estado em `GoLiveBypass/plugin-vpn`; não depende da GUI, não compartilha estado do standalone e recusa assumir ou parar um WireSock externo. A migração do plugin não autoriza alterações no standalone.
+- Os instaladores do plugin (`installer/*`) entregam o **zip da release**, com SHA-256 publicado conferido antes de extrair — não as fontes soltas da `main`, que pode estar atrás da tag da linha beta. `--plugin-source` e um checkout ao lado do script continuam vindo do disco. A linha é **beta**: os dois instaladores avisam isso e convidam a reportar bug. O standalone segue pausado por bloqueio próprio em `standalone/`.
 - `golive-gui/electron/bypass.ts` é gerado de `standalone/golivebypass.js`: nunca editar à mão. Após alterar a fonte, execute `npm run sync-bypass` em `golive-gui/`.
 - Em mudanças de estabilidade, timeouts, probes ou troca de saída, avalie GUI, standalone e plugin. Porte o comportamento onde aplicável; documente lacunas no `CHANGELOG.md`, sem copiar mecanicamente arquiteturas distintas.
 - Toda versão com sufixo de prerelease deve ser publicada como **prerelease**, nunca como latest. Canal estável não recebe beta nem downgrade. Consulte a skill de release antes de preparar/publicar versões.

@@ -6,6 +6,26 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Seletor de saída removido do instalador do plugin
+
+- Os dois instaladores (`installer/golivebypass-installer.sh` e `installer/GoLiveBypass-Installer.ps1`) param de perguntar "como o bypass vai sair para fora do Brasil". A saída agora é a conta Proton, configurada dentro do plugin na primeira ativação: nenhum arquivo de `goLiveBypass/` lê a chave `proxy` do `settings.json`, e a pergunta só existia para o transporte SOCKS/PAC legado.
+- Saiu junto o que só servia a essa escolha: `select_proxy`/`Select-Proxy`, o Tor embutido dos instaladores (`ensure_tor`/`ensure_tor_bundle`/`tor_ready`/`Install-Tor`/`Set-RunKey` e as constantes do bundle), `hide_proxy_secret`/`Hide-ProxySecret`, `tui_input`/`Tui-Input` (sem outro chamador) e os filtros de relatório automático para as mensagens do seletor. A constante `TOR_SERVICE` do instalador Linux ficou: é o que a limpeza usa.
+- `set_plugin_settings`/`Set-PluginSettings` não escrevem mais `proxy`. Uma chave legada de instalação anterior — inclusive a que guardava a porta do Tor — é preservada em vez de reescrita vazia pelo instalador; `enabled` e `excludedCountries` continuam sendo gravados.
+- O Tor que sobra nos instaladores é limpeza: `remove_tor`/`Remove-Tor` continuam removendo o serviço do usuário e a Run key/`GoLiveBypassTor.vbs` registrados pelas versões anteriores. O binário permanece (a GUI usa o mesmo). O standalone, pausado, mantém o Tor dele sem alteração.
+- `tests/test-run-key.ps1` passa a exercitar só o standalone: o instalador não tem mais `Set-RunKey`.
+
+### Instalador do plugin liberado com aviso de beta
+
+- O instalador Linux (`installer/golivebypass-installer.sh`) saía com código 1 antes de qualquer coisa: "Plugin e standalone CLI estao temporariamente fora do ar". A linha beta do plugin já é instalável, então o bloqueio saiu e virou aviso; o **standalone continua pausado**, com o bloqueio próprio em `standalone/golivebypass-standalone.sh` e `GoLiveBypass-Standalone.ps1`, que este instalador não toca.
+- Os dois instaladores passam a dizer, no cabeçalho, que a linha é beta, que o sistema ainda não é estável e que ele chega lá com relatos: cada bug vira uma issue e o relatório automático (ou o link das issues) encurta o caminho. No Linux o aviso sai em stderr, para não sujar o contrato de saída de `--check-update`/`--update`.
+- A fonte do plugin na instalação passou a ser o **zip da release** (`goLiveBypass-vencord.zip`, o mesmo artefato do updater do plugin), com **SHA-256 publicado** conferido antes de extrair. As fontes uma a uma da branch `main` ficaram como reserva: `main` pode estar atrás da tag da linha beta — foi o caso da `vpn-linux.ts`, que só existia no zip — e a lista fixa de arquivos pedia um arquivo que o `main` não tinha. `--plugin-source` e um checkout do repositório ao lado do script continuam preferidos, para quem testa uma mudança antes de publicar.
+- A lista de fontes do instalador Linux (`PLUGIN_FILES`) tinha 4 arquivos: sem `vpn-controller.ts`, `vpn-proton.ts`, `vpn-types.ts`, `vpn-linux.ts` e `update-*.ts`, o `pnpm build` do checkout nem começava — `native.ts` importa todos eles. A lista agora é a completa, e um teste compara com o que `requiredFilesForPlatform` exige em `native.ts`, para não divergir de novo.
+- Windows: o helper Proton continua sendo baixado da beta mais recente com validação de SHA-256 contra o manifesto publicado (garantia do #260), inclusive quando o plugin vem do zip.
+
+### Validação da árvore do plugin no Linux
+
+- O plugin recusava a própria árvore em Linux: `requiredFilesForPlatform` exigia `bin/linux-x64/proton-confgen` e `bin/linux-x64/netns-launcher`, arquivos que o zip do release não carrega justamente porque vão comprimidos no `vpn-proton.ts` e são materializados em runtime. A árvore instalada e o update preparado nunca passavam da validação, e o updater do plugin falhava no Linux com "archive do plugin não contém bin/linux-x64/proton-confgen". A exigência desses dois arquivos saiu (o helper do Windows, que não tem equivalente embutido, continua exigido); `validatePluginSourceTree` segue rejeitando fonte ausente, manifest inválido e entrada especial.
+
 ### Fila de issues de produção (2026-09-10)
 
 - Linux: o `stripAnsiCodes` da GUI confundia o `[` de um texto comum com o início de uma sequência ANSI. Ele removia `[*]`, `[OK]` e `[X]` das mensagens do script, então o erro mostrado ao usuário chegava truncado (`K] Tunel WireGuard encerrado.`, `] Discord nao iniciou...`) — a impressão digital visível no relato da #263. Agora só remove sequências realmente introduzidas por `ESC`, `U+009B` ou o `U+FFFD` corrompido, preservando os prefixos do script.

@@ -19,13 +19,21 @@
 # Obrigado ao Vithor (https://github.com/Vith0r), que escreveu o primeiro instalador do
 # GoLiveBypass e abriu o caminho para este aqui.
 
-# A instalacao do plugin e do standalone CLI esta temporariamente bloqueada durante a
-# portabilidade do novo sistema WireGuard por aplicativo. Saia antes de baixar ou alterar
-# qualquer cliente: a GUI 2.0.0 de teste e a variante mantida no momento.
-printf '\n[AVISO] Plugin e standalone CLI estao temporariamente fora do ar.\n' >&2
-printf '       O novo sistema WireGuard ainda esta sendo portado para essas variantes.\n' >&2
-printf '       Use a GUI 2.0.0 de teste enquanto isso. Nenhuma instalacao foi realizada.\n\n' >&2
-exit 1
+# A instalacao volta a funcionar, mas a linha WireGuard do plugin ainda e beta: sai antes
+# de baixar ou alterar qualquer cliente para ninguem achar que comprou um produto estavel.
+# Sempre em stderr — o stdout e o contrato de --check-update/--update (quem integra le
+# "plugin:"/"remote:"/"resultado:"), e um aviso no meio quebraria essa leitura.
+# O standalone NAO entra aqui: ele tem bloqueio proprio em
+# standalone/golivebypass-standalone.sh e este instalador nao encosta nele.
+printf '\n[BETA] GoLiveBypass para Equicord/Vencord — canal beta WireGuard.\n' >&2
+printf '        Este instalador entrega a versao beta atual do plugin; resultados podem mudar.\n' >&2
+printf '        O sistema ainda nao e estavel e so chega la com gente testando: cada bug\n' >&2
+printf '        reportado vira uma issue e encurta o caminho. Ao falhar, deixe o relatorio\n' >&2
+printf '        automatico seguir, ou abra voce mesmo em\n' >&2
+printf '        https://github.com/bezumiya/GoLiveBypass/issues\n' >&2
+printf '        No Linux a parte menos testada e a ativacao do tunel, que pede autorizacao\n' >&2
+printf '        no pkexec/polkit — a validacao atual parou nesse ponto.\n' >&2
+printf '        O standalone continua indisponivel e nao e alterado por este instalador.\n\n' >&2
 
 # So construcoes POSIX: roda em dash, bash, zsh, ksh e busybox ash.
 # (sem pipefail de proposito: o status de pipeline e o do ultimo comando, como manda o POSIX)
@@ -58,7 +66,11 @@ unset -f _local_probe 2>/dev/null || true
 
 
 REPO_RAW="https://raw.githubusercontent.com/bezumiya/GoLiveBypass/main"
-PLUGIN_FILES="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/stability.ts goLiveBypass/manifest.json"
+# Lista completa das fontes do plugin (native.ts: requiredFilesForPlatform). Faltando uma
+# so, o pnpm build do checkout quebra: native.ts importa vpn-controller/vpn-proton/
+# vpn-linux/update-*. Os binarios dos helpers nao vem por aqui — em Linux eles vao
+# embutidos no vpn-proton.ts e o plugin os materializa sozinho quando nao acha bin/.
+PLUGIN_FILES="goLiveBypass/index.tsx goLiveBypass/native.ts goLiveBypass/update-channel.ts goLiveBypass/update-security.ts goLiveBypass/stability.ts goLiveBypass/vpn-controller.ts goLiveBypass/vpn-proton.ts goLiveBypass/vpn-types.ts goLiveBypass/vpn-windows.ts goLiveBypass/vpn-linux.ts goLiveBypass/manifest.json"
 PLUGIN_DIR_NAME="goLiveBypass"
 EQUICORD_GIT="https://github.com/Equicord/Equicord"
 VENCORD_GIT="https://github.com/Vendicated/Vencord"
@@ -116,8 +128,6 @@ should_report() {
         *"Cannot bind argument"*) return 1 ;;
         # --- input / uso do usuario ---
         "Opcao desconhecida: "*) return 1 ;;
-        "Formato invalido. Use socks5://"*) return 1 ;;
-        "Endereco da proxy invalido"*) return 1 ;;
         "Nao consegui baixar "*) return 1 ;;
         # --- dependencia faltando (ambiente) ---
         "Instale "*) return 1 ;;
@@ -527,16 +537,6 @@ tui_confirm() {
     esac
 }
 
-# tui_input <label> <value_inicial> → imprime o valor digitado (ou o inicial se Enter vazio).
-tui_input() {
-    local label="$1" value="${2:-}"
-    printf '%s%s  %s%s: %s%s' "$TUI_BG" "$TUI_FG" "$label" "$TUI_ACCENT" "$value" >&2
-    tui_show_cursor
-    IFS= read -r value
-    tui_hide_cursor
-    printf '%s\n' "$value"
-}
-
 # tui_progress <texto> → spinner simples na linha (atualiza no lugar).
 tui_progress() {
     local msg="$1"
@@ -614,184 +614,17 @@ grant_flatpak_access() {
     return 1
 }
 
-# O endereco da proxy pode carregar usuario e senha, e ele e mostrado na tela. A senha some.
-hide_proxy_secret() {
-    printf '%s\n' "$1" | sed -E 's#^([a-z0-9]+)://([^:@/]+)(:[^@/]*)?@#\1://\2:***@#'
-    return 0
-}
+# ----------------------------------------------------------------------------- Tor legado
+# O instalador nao oferece mais escolha de saida: a conta Proton e configurada dentro do
+# plugin na primeira ativacao, e o plugin WireGuard nao le `proxy` do settings.json. O que
+# sobra do Tor aqui e a limpeza do que as versoes anteriores deste instalador registraram
+# na maquina de quem escolheu aquela opcao.
 
-# ----------------------------------------------------------------------------- Tor embutido
-# Mesmo bundle 13.5 e mesmos hashes da GUI (golive-gui/electron/main.ts), na porta dedicada
-# 9060. A rotina e idempotente: se um Tor ja atende (nosso, da GUI, do sistema), reusa.
-
-TOR_BUNDLE_VERSION="13.5"
-TOR_PORT="9060"
-TOR_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/GoLiveBypass/Tor"
-TOR_EXE="$TOR_BASE/tor/tor"
-TOR_TORRC="$TOR_BASE/torrc"
-# A libevent do bundle (libevent 2.1 com evutil_secure_rng_add_bytes) nao e
-# mais encontrada em distros recentes -- Arch, Fedora 40+, etc -- e o ldd
-# resolve o simbolo na libevent do sistema, que aborta o tor com status 127.
-# O fix e apontar LD_LIBRARY_PATH para a pasta do bundle (mesma do que a
-# GUI Electron ja faz em golive-gui/electron/main.ts).
-TOR_LIBDIR="$TOR_BASE/tor"
-TOR_TARBALL="tor-expert-bundle-linux-x86_64-$TOR_BUNDLE_VERSION.tar.gz"
-TOR_URL="https://archive.torproject.org/tor-package-archive/torbrowser/$TOR_BUNDLE_VERSION/$TOR_TARBALL"
-TOR_SHA256="147158f33c5f2c539d58d8fab69ca5af384778e7bbae951fbc7ac8ca58ac4e0d"
 TOR_SERVICE="golivebypass-tor.service"
 
-tor_base() { printf '%s\n' "$TOR_BASE"; }
-
-tor_ready() {
-    # Probe barato: quem aceita TCP na 9060 e um SOCKS de Tor (nosso, da GUI ou do sistema).
-    if have bash && bash -c "exec 3<>/dev/tcp/127.0.0.1/$TOR_PORT" 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-tor_daemon_running() {
-    tor_ready && return 0
-    [ -x "$TOR_EXE" ] || return 1
-    return 1
-}
-
-# Baixa o bundle e deixa o binario pronto, se ainda nao existir. Nao sobe nada.
-ensure_tor_bundle() {
-    [ -x "$TOR_EXE" ] && return 0
-
-    step "Baixando o Tor (tor-expert-bundle $TOR_BUNDLE_VERSION, ~30 MB)"
-    tmp="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/glb-tor.$$")"
-    trap 'rm -rf "$tmp"' EXIT
-
-    if have curl; then
-        curl -fsSL "$TOR_URL" -o "$tmp/$TOR_TARBALL" || {
-            warn "Falha ao baixar o Tor. Verifique sua conexao."
-            return 1
-        }
-    elif have wget; then
-        wget -qO- "$TOR_URL" >"$tmp/$TOR_TARBALL" || {
-            warn "Falha ao baixar o Tor. Verifique sua conexao."
-            return 1
-        }
-    else
-        warn "Preciso de curl ou wget para baixar o Tor."
-        return 1
-    fi
-
-    step "Conferindo SHA-256"
-    local obtido
-    obtido="$(sha256sum "$tmp/$TOR_TARBALL" 2>/dev/null | cut -d' ' -f1)"
-    if [ "$obtido" != "$TOR_SHA256" ]; then
-        warn "O download do Tor veio corrompido (SHA-256 $obtido). Abortando."
-        return 1
-    fi
-
-    step "Extraindo o Tor"
-    mkdir -p "$TOR_BASE"
-    tar -xzf "$tmp/$TOR_TARBALL" -C "$TOR_BASE" --exclude 'tor/pluggable_transports/*' --exclude 'debug/*' || {
-        warn "Falha ao extrair o bundle do Tor."
-        return 1
-    }
-    chmod +x "$TOR_EXE" 2>/dev/null || true
-    return 0
-}
-
-# Garante o Tor de pe na 9060. Devolve 0 se estiver pronto (ja rodando ou acabou de subir).
-ensure_tor() {
-    tor_ready && { step "Tor ja atendendo em 127.0.0.1:$TOR_PORT"; return 0; }
-
-    # Tor do sistema ja rodando na porta dele? Reusar evita baixar 30 MB.
-    if have tor && tor_ready; then
-        step "Tor do sistema em uso"
-        return 0
-    fi
-
-    have tor && step "Tor do sistema encontrado; verifica se o daemon esta de pe (porta $TOR_PORT)"
-
-    ensure_tor_bundle || return 1
-
-    mkdir -p "$TOR_BASE/data-state"
-    cat >"$TOR_TORRC" <<EOF
-SocksPort $TOR_PORT
-DataDirectory $TOR_BASE/data-state
-$( [ -f "$TOR_BASE/tor/data/geoip" ] && printf 'GeoIPFile %s\n' "$TOR_BASE/tor/data/geoip" )
-$( [ -f "$TOR_BASE/tor/data/geoip6" ] && printf 'GeoIPv6File %s\n' "$TOR_BASE/tor/data/geoip6" )
-Log notice stdout
-EOF
-
-    # systemd user (padrao); com sudo sem systemd user, unit system com User=<SUDO_USER>;
-    # ultimo recurso (sem systemd): nohup com aviso de que nao sobrevive ao boot.
-    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-        step "Registrando o Tor como servico do usuario (systemd user)"
-        mkdir -p "$HOME/.config/systemd/user"
-        cat >"$HOME/.config/systemd/user/$TOR_SERVICE" <<EOF
-[Unit]
-Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
-After=network.target
-
-[Service]
-Environment=LD_LIBRARY_PATH=$TOR_LIBDIR
-ExecStart=$TOR_EXE -f $TOR_TORRC
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-        systemctl --user daemon-reload
-        systemctl --user enable --now "$TOR_SERVICE" 2>/dev/null || {
-            warn "Nao consegui ativar o servico do usuario. Tentando nohup."
-            LD_LIBRARY_PATH="$TOR_LIBDIR" nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
-        }
-    elif command -v systemctl >/dev/null 2>&1; then
-        # Estamos com sudo (a injecao do plugin pode pedir) e nao ha systemd user. A unit
-        # system sobe com o User do dono real, senao o Tor guardaria o estado em /root.
-        local real_user="${SUDO_USER:-$USER}"
-        step "Registrando o Tor como servico do sistema (via sudo)"
-        sudo tee "/etc/systemd/system/$TOR_SERVICE" >/dev/null <<EOF
-[Unit]
-Description=GoLiveBypass Tor (SOCKS 127.0.0.1:$TOR_PORT)
-After=network.target
-
-[Service]
-User=$real_user
-Environment=LD_LIBRARY_PATH=$TOR_LIBDIR
-ExecStart=$TOR_EXE -f $TOR_TORRC
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now "$TOR_SERVICE" 2>/dev/null || {
-            warn "Nao consegui ativar o servico do sistema. Tentando nohup."
-            LD_LIBRARY_PATH="$TOR_LIBDIR" nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
-        }
-    else
-        step "systemd nao encontrado; rodando o Tor em background (nao sobrevive ao boot)"
-        LD_LIBRARY_PATH="$TOR_LIBDIR" nohup "$TOR_EXE" -f "$TOR_TORRC" >"$TOR_BASE/tor.log" 2>&1 &
-    fi
-
-    step "Esperando o Tor subir"
-    local i
-    for i in $(seq 1 30); do
-        tor_ready && break
-        sleep 1
-    done
-
-    if tor_ready; then
-        step "Tor atendendo em 127.0.0.1:$TOR_PORT"
-        return 0
-    fi
-
-    warn "O Tor nao subiu em 30s. Veja o log em $TOR_BASE/tor.log"
-    return 1
-}
-
 remove_tor() {
-    # Desinstala o que este instalador criou. Nao apaga o binario (a GUI usa o mesmo).
+    # Desinstala o que versoes anteriores deste instalador criaram. Nao apaga o binario
+    # (a GUI usa o mesmo).
     if command -v systemctl >/dev/null 2>&1; then
         systemctl --user disable --now "$TOR_SERVICE" 2>/dev/null
         rm -f "$HOME/.config/systemd/user/$TOR_SERVICE"
@@ -1425,7 +1258,10 @@ stop_discord() {
     fail "O Discord nao fechou nem com SIGKILL. Feche na mao e rode de novo."
 }
 
-copy_plugin() {
+# Fontes uma a uma (checkout local ao lado do script ou raw.githubusercontent). E o caminho
+# de reserva: o main pode estar atras da tag da linha beta — foi o caso da vpn-linux.ts, que
+# so existia no zip — e ai a lista PLUGIN_FILES pede arquivo que o main ainda nao tem.
+copy_plugin_from_repo() {
     local root="$1" target="$1/src/userplugins/$PLUGIN_DIR_NAME" file
     step "Instalando o plugin em $target"
     mkdir -p "$target"
@@ -1451,6 +1287,38 @@ copy_plugin() {
     if [ -n "$PLUGIN_SOURCE" ]; then
         warn "Plugin copiado de $PLUGIN_SOURCE, e nao do GitHub."
     fi
+    return 0
+}
+
+# De onde vem o plugin instalado. O zip da release e a fonte normal: e o mesmo artefato que
+# o updater do proprio plugin instala, com SHA-256 publicado ao lado, e a tag entrega a
+# linha beta inteira (o main pode nao ter todas as fontes dela). Tres casos caem nas fontes
+# uma a uma: --plugin-source, um checkout do repositorio ao lado do script e, por ultimo, a
+# release inalcancavel (rede ou rate limit do GitHub).
+install_plugin_source() {
+    local root="$1" url tag
+
+    if [ -n "$PLUGIN_SOURCE" ]; then
+        copy_plugin_from_repo "$root"
+        return 0
+    fi
+
+    if [ -f "$SCRIPT_DIR/../$PLUGIN_DIR_NAME/index.tsx" ]; then
+        step "Usando o checkout do repositorio que esta ao lado do instalador"
+        copy_plugin_from_repo "$root"
+        return 0
+    fi
+
+    if url=$(github_plugin_release 2>/dev/null) && [ -n "$url" ]; then
+        tag=${url%/*}; tag=${tag##*/}; tag=${tag#v}
+        step "Instalando o plugin da release v$tag"
+        do_update_from_zip "$root" "$url" "$tag"
+        return 0
+    fi
+
+    warn "Nao consegui consultar a release do plugin (rede ou rate limit do GitHub)."
+    warn "Caindo no download arquivo a arquivo da branch main."
+    copy_plugin_from_repo "$root"
 }
 
 build_mod() {
@@ -1841,12 +1709,11 @@ mod_settings_file() {
 
 set_plugin_settings() {
     local root="$1"
-    local proxy="$2"
     local file
     file="$(mod_settings_file "$root")"
     mkdir -p "$(dirname "$file")"
 
-    GLB_FILE="$file" GLB_PROXY="$proxy" node -e '
+    GLB_FILE="$file" node -e '
         const fs = require("fs");
         const file = process.env.GLB_FILE;
 
@@ -1869,7 +1736,6 @@ set_plugin_settings() {
 
         const plugin = settings.plugins && settings.plugins.GoLiveBypass ? settings.plugins.GoLiveBypass : {};
         plugin.enabled = true;
-        plugin.proxy = process.env.GLB_PROXY || "";
         if (plugin.excludedCountries === undefined) plugin.excludedCountries = "BR";
 
         settings.plugins = settings.plugins || {};
@@ -1958,77 +1824,6 @@ select_target() {
     else
         printf '%s\n' "$root"
     fi
-}
-
-select_proxy() {
-    if tui_is_interactive; then
-        local tui_choice
-        tui_choice="$(tui_menu "Como o bypass vai sair para fora do Brasil?" \
-            "Proxy gratuita (escolhida e testada sozinha)" \
-            "Tor automatico (baixa e sobe sozinho)" \
-            "Proxy minha (socks5://host:porta)")"
-        case "$tui_choice" in
-            2)
-                if ! ensure_tor; then
-                    warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
-                    printf '\n'
-                    return 0
-                fi
-                printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
-                ;;
-            3)
-                local manual
-                manual="$(tui_input "Endereco da proxy")"
-                case "$manual" in
-                    socks5://*|https://*|http://*)
-                        printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$' || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-                    *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-                esac
-                printf '%s\n' "$manual"
-                ;;
-            *) printf '\n' ;;
-        esac
-        return 0
-    fi
-
-    printf '\n  %sComo o bypass vai sair para fora do Brasil?%s\n\n' "$C_BOLD" "$C_OFF" >&2
-    printf '    %s[1] Proxy gratuita, escolhida e testada sozinha%s\n' "$C_GREEN" "$C_OFF" >&2
-    printf '  %s      Nao precisa instalar nada. O plugin testa varias e usa a que passar.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[2] Tor automatico%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Baixa e instala o Tor sozinho (uma vez) e deixa ele sempre rodando.%s\n' "$C_DIM" "$C_OFF" >&2
-    printf '    %s[3] Proxy minha%s\n' "$C_CYAN" "$C_OFF" >&2
-    printf '  %s      Voce informa o endereco, no formato socks5://host:porta.%s\n\n' "$C_DIM" "$C_OFF" >&2
-
-    local choice manual
-    printf '%s' "  Escolha: " >&2
-    read -r choice
-    case "$choice" in
-        2)
-            if ! ensure_tor; then
-                warn "Nao deu para preparar o Tor. Seguindo com proxy gratuita."
-                printf '\n'
-                return 0
-            fi
-            printf 'socks5://127.0.0.1:%s\n' "$TOR_PORT"
-            ;;
-        3)
-            printf '  %sSe a sua proxy pedir login, use socks5://usuario:senha@host:porta%s\n' "$C_DIM" "$C_OFF" >&2
-            printf '  %sSenha com @ ou : precisa vir codificada (@ vira %%40, : vira %%3A)%s\n' "$C_DIM" "$C_OFF" >&2
-            printf '%s' "  Endereco da proxy: " >&2
-            read -r manual
-            # O trecho antes do @ e opcional e casado com ganancia, para a senha poder conter @ e
-            # : codificados. Recusar aqui deixaria o suporte a login existindo so no plugin.
-            # O mesmo casamento do =~ do bash, com case. O trecho antes do @ e opcional.
-            case "$manual" in
-                socks5://*|https://*|http://*)
-                    printf '%s' "$manual" | grep -Eq '^(socks5|https?)://(.+@)?[a-z0-9.-]{1,253}:[0-9]{1,5}(-[0-9]{1,5})?$'                         || fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta."
-                    ;;
-                *) fail "Formato invalido. Use socks5://host:porta, ou socks5://usuario:senha@host:porta." ;;
-            esac
-            printf '%s\n' "$manual"
-            ;;
-        *) printf '\n' ;;
-    esac
 }
 
 select_persistence() {
@@ -2135,6 +1930,30 @@ github_latest_release() {
 
     # O printf para stdout: tag e url separados por \n, sem ruido.
     printf '%s\n%s\n' "$tag" "$zip_browser"
+    return 0
+}
+
+# URL do zip do userplugin na release que serve a INSTALACAO: a mais recente publicada que
+# tenha o asset, prerelease incluida. A consulta nao pode ser /releases/latest (que esconde
+# prerelease, e a linha atual do plugin e beta) nem "primeiro tag_name da listagem" (um
+# rascunho sem asset desalinharia tag e zip). A API devolve as releases da mais nova para a
+# mais antiga e nao lista rascunhos para quem nao tem acesso de escrita, entao o primeiro
+# asset do userplugin da lista e o da release mais nova que realmente tem o pacote — e a tag
+# sai da propria URL dele.
+github_plugin_release() {
+    local json zip_browser
+    if have curl; then
+        json=$(curl -fsSL -H "User-Agent: $GITHUB_UA" -H "Accept: application/vnd.github+json" "$GITHUB_API/releases?per_page=30" 2>/dev/null) || return 1
+    elif have wget; then
+        json=$(wget -qO- --header="User-Agent: $GITHUB_UA" --header="Accept: application/vnd.github+json" "$GITHUB_API/releases?per_page=30" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+
+    zip_browser=$(printf '%s' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*goLiveBypass-vencord[^"]*\.zip"' | head -1 | sed 's/.*"\(http[^"]*\)".*/\1/')
+    [ -n "$zip_browser" ] || return 1
+
+    printf '%s\n' "$zip_browser"
     return 0
 }
 
@@ -2277,8 +2096,8 @@ do_check_update() {
     return 0
 }
 
-# --update: faz o trabalho. Reusa copy_plugin (ja trata de REPO_RAW local), mas
-# primeiro roda o backup e a validacao de SHA-256 quando baixar de um zip.
+# --update: faz o trabalho. Reusa do_update_from_zip (o mesmo caminho da instalacao a partir
+# da release), mas primeiro roda o backup e a validacao de SHA-256 quando baixar de um zip.
 do_update() {
     local installed root latest_release latest_tag latest_zip cmp
 
@@ -2321,7 +2140,7 @@ do_update() {
         # (versao muito antiga, ou alguem publicou a tag na mao). Usa o REPO_RAW
         # como antes, que sempre funciona.
         warn "Release v$latest_tag nao tem o zip do userplugin. Caindo no download via REPO_RAW."
-        copy_plugin "$root"
+        copy_plugin_from_repo "$root"
     fi
 
     # Recompila e re-injeta para a nova versao pegar
@@ -2415,12 +2234,11 @@ do_install() {
     local root="${1:-}"
     root="$(select_target "$root")"
 
-    local proxy permanent=0
-    proxy="$(select_proxy)"
+    local permanent=0
     select_persistence || permanent=1
 
     ensure_toolchain 0
-    copy_plugin "$root"
+    install_plugin_source "$root"
     build_mod "$root"
 
     local flatpak_id=""
@@ -2439,19 +2257,13 @@ do_install() {
 
     # Com o Discord fechado: aberto, ele regrava o settings.json a partir da memoria e
     # apaga o que escrevemos aqui.
-    set_plugin_settings "$root" "$proxy"
+    set_plugin_settings "$root"
 
     start_discord "$root"
 
     printf '\n'
     ok "Pronto. O plugin ja vem ativado, nao precisa mexer em nada."
-    if [ -n "$proxy" ]; then
-        # A senha nao aparece na tela: a pessoa costuma tirar print desta parte para mostrar que
-        # deu certo.
-        printf '  %sProxy: %s%s\n' "$C_DIM" "$(hide_proxy_secret "$proxy")" "$C_OFF"
-    else
-        printf '  %sProxy: gratuita, escolhida e testada sozinha a cada abertura%s\n' "$C_DIM" "$C_OFF"
-    fi
+    printf '  %sNa primeira ativacao o plugin pede a conta Proton, dentro do Discord.%s\n' "$C_DIM" "$C_OFF"
     printf '  %sEntre numa call e use Go Live ou a camera.%s\n' "$C_DIM" "$C_OFF"
 
     # O deploy do flatpak e refeito do zero a cada atualizacao, e a injecao mora dentro dele.

@@ -101,7 +101,7 @@ fi
 # --------------------------------------------------------------------------- 4. Funcoes de auto-update definidas
 echo
 echo "== 4. Funcoes de auto-update definidas =="
-for fn in github_latest_release installed_plugin_version compare_version backup_plugin do_check_update do_update do_update_from_zip; do
+for fn in github_latest_release github_plugin_release installed_plugin_version compare_version backup_plugin do_check_update do_update do_update_from_zip install_plugin_source copy_plugin_from_repo; do
     if grep -E "^${fn}\(\) \{" "$REPO/installer/golivebypass-installer.sh" >/dev/null 2>&1; then
         ok "funcao $fn() definida"
     else

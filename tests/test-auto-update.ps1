@@ -4,8 +4,9 @@
     Testes do auto-update do instalador GoLiveBypass para Windows.
 .DESCRIPTION
     Valida a sintaxe do PowerShell, as funcoes de auto-update (Get-LatestRelease,
-    Get-InstalledPluginVersion, Compare-Version, Backup-Plugin, Invoke-CheckUpdate,
-    Invoke-Update, Invoke-UpdateFromZip), e a integracao com manifest.json.
+    Get-PluginInstallRelease, Get-InstalledPluginVersion, Compare-Version, Backup-Plugin,
+    Invoke-CheckUpdate, Invoke-Update, Invoke-UpdateFromZip), a escolha da fonte do plugin
+    (Install-PluginSource, Copy-PluginFromRepo) e a integracao com manifest.json.
 .NOTES
     Requer PowerShell 7+ (pwsh). Em Windows, pode ser executado com powershell
     ou pwsh (PowerShell Core).
@@ -68,7 +69,7 @@ if ($content -match "ValidateSet\('Menu', 'Install', 'Uninstall', 'Restore', 'Ch
 # 4. Funcoes de auto-update definidas
 Write-Host ""
 Write-Host "== 4. Funcoes de auto-update definidas =="
-$funcs = @('Get-LatestRelease', 'Get-InstalledPluginVersion', 'Compare-Version', 'Backup-Plugin', 'Invoke-CheckUpdate', 'Invoke-Update', 'Invoke-UpdateFromZip')
+$funcs = @('Get-LatestRelease', 'Get-PluginInstallRelease', 'Get-InstalledPluginVersion', 'Compare-Version', 'Backup-Plugin', 'Invoke-CheckUpdate', 'Invoke-Update', 'Invoke-UpdateFromZip', 'Install-PluginSource', 'Copy-PluginFromRepo')
 foreach ($fn in $funcs) {
     $cmd = Get-Command $fn -ErrorAction SilentlyContinue
     if ($cmd) { Ok "funcao $fn definida" } else { Bad "funcao $fn NAO definida" }

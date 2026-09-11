@@ -19,14 +19,14 @@ Você não precisa usar todas as opções. Escolha uma delas:
 |---|---|---|
 | **[GUI](#-versão-200-interface-gráfica-com-wireguard-por-aplicativo)** | quer ativar e desativar com poucos cliques, sem terminal | baixe o aplicativo para Windows ou Linux |
 | **[Standalone](#modo-standalone-só-o-discord-sem-equicord-e-sem-vencord)** | usa o Discord puro e não quer instalar Equicord/Vencord | temporariamente indisponível na 2.0.0 |
-| **[Plugin](#instalação-do-plugin-recomendado-para-equicord-vencord-e-vesktop)** | já usa Equicord, Vencord ou Vesktop | temporariamente indisponível na 2.0.0 |
+| **[Plugin](#instalação-do-plugin-recomendado-para-equicord-vencord-e-vesktop)** | já usa Equicord, Vencord ou Vesktop | instalador em beta, para Windows e Linux |
 
 > **Regra rápida:** GUI para simplicidade, standalone para Discord sem mods, plugin para quem já usa um mod.
 
 > **Status da versão 2.0.0:** a migração do plugin para a arquitetura WireGuard por aplicativo
-> começou para Windows x64. O código do plugin já está separado da GUI e do standalone, mas os
-> instaladores automáticos permanecem pausados até a validação E2E e a publicação de um pacote.
-> O standalone continua fora do escopo desta migração.
+> está em beta para Windows x64 e Linux x64, com o código separado da GUI e do standalone. Os
+> instaladores automáticos do plugin voltaram a funcionar nessa linha beta — Windows e Linux —
+> e entregam o pacote da release. O **standalone continua pausado** e só será retomado depois.
 
 ## 🌟 Versão 2.0.0: Interface Gráfica com WireGuard por aplicativo
 
@@ -63,7 +63,7 @@ O túnel cobre o processo do Discord inteiro — gateway, login, voz, vídeo e a
    - **Linux:** `GoLiveBypass-*.AppImage`
 3. Abra o arquivo que você acabou de baixar.
 
-O programa **não é assinado**. O sistema avisa na primeira vez. Na 2.0.0, a GUI é a única variante disponível; os instaladores CLI permanecem pausados.
+O programa **não é assinado**. O sistema avisa na primeira vez. Na 2.0.0, a GUI é a única variante estável; o instalador do plugin está disponível em beta e o standalone segue pausado.
 
 **Windows (SmartScreen):** **Mais informações → Executar assim mesmo**.
 
@@ -162,8 +162,9 @@ paralelos e Flatpak; Equicord/Vencord é preservado e não impede o túnel por n
 
 ## Instalação do plugin (recomendado para Equicord, Vencord e Vesktop)
 
-> A VPN do plugin está implementada para Windows x64, mas os instaladores automáticos continuam
-> pausados até a validação E2E. Para instalação manual e configuração, use
+> A VPN do plugin está em beta para Windows x64 e Linux x64, e os instaladores automáticos
+> entregam essa linha beta — no Windows e no Linux. O instalador avisa que o sistema ainda não
+> é estável e que cada bug reportado vira uma issue. Para instalação manual e configuração, use
 > [`goLiveBypass/COMO-INSTALAR.md`](goLiveBypass/COMO-INSTALAR.md).
 
 <p align="center">
@@ -271,7 +272,7 @@ Ao abrir, ele mostra o que encontrou e um menu:
     [0] Sair
 ```
 
-Escolhendo instalar, ele pergunta três coisas: **onde** (usar o mod que já está aí ou baixar outro), **como sair do Brasil** (proxy gratuita testada sozinha, Tor local, ou uma proxy sua) e **por quanto tempo** (permanente, ou temporário — que desfaz a injeção quando você fechar o Discord).
+Escolhendo instalar, ele pergunta duas coisas: **onde** (usar o mod que já está aí ou baixar outro) e **por quanto tempo** (permanente, ou temporário — que desfaz a injeção quando você fechar o Discord). A saída para fora do Brasil não é mais escolhida aqui: a conta Proton é configurada dentro do plugin, na primeira ativação.
 
 **Pelo PowerShell:**
 
@@ -311,7 +312,10 @@ Outros modos:
 ./golivebypass-installer.sh --restore             # remove o plugin e desfaz a injeção
 ```
 
-O instalador **baixa o plugin direto deste repositório** em vez de carregar uma cópia embutida, então nunca instala uma versão defasada. Ele nunca mexe no `app.asar`: quem injeta é o instalador oficial do Equicord/Vencord.
+O instalador **baixa o pacote da release** (o mesmo `goLiveBypass-vencord.zip` que o updater do
+plugin usa) e confere o **SHA-256** publicado antes de extrair — não copia arquivos soltos da
+branch `main`, que pode estar atrás da tag. Ele nunca mexe no `app.asar`: quem injeta é o
+instalador oficial do Equicord/Vencord.
 
 O instalador já deixa o plugin **ativado e configurado**. Depois que ele terminar, feche o Discord pela bandeja e abra de novo: é isso.
 
