@@ -40,7 +40,9 @@ test("o polling do overlay ignora respostas stale e erros após desmontagem", ()
   assert.match(block, /const statusRequest = readPluginUpdateStatus\(\)/);
   assert.match(block, /pluginUpdateStatusMatchesPolicy\(next, selectedUpdatePolicy\)/);
   assert.match(block, /const next = await statusRequest;\n\s+if \(!isRequestCurrent\(\)\) return null;\n\s+if \(!pluginUpdateStatusMatchesPolicy\(next, selectedUpdatePolicy\)\) return null;\n\s+setStatus\(next\)/);
-  assert.match(block, /if \(isRequestCurrent\(\)\) logger\.error\("Falha ao consultar o estado do updater do plugin"/);
+  // A guarda pode vir como `if (isRequestCurrent()) logger.error(...)` ou com o corpo em
+  // bloco; o que importa e' o log de erro so acontecer na requisicao ainda corrente.
+  assert.match(block, /isRequestCurrent\(\)\)[\s\S]{0,60}logger\.error\("Falha ao consultar o estado do updater do plugin"/);
   assert.match(source, /schedulePluginUpdateStatusObservation[\s\S]*?const statusRequest = readPluginUpdateStatus\(\)/);
   assert.match(source, /pluginUpdateStatusMatchesRendererPolicy\(status\)/);
 });
@@ -126,7 +128,10 @@ test("validação customizada tem deadline, cancelamento lógico e libera o onbo
   assert.match(block, /cancelActiveOptimization\(\);\n\s+setRequestId\(null\)/);
   assert.match(block, /customMode \? "Validação cancelada\. Você pode tentar novamente\."/);
   assert.match(block, /setBusy\(false\)/);
-  assert.match(block, /text: "Cancelar validação", variant: "danger"/);
+  // O rotulo de cancelamento vem de um ternario (customMode) e o variant tem `as const`;
+  // prender a concatenacao exata quebrava a cada ajuste sem indicar defeito.
+  assert.match(block, /text: customMode \? "Cancelar validação" : "Cancelar otimização"/);
+  assert.match(block, /variant: "danger" as const/);
   assert.doesNotMatch(block, /customMode[\s\S]*?text: "Validando…"[\s\S]*?disabled: true/);
   assert.match(block, /const isOptimizationCurrent = \(\) => !disposedRef\.current && attempt === optimizationAttemptRef\.current/);
   assert.match(block, /optimizationStatusRequestRef\.current\+\+;\n\s+clearInterval\(timer\)/);

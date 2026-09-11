@@ -120,7 +120,9 @@ caminho — ele segue pausado.
 
 Para usar o modo Proton, informe o usuário e a senha na seção da VPN. O CAPTCHA, quando
 solicitado, abre em uma janela isolada; a sessão fica na pasta privada indicada acima e
-é protegida pelo armazenamento seguro do Electron. Senhas e códigos não entram em logs.
+é protegida pelo armazenamento seguro do Electron. Em máquinas sem esse armazenamento
+(sem Secret Service/libsecret no Linux), a sessão não é gravada: ela vale só enquanto o
+Discord estiver aberto e o painel avisa disso antes do login. Senhas e códigos não entram em logs.
 Para um perfil próprio, escolha **Arquivo WireGuard personalizado** e informe o caminho do
 `.conf`; o plugin copia o perfil para sua pasta privada, remove DNS do perfil e isola somente
 o executável do Discord e o `Update.exe` da instalação atual (ou o cliente dentro da namespace Linux).

@@ -12,7 +12,7 @@ import path from "path";
 import { StringDecoder } from "string_decoder";
 import { gunzipSync } from "zlib";
 
-import { normalizeProtonUsername, protonUsernamesMatch, safeDiagnosticDetail } from "./vpn-types";
+import { normalizeProtonUsername, protonUsernamesMatch, safeDiagnosticDetail, type ProtonSessionStorage } from "./vpn-types";
 
 export type ProtonLoginErrorCode =
     | "INVALID_CREDENTIALS"
@@ -47,6 +47,8 @@ export interface ProtonLoginResult {
     error?: string;
     retryable?: boolean;
     captchaUrl?: string;
+    /** `false` quando a máquina não guarda a sessão: ela vale só nesta execução. */
+    persisted?: boolean;
 }
 
 export type ProtonPlanStatus = "free" | "premium" | "unknown";
@@ -1049,26 +1051,84 @@ function decryptProtonSession(envelopeRaw: string): string {
     }
 }
 
-function commitEncryptedSessionFromPlaintext(dataDir: string, plainTextStagingFile: string): boolean {
-    let stagingEnvelope: string | undefined;
+// Sessão guardada apenas na memória deste processo.
+//
+// Algumas máquinas não têm armazenamento seguro utilizável: o Secret Service/
+// libsecret não responde, o keyring está bloqueado ou o backend não é
+// selecionado, e o Electron responde `isEncryptionAvailable() === false`. Antes
+// disso o login era recusado por inteiro nessas máquinas -- o usuário não
+// entrava nem com a senha correta. Agora a sessão autenticada vive só na
+// memória deste processo: nada em texto claro fica no disco (o helper recebe
+// uma cópia 0600 por operação, removida em `finally`) e a sessão deixa de valer
+// quando o Discord reinicia, o que a UI avisa antes do login.
+const inMemoryProtonSessions = new Map<string, string>();
+
+export function protonSessionStorageMode(): ProtonSessionStorage {
+    if (process.platform !== "linux") return "file";
+    return isSafeStorageAvailable() ? "safe-storage" : "memory-only";
+}
+
+function rememberProtonSession(dataDir: string, plainText: string): void {
+    inMemoryProtonSessions.set(dataDirKey(dataDir), plainText);
+}
+
+function forgetProtonSession(dataDir: string): void {
+    inMemoryProtonSessions.delete(dataDirKey(dataDir));
+}
+
+function readRememberedProtonSession(dataDir: string): string | undefined {
+    return inMemoryProtonSessions.get(dataDirKey(dataDir));
+}
+
+function isUsableSessionFile(file: string): boolean {
+    try {
+        const info = fs.lstatSync(file);
+        return info.isFile() && !info.isSymbolicLink() && info.size > 0;
+    } catch { return false; }
+}
+
+// Estado da sessão disponível para operar agora. `unreadable` é o arquivo
+// cifrado que existe mas não pode ser aberto nesta execução (keyring ausente
+// ou trocado) -- distinto de `none`, em que não há nada guardado.
+type ProtonSessionAvailability = "memory" | "encrypted" | "plain" | "unreadable" | "none";
+
+function protonSessionAvailability(dataDir: string): ProtonSessionAvailability {
+    if (readRememberedProtonSession(dataDir) !== undefined) return "memory";
+    const exists = isUsableSessionFile(protonSessionFile(dataDir));
+    if (process.platform !== "linux") return exists ? "plain" : "none";
+    if (!isSafeStorageAvailable()) return exists ? "unreadable" : "none";
+    return exists ? "encrypted" : "none";
+}
+
+function writePrivateFileSync(target: string, content: string): void {
     let fd: number | undefined;
     try {
-        const info = fs.lstatSync(plainTextStagingFile);
-        if (!info.isFile() || info.isSymbolicLink() || info.size <= 0) return false;
+        fd = fs.openSync(target, "wx", 0o600);
+        if (process.platform !== "win32") {
+            try { fs.chmodSync(target, 0o600); } catch {}
+        }
+        fs.writeFileSync(fd, content, "utf8");
+        try { fs.fsyncSync(fd); } catch {}
+        fs.closeSync(fd);
+        fd = undefined;
+    } catch (error) {
+        if (fd !== undefined) {
+            try { fs.closeSync(fd); } catch {}
+        }
+        try { fs.rmSync(target, { force: true }); } catch {}
+        throw error;
+    }
+}
+
+function commitEncryptedSessionFromPlaintext(dataDir: string, plainTextStagingFile: string): boolean {
+    let stagingEnvelope: string | undefined;
+    try {
+        if (!isUsableSessionFile(plainTextStagingFile)) return false;
         const plainText = fs.readFileSync(plainTextStagingFile, "utf8");
         const envelopeJson = encryptProtonSession(plainText);
         const target = protonSessionFile(dataDir);
         stagingEnvelope = temporaryProtonSessionFile(dataDir);
-
-        fd = fs.openSync(stagingEnvelope, "wx", 0o600);
-        if (process.platform !== "win32") {
-            try { fs.chmodSync(stagingEnvelope, 0o600); } catch {}
-        }
-        fs.writeFileSync(fd, envelopeJson, "utf8");
-        try { fs.fsyncSync(fd); } catch {}
-        fs.closeSync(fd);
-        fd = undefined;
-
+        writePrivateFileSync(stagingEnvelope, envelopeJson);
         fs.renameSync(stagingEnvelope, target);
         stagingEnvelope = undefined;
         if (process.platform !== "win32") {
@@ -1079,13 +1139,79 @@ function commitEncryptedSessionFromPlaintext(dataDir: string, plainTextStagingFi
     } catch {
         return false;
     } finally {
-        if (fd !== undefined) {
-            try { fs.closeSync(fd); } catch {}
-        }
         if (stagingEnvelope !== undefined) {
             try { fs.rmSync(stagingEnvelope, { force: true }); } catch {}
         }
     }
+}
+
+// Materializa a sessão em memória numa cópia 0600 só para esta operação. Se o
+// helper renovar o token, a memória é atualizada em vez do disco.
+async function withMaterializedProtonSessionPlain<T>(
+    dataDir: string,
+    plainText: string,
+    operation: (tempFile: string, commitIfUpdated: () => void) => Promise<T>,
+): Promise<T> {
+    const tempFile = temporaryProtonSessionFile(dataDir);
+    writePrivateFileSync(tempFile, plainText);
+    const commitIfUpdated = () => {
+        try {
+            if (!fs.existsSync(tempFile)) return;
+            const updated = fs.readFileSync(tempFile, "utf8");
+            if (updated && updated.trim() && updated !== plainText) rememberProtonSession(dataDir, updated);
+        } catch {}
+    };
+    try {
+        return await operation(tempFile, commitIfUpdated);
+    } finally {
+        try { fs.rmSync(tempFile, { force: true }); } catch {}
+    }
+}
+
+function withMaterializedProtonSessionPlainSync<T>(
+    dataDir: string,
+    plainText: string,
+    operation: (tempFile: string) => T,
+): T {
+    const tempFile = temporaryProtonSessionFile(dataDir);
+    writePrivateFileSync(tempFile, plainText);
+    try {
+        return operation(tempFile);
+    } finally {
+        try { fs.rmSync(tempFile, { force: true }); } catch {}
+    }
+}
+
+// Resolve a origem da sessão para a operação pedida. Todos os caminhos entregam
+// ao helper apenas um arquivo regular 0600.
+async function withProtonSession<T>(
+    dataDir: string,
+    availability: ProtonSessionAvailability,
+    operation: (sessionFile: string, commitIfUpdated: () => void) => Promise<T>,
+): Promise<T> {
+    if (availability === "memory") return withMaterializedProtonSessionPlain(dataDir, readRememberedProtonSession(dataDir) ?? "", operation);
+    if (availability === "encrypted") return withMaterializedProtonSession(dataDir, operation);
+    if (availability === "plain") return operation(protonSessionFile(dataDir), () => {});
+    throw new Error("Sessão Proton não encontrada.");
+}
+
+// Grava a sessão recém-autenticada. Sem armazenamento seguro no Linux nada em
+// texto claro vai para o disco: a sessão fica na memória e o retorno é `false`
+// para a UI avisar que ela vale só nesta execução. Falha de escrita também cai
+// na memória -- o usuário não perde o login por causa do disco.
+function persistProtonSession(dataDir: string, stagingFile: string, plainText: string): boolean {
+    if (process.platform === "linux") {
+        if (!isSafeStorageAvailable()) {
+            rememberProtonSession(dataDir, plainText);
+            return false;
+        }
+        if (commitEncryptedSessionFromPlaintext(dataDir, stagingFile)) return true;
+        rememberProtonSession(dataDir, plainText);
+        return false;
+    }
+    if (commitProtonSessionFile(stagingFile, protonSessionFile(dataDir))) return true;
+    rememberProtonSession(dataDir, plainText);
+    return false;
 }
 
 async function withMaterializedProtonSession<T>(
@@ -1093,28 +1219,13 @@ async function withMaterializedProtonSession<T>(
     operation: (tempFile: string, commitIfUpdated: () => void) => Promise<T>,
 ): Promise<T> {
     const canonical = protonSessionFile(dataDir);
-    const info = fs.lstatSync(canonical);
-    if (!info.isFile() || info.isSymbolicLink() || info.size <= 0) {
+    if (!isUsableSessionFile(canonical)) {
         throw new Error("A sessão Proton armazenada não é um arquivo regular.");
     }
     const rawEnvelope = fs.readFileSync(canonical, "utf8");
     const plainText = decryptProtonSession(rawEnvelope);
     const tempFile = temporaryProtonSessionFile(dataDir);
-    let fd: number | undefined;
-    try {
-        fd = fs.openSync(tempFile, "wx", 0o600);
-        if (process.platform !== "win32") {
-            try { fs.chmodSync(tempFile, 0o600); } catch {}
-        }
-        fs.writeFileSync(fd, plainText, "utf8");
-        try { fs.fsyncSync(fd); } catch {}
-        fs.closeSync(fd);
-        fd = undefined;
-    } finally {
-        if (fd !== undefined) {
-            try { fs.closeSync(fd); } catch {}
-        }
-    }
+    writePrivateFileSync(tempFile, plainText);
 
     const commitIfUpdated = () => {
         try {
@@ -1138,29 +1249,13 @@ function withMaterializedProtonSessionSync<T>(
     operation: (tempFile: string) => T,
 ): T {
     const canonical = protonSessionFile(dataDir);
-    const info = fs.lstatSync(canonical);
-    if (!info.isFile() || info.isSymbolicLink() || info.size <= 0) {
+    if (!isUsableSessionFile(canonical)) {
         throw new Error("A sessão Proton armazenada não é um arquivo regular.");
     }
     const rawEnvelope = fs.readFileSync(canonical, "utf8");
     const plainText = decryptProtonSession(rawEnvelope);
     const tempFile = temporaryProtonSessionFile(dataDir);
-    let fd: number | undefined;
-    try {
-        fd = fs.openSync(tempFile, "wx", 0o600);
-        if (process.platform !== "win32") {
-            try { fs.chmodSync(tempFile, 0o600); } catch {}
-        }
-        fs.writeFileSync(fd, plainText, "utf8");
-        try { fs.fsyncSync(fd); } catch {}
-        fs.closeSync(fd);
-        fd = undefined;
-    } finally {
-        if (fd !== undefined) {
-            try { fs.closeSync(fd); } catch {}
-        }
-    }
-
+    writePrivateFileSync(tempFile, plainText);
     try {
         return operation(tempFile);
     } finally {
@@ -1184,35 +1279,30 @@ function commitProtonSessionFile(staging: string, target: string): boolean {
     }
 }
 
+function readSessionUsername(dataDir: string, sessionFile: string): string {
+    const executable = path.resolve(findProtonConfgenExe(dataDir));
+    const stdout = execFileSync(executable, ["-session-file", sessionFile, "-session-username", "-json"], {
+        windowsHide: true,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 5_000,
+    });
+    const value = parseConfgenJson(stdout);
+    if (value?.success !== true || typeof value.username !== "string" || value.username.length > MAX_PROTON_USERNAME_LENGTH) return "";
+    return normalizeProtonUsername(value.username);
+}
+
 export function savedSessionUsername(dataDir: string): string {
     try {
-        const canonical = protonSessionFile(dataDir);
-        if (!fs.existsSync(canonical)) return "";
-        if (process.platform === "linux") {
-            if (!isSafeStorageAvailable()) return "";
-            return withMaterializedProtonSessionSync(dataDir, tempFile => {
-                const executable = path.resolve(findProtonConfgenExe(dataDir));
-                const stdout = execFileSync(executable, ["-session-file", tempFile, "-session-username", "-json"], {
-                    windowsHide: true,
-                    encoding: "utf8",
-                    stdio: ["ignore", "pipe", "ignore"],
-                    timeout: 5_000,
-                });
-                const value = parseConfgenJson(stdout);
-                if (value?.success !== true || typeof value.username !== "string" || value.username.length > MAX_PROTON_USERNAME_LENGTH) return "";
-                return normalizeProtonUsername(value.username);
-            });
-        }
-        const executable = path.resolve(findProtonConfgenExe(dataDir));
-        const stdout = execFileSync(executable, ["-session-file", canonical, "-session-username", "-json"], {
-            windowsHide: true,
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"],
-            timeout: 5_000,
-        });
-        const value = parseConfgenJson(stdout);
-        if (value?.success !== true || typeof value.username !== "string" || value.username.length > MAX_PROTON_USERNAME_LENGTH) return "";
-        return normalizeProtonUsername(value.username);
+        const availability = protonSessionAvailability(dataDir);
+        // Arquivo cifrado que não abre nesta execução não tem usuário a devolver:
+        // o login será pedido de novo e substituirá a sessão.
+        if (availability === "none" || availability === "unreadable") return "";
+        if (availability === "memory")
+            return withMaterializedProtonSessionPlainSync(dataDir, readRememberedProtonSession(dataDir) ?? "", tempFile => readSessionUsername(dataDir, tempFile));
+        if (availability === "encrypted")
+            return withMaterializedProtonSessionSync(dataDir, tempFile => readSessionUsername(dataDir, tempFile));
+        return readSessionUsername(dataDir, protonSessionFile(dataDir));
     } catch { return ""; }
 }
 
@@ -1310,39 +1400,27 @@ export async function checkProtonSession(dataDir: string, username: string): Pro
     } catch {
         return { valid: false, code: "SESSION_PERSISTENCE", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
     }
-    if (process.platform === "linux") {
-        if (!isSafeStorageAvailable()) {
-            return { valid: false, code: "SESSION_PERSISTENCE", error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
-        }
-        const canonical = protonSessionFile(dataDir);
-        if (!fs.existsSync(canonical)) {
-            return { valid: false, code: "INVALID_SESSION", error: "Sessão Proton não encontrada." };
-        }
-        try {
-            return await withMaterializedProtonSession(dataDir, async (tempFile, commitIfUpdated) => {
-                const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", tempFile, "-check-session", "-json"], runtimeDirectory: dataDir });
-                if (result.code === 0 && result.json?.valid === true) {
-                    const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
-                    if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { valid: false, code: "UNKNOWN", error: ACCOUNT_MISMATCH_ERROR };
-                    commitIfUpdated();
-                    return { valid: true, username: returnedUsername, expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
-                }
-                const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.");
-                return { valid: false, ...failure };
-            });
-        } catch (error) {
-            return { valid: false, ...sessionCheckFailure(error) };
-        }
+    const availability = protonSessionAvailability(dataDir);
+    if (availability === "none") {
+        return { valid: false, code: "INVALID_SESSION", error: "Sessão Proton não encontrada." };
+    }
+    if (availability === "unreadable") {
+        // O arquivo existe, mas o armazenamento seguro desta execução não abre o
+        // envelope (keyring ausente ou trocado). Um login novo resolve.
+        return { valid: false, code: "SESSION_PERSISTENCE", error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
     }
     try {
-        const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", protonSessionFile(dataDir), "-check-session", "-json"], runtimeDirectory: dataDir });
-        if (result.code === 0 && result.json?.valid === true) {
-            const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
-            if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { valid: false, code: "UNKNOWN", error: ACCOUNT_MISMATCH_ERROR };
-            return { valid: true, username: returnedUsername, expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
-        }
-        const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.");
-        return { valid: false, ...failure };
+        return await withProtonSession(dataDir, availability, async (tempFile, commitIfUpdated) => {
+            const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", tempFile, "-check-session", "-json"], runtimeDirectory: dataDir });
+            if (result.code === 0 && result.json?.valid === true) {
+                const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
+                if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { valid: false, code: "UNKNOWN", error: ACCOUNT_MISMATCH_ERROR };
+                commitIfUpdated();
+                return { valid: true, username: returnedUsername, expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
+            }
+            const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.");
+            return { valid: false, ...failure };
+        });
     } catch (error) {
         return { valid: false, ...sessionCheckFailure(error) };
     }
@@ -1365,31 +1443,22 @@ export async function getProtonPlan(dataDir: string, username: string, log?: Run
     } catch {
         return { success: false, status: "unknown", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
     }
-    if (process.platform === "linux") {
-        if (!isSafeStorageAvailable()) {
-            return { success: false, status: "unknown", error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
-        }
-        const canonical = protonSessionFile(dataDir);
-        if (!fs.existsSync(canonical)) {
-            return { success: false, status: "unknown", error: "Sessão Proton não encontrada." };
-        }
-        try {
-            return await withMaterializedProtonSession(dataDir, async (tempFile, commitIfUpdated) => {
-            const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", tempFile, "-check-plan", "-json"], timeoutMs: 10_000, runtimeDirectory: dataDir, log });
-                if (result.code === 0) {
-                    commitIfUpdated();
-                    return normalizeProtonPlan(result.json);
-                }
-                return { success: false, status: "unknown", error: GENERIC_PLAN_ERROR };
-            });
-        } catch (error) {
-            log?.("warn", "falha ao consultar plano Proton", { erro: logError(error) });
-            return { success: false, status: "unknown", error: GENERIC_PLAN_ERROR };
-        }
+    const availability = protonSessionAvailability(dataDir);
+    if (availability === "none") {
+        return { success: false, status: "unknown", error: "Sessão Proton não encontrada." };
+    }
+    if (availability === "unreadable") {
+        return { success: false, status: "unknown", error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
     }
     try {
-        const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", protonSessionFile(dataDir), "-check-plan", "-json"], timeoutMs: 10_000, runtimeDirectory: dataDir, log });
-        return result.code === 0 ? normalizeProtonPlan(result.json) : { success: false, status: "unknown", error: GENERIC_PLAN_ERROR };
+        return await withProtonSession(dataDir, availability, async (tempFile, commitIfUpdated) => {
+            const result = await runConfgen({ args: ["-username", requestedUsername, "-session-file", tempFile, "-check-plan", "-json"], timeoutMs: 10_000, runtimeDirectory: dataDir, log });
+            if (result.code === 0) {
+                commitIfUpdated();
+                return normalizeProtonPlan(result.json);
+            }
+            return { success: false, status: "unknown", error: GENERIC_PLAN_ERROR };
+        });
     } catch (error) {
         log?.("warn", "falha ao consultar plano Proton", { erro: logError(error) });
         return { success: false, status: "unknown", error: GENERIC_PLAN_ERROR };
@@ -1416,9 +1485,6 @@ export async function loginProton(
         } catch {
             return { success: false, code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", error: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
         }
-        if (process.platform === "linux" && !isSafeStorageAvailable()) {
-            return { success: false, code: "SESSION_PERSISTENCE", message: SAFE_STORAGE_UNAVAILABLE_MESSAGE, error: SAFE_STORAGE_UNAVAILABLE_MESSAGE, retryable: false };
-        }
         const controller = new AbortController();
         activeProtonLogins.set(key, controller);
         const stagedSessionFile = temporaryProtonSessionFile(dataDir);
@@ -1443,16 +1509,19 @@ export async function loginProton(
             if (result.code === 0 && result.json?.success === true) {
                 const returnedUsername = typeof result.json.username === "string" ? normalizeProtonUsername(result.json.username) : "";
                 if (!returnedUsername || returnedUsername.length > MAX_PROTON_USERNAME_LENGTH || !usernamesMatch(requestedUsername, returnedUsername)) return { success: false, code: "UNKNOWN", message: ACCOUNT_MISMATCH_ERROR, error: ACCOUNT_MISMATCH_ERROR, retryable: false };
-                if (process.platform === "linux") {
-                    if (!commitEncryptedSessionFromPlaintext(dataDir, stagedSessionFile)) {
-                        return { success: false, code: "SESSION_PERSISTENCE", message: "A autenticação terminou, mas não foi possível salvar a sessão Proton.", error: "A autenticação terminou, mas não foi possível salvar a sessão Proton.", retryable: true };
-                    }
-                } else {
-                    if (!commitProtonSessionFile(stagedSessionFile, protonSessionFile(dataDir))) {
-                        return { success: false, code: "SESSION_PERSISTENCE", message: "A autenticação terminou, mas não foi possível salvar a sessão Proton.", error: "A autenticação terminou, mas não foi possível salvar a sessão Proton.", retryable: true };
-                    }
+                if (!isUsableSessionFile(stagedSessionFile)) {
+                    return { success: false, code: "SESSION_PERSISTENCE", message: "A autenticação terminou, mas a sessão Proton não pôde ser preparada.", error: "A autenticação terminou, mas a sessão Proton não pôde ser preparada.", retryable: true };
                 }
-                return { success: true, username: returnedUsername, message: "Autenticação Proton concluída." };
+                const stagedPlainText = fs.readFileSync(stagedSessionFile, "utf8");
+                const persisted = persistProtonSession(dataDir, stagedSessionFile, stagedPlainText);
+                return {
+                    success: true,
+                    username: returnedUsername,
+                    persisted,
+                    message: persisted
+                        ? "Autenticação Proton concluída."
+                        : "Autenticação Proton concluída; esta máquina não guarda a sessão, então ela vale só nesta execução do Discord.",
+                };
             }
             const detail = [result.json?.code, result.json?.error, result.stderr, result.stdout].filter(value => typeof value === "string" && value.length > 0).join(" ");
             const classified = classifyProtonError(detail);
@@ -1495,14 +1564,12 @@ export async function generateOptimalProtonConfig(
     } catch {
         return { success: false, error: "Não foi possível acessar o armazenamento local da sessão Proton." };
     }
-    if (process.platform === "linux") {
-        if (!isSafeStorageAvailable()) {
-            return { success: false, error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
-        }
-        const canonical = protonSessionFile(dataDir);
-        if (!fs.existsSync(canonical)) {
-            return { success: false, error: "Sessão Proton não encontrada." };
-        }
+    const availability = protonSessionAvailability(dataDir);
+    if (availability === "none") {
+        return { success: false, error: "Sessão Proton não encontrada." };
+    }
+    if (availability === "unreadable") {
+        return { success: false, error: SAFE_STORAGE_UNAVAILABLE_MESSAGE };
     }
 
     const runGeneration = async (sessionFileToUse: string, commitIfUpdated?: () => void): Promise<ProtonOptimizationResult> => {
@@ -1554,10 +1621,7 @@ export async function generateOptimalProtonConfig(
         }
     };
 
-    if (process.platform === "linux") {
-        return withMaterializedProtonSession(dataDir, (tempFile, commitIfUpdated) => runGeneration(tempFile, commitIfUpdated));
-    }
-    return runGeneration(protonSessionFile(dataDir));
+    return withProtonSession(dataDir, availability, (tempFile, commitIfUpdated) => runGeneration(tempFile, commitIfUpdated));
 }
 
 export async function runIsolatedSpeedSelection(
@@ -1580,6 +1644,7 @@ export async function runIsolatedSpeedSelection(
 
 export function removeProtonSession(dataDir: string): boolean {
     cancelProtonLogin(dataDir);
+    forgetProtonSession(dataDir);
     return deleteSessionArtifacts(dataDir);
 }
 

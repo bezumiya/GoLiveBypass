@@ -33,7 +33,9 @@ test("indicador de onboarding continua legível em larguras estreitas", () => {
     const steps = sliceBetween("function OnboardingSteps", "function PluginOnboardingModal");
 
     assert.match(steps, /flexWrap: "wrap"/);
-    assert.match(steps, /flex: "1 1 160px"/);
+    // A largura minima e' ajustavel; o que o teste protege e' o indicador continuar
+    // quebrando linha em terminal estreito em vez de estourar a largura.
+    assert.match(steps, /flex: "1 1 \d+px"/);
     assert.match(steps, /role="list"/);
     assert.match(steps, /role="listitem"/);
     assert.match(steps, /aria-current=\{index === active \? "step" : undefined\}/);
@@ -71,11 +73,17 @@ test("overlays de atualização são dispensáveis sem remover toast global de o
 test("Card usa apenas variantes suportadas pelo componente do Discord", () => {
     const settings = sliceBetween("function PluginUpdateSettings", "const settings");
 
-    assert.match(settings, /const cardVariant: "normal" \| "info" \| "warning" \| "success"/);
-    assert.match(settings, /busy\s*\n\s*\? "info"/);
-    assert.match(settings, /: "normal";/);
-    assert.match(settings, /role="status" aria-live="polite" aria-busy=\{busy\}/);
+    // O invariante e' nao passar ao Card variante que o componente do Discord nao conhece.
+    // A fonte ja usou uma var `cardVariant` derivada de `busy` (hoje o Card vai sem variante,
+    // usando defaultPadding); prender aquela forma exata quebrava sem indicar defeito.
+    assert.match(settings, /<Card\b/);
     assert.doesNotMatch(settings, /"brand"|"primary"/);
+    // Se voltar a escolher variante, ela precisa estar no conjunto suportado.
+    const usos = [...settings.matchAll(/variant=\{?([^}\n]+)\}?/g)].map(m => m[1]);
+    for (const uso of usos) {
+        assert.match(uso, /"(normal|info|warning|success)"|cardVariant/);
+    }
+    assert.match(settings, /role="status" aria-live="polite" aria-busy=\{busy\}/);
 });
 
 test("reinício só é alcançado pela ação explícita do overlay", () => {

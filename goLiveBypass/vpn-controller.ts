@@ -528,6 +528,48 @@ export class PluginVpnController {
         return this.serial(() => this.startInternal(true));
     }
 
+    // Ativação automática do boot (processo principal e renderer). Não é a ativação do usuário:
+    // só adota um túnel já ativo e NUNCA relança o Discord nem limpa a suspensão de autostart.
+    //
+    // Por que não subir o túnel aqui: sem o relaunch o Discord ficaria fora do filtro por
+    // aplicativo e o usuário acharia que estava protegido sem estar (o README promete o
+    // reinício na ativação). E por que não relançar: repetir o relaunch a cada boot transforma
+    // um relaunch não confirmado em ciclo infinito -- cada processo novo relançava o Discord,
+    // nascia outro, e a VPN ficava parando/começando a cada ~30s (relato: o Discord não
+    // fechava nem reabria, só saía pelo gerenciador de tarefas). O caminho explícito continua
+    // em `enable()`, chamado pelo botão do painel.
+    public enableAutomatic(): Promise<VpnOperationResult> {
+        if (this.automaticBootSuppressed) {
+            this.options.log("warn", "ativação automática suspensa após relaunch não confirmado");
+            return Promise.resolve({
+                success: false,
+                suppressed: true,
+                state: this.state,
+                error: "A ativação automática está suspensa porque o último relaunch não confirmou a VPN. Ative pelo painel.",
+            });
+        }
+        return this.serial(() => this.adoptActiveTunnelAtBoot());
+    }
+
+    private async adoptActiveTunnelAtBoot(): Promise<VpnOperationResult> {
+        const owner = this.readOwner();
+        const inspection = isLinux() ? linux.inspectLinuxNetworkSync(owner) : windows.inspectWireSock(this.serviceConfigPath);
+        if (!inspection.reliable) {
+            this.options.log("warn", "ativação automática não confirmou o estado da VPN; ativação explícita segue disponível", { mode: "diagnostic-only" });
+            return { success: false, suppressed: true, state: this.state, error: "Não foi possível confirmar o estado da VPN no boot." };
+        }
+        if (!inspection.active || !inspection.owned) {
+            this.options.log("info", "VPN não foi ativada automaticamente porque o túnel não está ativo; ative pelo painel");
+            return {
+                success: false,
+                suppressed: true,
+                state: this.state,
+                error: "A VPN não está ativa. Ative pelo painel do GoLiveBypass para aplicar a rota.",
+            };
+        }
+        return this.startInternal(false);
+    }
+
     public shutdown(relaunch = true): Promise<VpnOperationResult> {
         this.cancelProtonLogin();
         this.optimization?.controller.abort();
@@ -838,6 +880,16 @@ export class PluginVpnController {
                 this.startWatchdog();
                 this.startDiagnostics("adoption");
             }
+            // Diferente do modo automático (adota o boot em enableAutomatic), um pedido
+            // explícito precisa deixar ESTE Discord dentro da rota: as conexões abertas
+            // antes de o filtro por aplicativo existir continuam fora do túnel, e o
+            // onboarding concluído promete ativação + reinício. Sem o relaunch o clique
+            // "ativava" em silêncio e nada mudava no cliente.
+            if (relaunch && !this.restarting) {
+                if (!await this.requestRelaunch())
+                    return { success: false, state: this.state, error: "A VPN já estava ativa, mas não consegui reiniciar o Discord para aplicar a rota." };
+                return { success: true, state: "restart_pending", message: "VPN já estava ativa; o Discord será reiniciado para aplicar a rota." };
+            }
             return { success: true, state: "active", message: this.statusMessage() };
         }
         if (existing.active && !existing.owned) {
@@ -907,7 +959,13 @@ export class PluginVpnController {
         } catch (error) {
             this.stopWatchdog();
             const currentInspection = windows.inspectWireSock(this.serviceConfigPath);
-            if (started || (currentInspection.reliable && currentInspection.active)) {
+            // Só derruba o túnel que ESTA tentativa criou. Quando o erro é o conflito com
+            // outra instância viva (claimActiveOwnership recusa o lock alheio), o WireSock
+            // ativo é dela: derrubá-lo aqui destruía uma VPN que estava funcionando e ainda
+            // alimentava o ciclo de reinício -- o boot seguinte via a rede caída, reativava
+            // com relaunch e o Discord reiniciava de novo.
+            const ownsCurrentTunnel = sameOwnership(this.ownershipToken, this.readOwner());
+            if (started || (currentInspection.reliable && currentInspection.active && currentInspection.owned && ownsCurrentTunnel)) {
                 const cleanup = await windows.stopOwnedWireSock(this.serviceConfigPath, this.options.log);
                 if (!cleanup.stopped) {
                     await this.removeProbe({ sweep: false });

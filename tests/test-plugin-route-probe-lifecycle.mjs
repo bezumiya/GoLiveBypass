@@ -20,7 +20,12 @@ test("cleanup aguarda diagnósticos e varre somente a raiz do plugin", () => {
 });
 
 test("erro de ativação e parada limpam antes de liberar ownership", () => {
-    const failureBlock = startInternal.slice(startInternal.lastIndexOf("        } catch (error)"));
+    // O slice de startInternal terminava em stopInternal, mas englobava TAMBEM o
+    // startLinuxInternal (que vem antes), entao lastIndexOf("        } catch (error)") achava
+    // o catch da versao Linux e o teste olhava a funcao errada. Isola no catch do caminho
+    // Windows, que e' o que este teste afirma cobrir.
+    const janelaWindows = startInternal.slice(0, startInternal.indexOf("private async startLinuxInternal"));
+    const failureBlock = janelaWindows.slice(janelaWindows.lastIndexOf("        } catch (error)"));
     assert.match(failureBlock, /await this\.removeProbe\(/);
     assert.ok(failureBlock.indexOf("await this.removeProbe(") < failureBlock.indexOf("this.releaseOwnership(owner)"));
     assert.match(stopInternal, /await this\.removeProbe\(/);

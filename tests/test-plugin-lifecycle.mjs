@@ -6,7 +6,10 @@ const source = readFileSync(new URL("../goLiveBypass/index.tsx", import.meta.url
 const nativeSource = readFileSync(new URL("../goLiveBypass/native.ts", import.meta.url), "utf8");
 
 test("start e stop toleram bridge nativa ausente", () => {
-    assert.match(source, /if \(!onboardingRequired && typeof Native\?\.enable === "function"\)/);
+    // O caminho automático usa `enableAutomatic` (adota túnel existente, nunca relança). Bridge
+    // antiga sem essa exportação não ativa sozinha -- o painel continua ativando.
+    assert.match(source, /typeof Native\?\.enableAutomatic === "function"/);
+    assert.match(source, /if \(!onboardingRequired && typeof Native\?\.enableAutomatic === "function"\)/);
     assert.match(source, /if \(typeof Native\?\.shutdown === "function"\)/);
     assert.match(source, /if \(typeof Native\?\.logFromRenderer === "function"\)/);
     assert.match(source, /typeof Native\?\.cancelProtonOptimization !== "function"/);
@@ -51,7 +54,9 @@ test("start e stop invalidam callbacks assíncronos de uma geração anterior", 
     assert.match(source, /function schedulePluginUpdateStatusObservation\(lifecycleGeneration: number\)/);
     assert.match(source, /const statusRequest = readPluginUpdateStatus\(\);\n\s+if \(!statusRequest\) \{[\s\S]*?statusRequest\.then\(status => \{\n\s+if \(lifecycleGeneration !== pluginLifecycleGeneration\) return;/);
     assert.match(startBlock, /schedulePluginUpdateStatusObservation\(lifecycleGeneration\)/);
-    assert.match(startBlock, /Native\.enable\(\)\.then\(result => \{\n\s+if \(!isLifecycleCurrent\(\)\) return;/);
+    assert.match(startBlock, /if \(!onboardingRequired && typeof Native\?\.enableAutomatic === "function"\)/);
+    assert.match(startBlock, /Native\.enableAutomatic\(\)\.then\(result => \{\n\s+if \(!isLifecycleCurrent\(\)\) return;/);
+    assert.match(startBlock, /result\?\.success === false && !result\.suppressed/);
     assert.match(source, /if \(lifecycleGeneration === pluginLifecycleGeneration\) logger\.error\("Falha ao consultar atualização pendente do plugin"/);
     assert.match(startBlock, /if \(isLifecycleCurrent\(\)\) logger\.error\("Failed to reach the desktop process"/);
     assert.match(stopBlock, /pluginLifecycleGeneration\+\+/);

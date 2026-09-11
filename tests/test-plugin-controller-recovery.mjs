@@ -40,8 +40,13 @@ test("o retry não altera a regra de não assumir WireSock externo", () => {
 
 test("diagnóstico assíncrono ignora resposta depois de stop ou troca de geração", () => {
     assert.match(source, /private diagnosticGeneration = 0;/);
-    assert.match(source, /const diagnosticGeneration = this\.diagnosticGeneration;/);
-    assert.match(source, /const isCurrent = \(\) => this\.diagnosticGeneration === diagnosticGeneration/);
+    // A leitura da geracao pode ser `const x = this.diagnosticGeneration` ou
+    // `const { diagnosticGeneration } = this` -- o comportamento e' o mesmo, e prender a
+    // forma exata so quebrava a suite em refatoracao de sintaxe. O que importa e' capturar
+    // ANTES e comparar depois, junto com a guarda de estado.
+    const captura = source.slice(source.indexOf("private startDiagnostics"), source.indexOf("private startDiagnostics") + 400);
+    assert.match(captura, /diagnosticGeneration/);
+    assert.match(captura, /const isCurrent = \(\) => this\.diagnosticGeneration === diagnosticGeneration/);
     assert.match(source, /if \(!isCurrent\(\)\) return;/);
     assert.match(source, /this\.diagnosticGeneration\+\+;/);
 });

@@ -18,6 +18,12 @@ export const VPN_SERVICE_NAMES = ["wiresock-client-service", "wiresock-pro-clien
 
 export type VpnMode = "proton" | "custom";
 export type VpnPlatform = "windows" | "linux" | "unsupported";
+/**
+ * Onde a sessão Proton fica: `safe-storage` (armazenamento seguro do sistema),
+ * `file` (arquivo privado, como no Windows) ou `memory-only` (nada em disco: a
+ * sessão vale só enquanto o Discord estiver aberto).
+ */
+export type ProtonSessionStorage = "safe-storage" | "file" | "memory-only";
 export type VpnState =
     | "inactive"
     | "authorizing"
@@ -84,6 +90,7 @@ export interface VpnStatus {
     externalReason: string | null;
     lastDiagnostic: VpnDiagnostic | null;
     message: string;
+    sessionStorage?: ProtonSessionStorage;
 }
 
 export type VpnOperationCode =
@@ -97,6 +104,8 @@ export interface VpnOperationResult {
     code?: VpnOperationCode;
     message?: string;
     error?: string;
+    /** Ativação automática do boot recusada de propósito: não é falha para o usuário. */
+    suppressed?: boolean;
 }
 
 export interface WireGuardConfigValidation {

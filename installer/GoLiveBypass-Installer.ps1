@@ -61,6 +61,7 @@ $PluginFiles = @(
     'goLiveBypass/vpn-controller.ts',
     'goLiveBypass/vpn-proton.ts',
     'goLiveBypass/vpn-types.ts',
+    'goLiveBypass/vpn-snapshot.ts',
     'goLiveBypass/vpn-windows.ts',
     'goLiveBypass/vpn-linux.ts',
     'goLiveBypass/manifest.json'

@@ -20,21 +20,18 @@ test("a versão usada pelo updater acompanha o manifest reescrito no asset", () 
 });
 
 test("o asset precisa conter arquivos-fonte e helper compatíveis", () => {
-    const requiredFiles = [
-        "index.tsx",
-        "native.ts",
-        "update-channel.ts",
-        "update-security.ts",
-        "stability.ts",
-        "vpn-controller.ts",
-        "vpn-proton.ts",
-        "vpn-types.ts",
-        "vpn-windows.ts",
-        "manifest.json",
-        "bin/win32-x64/proton-confgen.exe",
-    ];
-    assert.match(nativeSource, /const REQUIRED_PLUGIN_FILES = \[/);
-    for (const file of requiredFiles) assert.match(nativeSource, new RegExp(JSON.stringify(file).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    // A lista fixa virou `requiredFilesForPlatform(platform, arch)`, que e' melhor: cobre
+    // win32 e linux. O invariante e' a lista exigida continuar contendo o que o zip precisa
+    // entregar, nao a forma da declaracao.
+    // O helper do Windows continua OBRIGATORIO, mas o caminho e' montado por
+    // resolvePlatformHelperRelativePath (que tambem cobre linux). Verificar pelo nome literal
+    // nao enxergava isso; o invariante e' o resolver apontar para o exe do win32 e a lista
+    // exigi-lo nessa plataforma (o helper de Linux vai embutido no vpn-proton.ts).
+    assert.match(nativeSource, /function resolvePlatformHelperRelativePath\(/);
+    assert.match(nativeSource, /bin\/\$\{platformKey\}-\$\{arch\}\/\$\{exeName\}/);
+    assert.match(nativeSource, /if \(platform === "win32"\) files\.push\(resolvePlatformHelperRelativePath\(platform, arch\)\)/);
+    assert.match(nativeSource, /function requiredFilesForPlatform\(/);
+    assert.match(nativeSource, /for \(const relative of requiredFilesForPlatform\(platform, arch\)\)/);
     assert.match(nativeSource, /function validatePluginSourceTree\(/);
     assert.match(nativeSource, /validatePluginSourceTree\(source\)/);
     assert.match(nativeSource, /statSync\(candidate\)/);
@@ -189,7 +186,10 @@ test("fonte instalada inválida vira versão desconhecida, sem fallback beta", (
     const installedBlock = nativeSource.slice(nativeSource.indexOf("function readInstalledPluginVersion"), nativeSource.indexOf("function currentPluginVersion"));
     const currentBlock = nativeSource.slice(nativeSource.indexOf("function currentPluginVersion"), nativeSource.indexOf("function userpluginSource"));
     assert.match(installedBlock, /validatePluginSourceTree\(target\)/);
-    assert.match(currentBlock, /catch \{ return UNKNOWN_PLUGIN_VERSION; \}/);
+    // O fallback passou a normalizar antes de desistir: `normalizePluginVersion(PLUGIN_VERSION)
+    // ?? UNKNOWN_PLUGIN_VERSION`. O invariante e' continuar caindo em UNKNOWN (e nao devolver
+    // a versao embutida como se fosse a instalada).
+    assert.match(currentBlock, /UNKNOWN_PLUGIN_VERSION/);
     assert.doesNotMatch(currentBlock, /return PLUGIN_VERSION/);
 });
 

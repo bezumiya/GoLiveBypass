@@ -18,8 +18,10 @@ import { pathToFileURL } from "node:url";
 
 const isolatedModuleRoot = mkdtempSync(path.join(os.tmpdir(), "golive-route-probe-module-"));
 const windowsSource = readFileSync(new URL("../goLiveBypass/vpn-windows.ts", import.meta.url), "utf8")
-    .replace('from "./vpn-types"', 'from "./vpn-types.ts"');
+    .replace('from "./vpn-types"', 'from "./vpn-types.ts"')
+    .replace('from "./vpn-snapshot"', 'from "./vpn-snapshot.ts"');
 copyFileSync(new URL("../goLiveBypass/vpn-types.ts", import.meta.url), path.join(isolatedModuleRoot, "vpn-types.ts"));
+copyFileSync(new URL("../goLiveBypass/vpn-snapshot.ts", import.meta.url), path.join(isolatedModuleRoot, "vpn-snapshot.ts"));
 writeFileSync(path.join(isolatedModuleRoot, "vpn-windows.ts"), windowsSource, "utf8");
 const {
     copyRouteProbe,

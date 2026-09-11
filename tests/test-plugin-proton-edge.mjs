@@ -9,7 +9,9 @@ const repository = fileURLToPath(new URL("..", import.meta.url));
 const workspace = mkdtempSync(path.join(os.tmpdir(), "golive-plugin-proton-edge-"));
 const moduleSource = readFileSync(path.join(repository, "goLiveBypass", "vpn-proton.ts"), "utf8");
 const isolatedSource = moduleSource.replaceAll("__dirname", "process.cwd()").replace(
-    'import { normalizeProtonUsername, protonUsernamesMatch, safeDiagnosticDetail } from "./vpn-types";',
+    // Casa a linha inteira: o módulo real pode importar outros tipos de
+    // "./vpn-types" (a lista já mudou uma vez e prendia o harness, não o código).
+    /import \{[^}]*\} from "\.\/vpn-types";/,
     `function safeDiagnosticDetail(value, max = 300) {
     return String(value instanceof Error ? value.message : value ?? "")
         .replace(/[\\r\\n\\t]+/g, " ")
@@ -210,9 +212,14 @@ try {
     });
 
     await test("resposta de sessão de outra conta não é aceita", async () => {
-        process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ valid: true, username: "mallory@example.com" });
+        // A checagem só roda o helper quando existe sessão: entra primeiro para
+        // que a resposta de outra conta seja realmente confrontada.
+        process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ success: true, username: "alice@example.com" });
         process.env.GOLIVE_FAKE_EXIT_CODE = "0";
-        const result = await proton.checkProtonSession(path.join(workspace, "session-mismatch"), "alice@example.com");
+        const dataDir = path.join(workspace, "session-mismatch");
+        assert.equal((await proton.loginProton(dataDir, "alice@example.com", "senha-local")).success, true);
+        process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ valid: true, username: "mallory@example.com" });
+        const result = await proton.checkProtonSession(dataDir, "alice@example.com");
         assert.equal(result.valid, false);
         assert.equal(result.code, "UNKNOWN");
         assert.doesNotMatch(JSON.stringify(result), /mallory/);
@@ -289,7 +296,69 @@ try {
             "start:new@example.com",
             "end:new@example.com",
         ]);
-        assert.equal(JSON.parse(readFileSync(path.join(dataDir, "proton-session.json"), "utf8")).username, "new@example.com");
+        const canonicalFile = path.join(dataDir, "proton-session.json");
+        if (existsSync(canonicalFile)) {
+            assert.equal(JSON.parse(readFileSync(canonicalFile, "utf8")).username, "new@example.com");
+        } else {
+            // Linux sem armazenamento seguro: a sessão vive só na memória deste
+            // processo e nenhum artefato em texto claro pode sobrar na pasta.
+            assert.deepEqual(readdirSync(dataDir).filter(name => /^\.protonvpn-session-/.test(name)), []);
+        }
+        delete process.env.GOLIVE_FAKE_QUEUE;
+    });
+
+    await test("sem armazenamento seguro o login funciona e a sessão fica só na memória", async () => {
+        delete globalThis.__GOLIVE_SAFE_STORAGE__;
+        const dataDir = path.join(workspace, "memory-only-login");
+        process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ success: true, username: "alice@example.com" });
+        process.env.GOLIVE_FAKE_EXIT_CODE = "0";
+        const login = await proton.loginProton(dataDir, "alice@example.com", "senha-local");
+        assert.equal(login.success, true, JSON.stringify(login));
+        assert.equal(login.persisted, false, JSON.stringify(login));
+        assert.match(login.message ?? "", /nesta execução/i);
+        // Nada em texto claro no disco: nem a sessão canônica, nem temporários.
+        assert.equal(existsSync(path.join(dataDir, "proton-session.json")), false);
+        assert.deepEqual(readdirSync(dataDir), []);
+
+        // A sessão em memória sustenta as operações seguintes...
+        process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ valid: true, username: "alice@example.com" });
+        const checked = await proton.checkProtonSession(dataDir, "alice@example.com");
+        assert.equal(checked.valid, true, JSON.stringify(checked));
+        // ...e a cópia temporária do helper não fica para trás.
+        assert.deepEqual(readdirSync(dataDir), []);
+
+        // Sair esquece a sessão em memória.
+        assert.equal(proton.removeProtonSession(dataDir), true);
+        const after = await proton.checkProtonSession(dataDir, "alice@example.com");
+        assert.equal(after.valid, false);
+        assert.equal(after.code, "INVALID_SESSION");
+    });
+
+    await test("com armazenamento seguro a sessão é gravada cifrada e reaberta", async () => {
+        const prefix = "cifrado:";
+        globalThis.__GOLIVE_SAFE_STORAGE__ = {
+            isEncryptionAvailable: () => true,
+            encryptString: plain => Buffer.from(prefix + Buffer.from(plain, "utf8").toString("base64"), "utf8"),
+            decryptString: buffer => Buffer.from(String(buffer).slice(prefix.length), "base64").toString("utf8"),
+        };
+        try {
+            const dataDir = path.join(workspace, "safe-storage-login");
+            process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ success: true, username: "alice@example.com" });
+            process.env.GOLIVE_FAKE_EXIT_CODE = "0";
+            const login = await proton.loginProton(dataDir, "alice@example.com", "senha-local");
+            assert.equal(login.success, true, JSON.stringify(login));
+            if (process.platform === "linux") {
+                assert.equal(login.persisted, true);
+                const raw = readFileSync(path.join(dataDir, "proton-session.json"), "utf8");
+                assert.equal(JSON.parse(raw).format, "electron-safe-storage");
+                assert.doesNotMatch(raw, /alice@example\.com/);
+                process.env.GOLIVE_FAKE_STDOUT = JSON.stringify({ valid: true, username: "alice@example.com" });
+                const checked = await proton.checkProtonSession(dataDir, "alice@example.com");
+                assert.equal(checked.valid, true, JSON.stringify(checked));
+            }
+        } finally {
+            delete globalThis.__GOLIVE_SAFE_STORAGE__;
+        }
     });
 } finally {
     for (const [name, value] of previousEnvironment) {

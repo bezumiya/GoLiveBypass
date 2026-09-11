@@ -157,7 +157,7 @@ else
     bad "pasta $target NAO foi criada"
 fi
 # Validar arquivos extraidos
-for f in index.tsx native.ts update-channel.ts update-security.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json bin/win32-x64/proton-confgen.exe; do
+for f in index.tsx native.ts update-channel.ts update-security.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-snapshot.ts vpn-windows.ts manifest.json bin/win32-x64/proton-confgen.exe; do
     if [ -f "$target/$f" ]; then
         ok "extraido $f ($(stat -c%s "$target/$f" 2>/dev/null || stat -f%z "$target/$f") bytes)"
     else
@@ -251,7 +251,7 @@ step "7. Hash dos arquivos extraidos confere com o repo"
 # Re-extrair para ter o estado novo
 rm -rf "$target"
 extract_zip_py "$ASSET" "$USERPLUGINS" >/dev/null
-for f in index.tsx native.ts update-channel.ts update-security.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-windows.ts manifest.json bin/win32-x64/proton-confgen.exe; do
+for f in index.tsx native.ts update-channel.ts update-security.ts stability.ts vpn-controller.ts vpn-proton.ts vpn-types.ts vpn-snapshot.ts vpn-windows.ts manifest.json bin/win32-x64/proton-confgen.exe; do
     source_file="$REPO/goLiveBypass/$f"
     [ -f "$source_file" ] || source_file="$PLUGIN_SOURCE/$f"
     if [ -f "$target/$f" ] && [ -f "$source_file" ]; then

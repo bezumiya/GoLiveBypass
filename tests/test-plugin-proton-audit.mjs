@@ -19,7 +19,9 @@ const workspace = mkdtempSync(path.join(os.tmpdir(), "golive-plugin-proton-audit
 const originalCwd = process.cwd();
 const moduleSource = readFileSync(path.join(repository, "goLiveBypass", "vpn-proton.ts"), "utf8");
 const isolatedSource = moduleSource.replaceAll("__dirname", "process.cwd()").replace(
-    'import { normalizeProtonUsername, protonUsernamesMatch, safeDiagnosticDetail } from "./vpn-types";',
+    // Casa a linha inteira: o módulo real pode importar outros tipos de
+    // "./vpn-types" (a lista já mudou uma vez e prendia o harness, não o código).
+    /import \{[^}]*\} from "\.\/vpn-types";/,
     `function safeDiagnosticDetail(value, max = 300) {
     return String(value instanceof Error ? value.message : value ?? "")
         .replace(/[\\r\\n\\t]+/g, " ")

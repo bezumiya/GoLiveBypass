@@ -20,6 +20,7 @@ import {
     VPN_SERVICE_NAMES,
     type WireGuardConfigValidation,
 } from "./vpn-types";
+import { parseWireSockSnapshot, type WireSockSnapshot } from "./vpn-snapshot";
 
 export const WIRESOCK_VERSION = "3.4.8.1";
 const WIRESOCK_DOWNLOAD = "https://wiresock.net/_api/download-release.php?product=wiresock-secure-connect-sdk&platform=x64&version=3.4.8.1&channel=winget";
@@ -120,10 +121,7 @@ function serviceRunningFromCim(name: string): boolean | null {
     }
 }
 
-function serviceRunning(name: string): boolean | null {
-    if (!isWindows()) return false;
-    const cimState = serviceRunningFromCim(name);
-    if (cimState !== null) return cimState;
+function serviceRunningFromSc(name: string): boolean | null {
     try {
         const output = execFileSync("sc.exe", ["query", name], {
             encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
@@ -135,6 +133,13 @@ function serviceRunning(name: string): boolean | null {
     } catch (error) {
         return Number((error as { status?: unknown })?.status) === 1060 ? false : null;
     }
+}
+
+function serviceRunning(name: string): boolean | null {
+    if (!isWindows()) return false;
+    const cimState = serviceRunningFromCim(name);
+    if (cimState !== null) return cimState;
+    return serviceRunningFromSc(name);
 }
 
 function serviceCommand(name: string): string | null {
@@ -149,15 +154,30 @@ function serviceCommand(name: string): string | null {
     }
 }
 
-function serviceProcessId(name: string): number | null {
-    if (!isWindows() || serviceRunning(name) !== true) return null;
+// A inspeção completa custava ~1,6s NA THREAD PRINCIPAL do Discord (medido na VM: sete
+// spawns de PowerShell, seis deles Get-CimInstance, ~220ms só para criar cada processo), e o
+// watchdog repete isso a cada 15s -- e até seis vezes seguidas quando confirma uma leitura
+// transitória. Com a janela do Discord chegando a não responder por mais de 1s nas amostras
+// de recon4, uma única sessão do PowerShell passou a responder tudo o que a inspeção precisa
+// (estado, PathName e ProcessId dos serviços do WireSock + a lista de processos próprios).
+// A checagem de slot e a limpeza seguem com os helpers baratos (sc.exe).
+function readWireSockSnapshot(names: readonly string[]): WireSockSnapshot | null {
+    const list = names.map(name => quotePowerShell(name)).join(",");
+    const script = `$names=@(${list})
+$svc=@()
+foreach($n in $names){
+  $s=Get-CimInstance Win32_Service -Filter "Name='$n'" -ErrorAction SilentlyContinue
+  if($s){ $svc += [PSCustomObject]@{ name=$s.Name; state=$s.State; command=$s.PathName; processId=[int]$s.ProcessId } }
+  else { $svc += [PSCustomObject]@{ name=$n; state='Missing'; command=$null; processId=0 } }
+}
+$procs=@(Get-CimInstance Win32_Process -Filter "Name='wiresock-client.exe'" -ErrorAction SilentlyContinue | ForEach-Object { [PSCustomObject]@{ pid=[int]$_.ProcessId; commandLine=$_.CommandLine } })
+[PSCustomObject]@{ services=$svc; processes=$procs } | ConvertTo-Json -Compress -Depth 4`;
     try {
-        const script = `$s=Get-CimInstance Win32_Service -Filter "Name='${name.replace(/'/g, "''")}'"; if($s){$s.ProcessId}`;
         const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-            encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
+            encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 8000,
         }).trim();
-        const pid = Number(output);
-        return Number.isInteger(pid) && pid > 0 ? pid : null;
+        if (!output) return null;
+        return parseWireSockSnapshot(output, names);
     } catch {
         return null;
     }
@@ -177,42 +197,34 @@ function assertPluginServiceSlot(configPath: string): void {
         throw new Error("O serviço WireSock já está registrado com outro perfil (possivelmente pela GUI ou por outro plugin). Desative-o antes de usar a VPN do plugin.");
 }
 
-function runningWireSockProcesses(): Array<{ pid: number; commandLine: string | null }> | null {
-    if (!isWindows()) return [];
-    try {
-        const script = "$p=Get-CimInstance Win32_Process -Filter \"Name='wiresock-client.exe'\" | ForEach-Object { [PSCustomObject]@{pid=[int]$_.ProcessId; commandLine=$_.CommandLine} }; $p | ConvertTo-Json -Compress";
-        const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-            encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
-        }).trim();
-        if (!output) return [];
-        const parsed = JSON.parse(output) as unknown;
-        const rows = Array.isArray(parsed) ? parsed : [parsed];
-        return rows.flatMap(row => {
-            if (row === null || typeof row !== "object") return [];
-            const value = row as { pid?: unknown; commandLine?: unknown };
-            const pid = Number(value.pid);
-            if (!Number.isInteger(pid) || pid <= 0) return [];
-            return [{ pid, commandLine: typeof value.commandLine === "string" ? value.commandLine : null }];
-        });
-    } catch {
-        return null;
-    }
-}
-
 export function inspectWireSock(configPath?: string): WireSockInspection {
     if (!isWindows()) return { active: false, owned: false, reliable: true, services: [], processIds: [], reason: null };
-    const serviceStates = VPN_SERVICE_NAMES.map(name => ({ name, running: serviceRunning(name) }));
-    const services = serviceStates.filter(service => service.running === true).map(service => service.name);
-    const processSnapshot = runningWireSockProcesses();
-    const processes = processSnapshot ?? [];
-    const processIds = processes.map(process => process.pid);
-    const serviceStateReliable = serviceStates.every(service => service.running !== null);
-    const reliable = serviceStateReliable && processSnapshot !== null;
-    if (!reliable) {
+    const snapshot = readWireSockSnapshot(VPN_SERVICE_NAMES);
+    if (!snapshot) {
+        // Sem o snapshot a leitura já é desconhecida de qualquer forma: os processos não têm
+        // fonte barata. O sc.exe (~9ms, sem PowerShell) ainda diz quais serviços estão de pé,
+        // o que é tudo o que a mensagem de estado desconhecido reporta.
         return {
             // Uma leitura incompleta não prova nem presença nem ausência. Não
             // a exponha como ativa, pois isso faria o controller classificá-la
             // incorretamente como um WireSock externo.
+            active: false,
+            owned: false,
+            reliable: false,
+            services: VPN_SERVICE_NAMES.filter(name => serviceRunningFromSc(name) === true),
+            processIds: [],
+            reason: UNKNOWN_WIRESOCK_STATE,
+        };
+    }
+    const serviceStates = snapshot.services.map(service => ({ name: service.name, running: service.running }));
+    const services = serviceStates.filter(service => service.running === true).map(service => service.name);
+    const processes = snapshot.processes;
+    const processIds = processes.map(process => process.pid);
+    // A lista de processos veio do mesmo snapshot: se ela não existisse, `readWireSockSnapshot`
+    // teria devolvido null. Sobra saber se cada nome de serviço respondeu um estado definitivo.
+    const reliable = serviceStates.every(service => service.running !== null);
+    if (!reliable) {
+        return {
             active: false,
             owned: false,
             reliable: false,
@@ -225,8 +237,8 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
     if (!active) return { active: false, owned: false, reliable: true, services: [], processIds: [], reason: null };
     if (!configPath) return { active, owned: false, reliable: true, services, processIds, reason: "WireSock já está ativo fora do perfil do plugin." };
 
-    const commands = new Map(services.map(name => [name, serviceCommand(name)]));
-    if ([...commands.values()].some(command => command === null)) {
+    const commandOf = (name: string) => snapshot.services.find(service => service.name === name)?.command ?? null;
+    if (services.some(name => commandOf(name) === null)) {
         return {
             active: false,
             owned: false,
@@ -236,8 +248,11 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
             reason: "Não foi possível confirmar o perfil do serviço WireSock; estado desconhecido.",
         };
     }
-    const ownService = services.filter(name => containsConfig(commands.get(name) ?? null, configPath));
-    const ownServiceProcessIds = new Set(ownService.map(serviceProcessId).filter((pid): pid is number => pid !== null));
+    const ownService = services.filter(name => containsConfig(commandOf(name), configPath));
+    const ownServiceProcessIds = new Set(snapshot.services
+        .filter(service => service.running === true && containsConfig(service.command, configPath))
+        .map(service => service.processId)
+        .filter((pid): pid is number => pid !== null));
     const processOwnershipReliable = processes.every(process =>
         (typeof process.commandLine === "string" && process.commandLine.trim().length > 0)
         || ownServiceProcessIds.has(process.pid));
@@ -253,7 +268,7 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
     }
     const ownProcess = processes.filter(process =>
         containsConfig(process.commandLine, configPath) || ownServiceProcessIds.has(process.pid));
-    const allServicesOwned = services.every(name => containsConfig(commands.get(name) ?? null, configPath));
+    const allServicesOwned = services.every(name => containsConfig(commandOf(name), configPath));
     const allProcessesOwned = processes.every(process =>
         containsConfig(process.commandLine, configPath) || ownServiceProcessIds.has(process.pid));
     if ((ownService.length > 0 || ownProcess.length > 0) && allServicesOwned && allProcessesOwned)

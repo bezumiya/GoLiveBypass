@@ -7,15 +7,30 @@ const inspection = source.slice(source.indexOf("export function inspectWireSock"
 const serviceSlot = source.slice(source.indexOf("function assertPluginServiceSlot"), source.indexOf("function runningWireSockProcesses"));
 
 test("falha ao consultar serviço ou processo vira estado desconhecido", () => {
-    assert.match(source, /function serviceRunning\(name: string\): boolean \| null/);
-    assert.match(source, /function runningWireSockProcesses\(\): Array<.*> \| null/);
-    assert.match(inspection, /const reliable = serviceStateReliable && processSnapshot !== null/);
+    assert.match(source, /function readWireSockSnapshot\(names: readonly string\[\]\): WireSockSnapshot \| null/);
+    assert.match(inspection, /const snapshot = readWireSockSnapshot\(VPN_SERVICE_NAMES\)/);
+    assert.match(inspection, /const reliable = serviceStates\.every\(service => service\.running !== null\)/);
     assert.match(inspection, /if \(!reliable\) \{/);
     assert.match(inspection, /active: false/);
     assert.match(inspection, /owned: false/);
     assert.match(inspection, /reliable: false/);
     assert.match(inspection, /estado desconhecido/);
     assert.doesNotMatch(inspection, /active: true,[\s\S]*reliable: false/);
+});
+
+test("a inspeção periódica faz uma única consulta ao Windows", () => {
+    // Custo medido na VM (recon4): a inspeção completa levava ~1,6s NA THREAD PRINCIPAL do
+    // Discord -- sete spawns de PowerShell, ~220ms só para criar cada processo -- e o watchdog
+    // repete isso a cada 15s. As consultas por campo (serviceRunning/serviceCommand/
+    // serviceProcessId) voltam a inflar esse custo se alguém as reintroduzir aqui.
+    assert.match(inspection, /readWireSockSnapshot\(VPN_SERVICE_NAMES\)/);
+    assert.doesNotMatch(inspection, /serviceRunning\(/);
+    assert.doesNotMatch(inspection, /serviceCommand\(/);
+    assert.doesNotMatch(inspection, /serviceProcessId\(/);
+    // E o snapshot é uma única chamada: os serviços e os processos saem da MESMA sessão.
+    const snapshot = source.slice(source.indexOf("function readWireSockSnapshot"), source.indexOf("function assertPluginServiceSlot"));
+    assert.equal((snapshot.match(/execFileSync\(/g) ?? []).length, 1);
+    assert.match(snapshot, /services=\$svc; processes=\$procs/);
 });
 
 test("slot de serviço também bloqueia estado de serviço desconhecido", () => {

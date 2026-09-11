@@ -66,8 +66,11 @@ describe("preferências e painel do updater do plugin", () => {
     const update = blockBetween("    const update = async () =>", "    return (");
 
     expect(start).toContain("startStreamClaimWatch()");
-    expect(start).toMatch(/typeof Native\?\.enable === "function"/);
-    expect(start).toContain("Native.enable()");
+    // O caminho automático do renderer adota o túnel sem relançar (enableAutomatic); o
+    // relaunch continua reservado ao botão do painel (`Native.enable`).
+    expect(start).toMatch(/typeof Native\?\.enableAutomatic === "function"/);
+    expect(start).toContain("Native.enableAutomatic()");
+    expect(start).not.toContain("Native.enable()");
     expect(source).toContain("stopStreamClaimWatch()");
     expect(source).toMatch(/typeof Native\?\.shutdown === "function"/);
     expect(source).toContain("Native.shutdown()");
@@ -96,7 +99,9 @@ describe("preferências e painel do updater do plugin", () => {
     expect(source).toContain("CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS");
     expect(source).toContain("progressIsIndeterminate");
     expect(source).toContain("Cancelar validação");
-    expect(source).toContain("a ativação da VPN continua sendo uma ação separada no painel");
+    // Concluir a configuração deixou de prometer "ativação como ação separada": o botão
+    // final ativa o túnel e reinicia o Discord para a rota já valer.
+    expect(source).toContain("Ativar VPN e reiniciar o Discord");
     expect(source).not.toContain("app.relaunch");
     expect(source).not.toContain("app.quit");
   });

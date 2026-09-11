@@ -620,6 +620,20 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
     const complete = () => {
         settings.store.onboardingCompleted = true;
         closeModal();
+        if (typeof Native?.enable !== "function") return;
+        // Concluir a configuração precisa deixar o Discord já roteado: o túnel
+        // sobe aqui e o cliente reinicia para a rota valer sem um passo manual
+        // no painel. "Voltar" continua disponível para quem quiser reconfigurar.
+        void Promise.resolve(Native.enable()).then(result => {
+            if (result && result.success === false) {
+                showToast(
+                    `GoLiveBypass não conseguiu ativar a VPN: ${result.error || result.message || "veja o log"}`,
+                    Toasts.Type.FAILURE
+                );
+            }
+        }).catch(activationError => {
+            logger.error("Falha ao ativar a VPN após concluir a configuração", activationError);
+        });
     };
 
     const checkSession = async (value: string) => {
@@ -677,7 +691,13 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 if (savedUsername) {
                     setUsername(savedUsername);
                     const result = await checkSession(savedUsername);
-                    if (!disposed && !disposedRef.current && result?.valid) setError(null);
+                    if (!disposed && !disposedRef.current && result?.valid) {
+                        setError(null);
+                        // A sessão salva já vale: pedir email e senha de novo é
+                        // atrito puro. Vai direto para a rota, que é o passo que
+                        // falta; "Voltar" reabre a conta para quem quiser trocar.
+                        enterRoute();
+                    }
                 } else {
                     setSessionLoading(false);
                 }
@@ -745,12 +765,16 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             }
             let verified = session?.valid && typeof session.username === "string" && protonUsernamesMatch(session.username, username) ? session : null;
             if (!verified) {
-                if (session && !session.valid && session.code && session.code !== "INVALID_SESSION") {
-                    setError(session.error || protonSessionStatusTitle(session.code));
-                    return;
-                }
                 if (!password) {
-                    setError("Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
+                    // Sem senha não há o que tentar. O motivo pelo qual a sessão
+                    // guardada não serve entra na mensagem, sem chamá-la de
+                    // expirada: pode ser armazenamento local, rede ou helper.
+                    const detail = session && !session.valid && session.code && session.code !== "INVALID_SESSION"
+                        ? (session.error || protonSessionStatusTitle(session.code))
+                        : null;
+                    setError(detail
+                        ? `${detail} Informe a senha para entrar novamente.`
+                        : "Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
                     return;
                 }
                 const loginRequestId = `plugin-onboarding-login-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -945,7 +969,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             ? { text: customMode ? "Cancelar validação" : "Cancelar otimização", variant: "danger" as const, onClick: cancelOptimization }
             : { text: progress?.phase === "completed" ? "Continuar" : customMode ? "Validar rota real" : "Preparar rota real", variant: "primary" as const, onClick: progress?.phase === "completed" ? () => setPage("ready") : () => void optimizeRoute() },
     ] : [
-        { text: "Concluir configuração", variant: "primary" as const, onClick: complete },
+        { text: "Ativar VPN e reiniciar o Discord", variant: "primary" as const, onClick: complete },
     ];
     const pageHeading = page === "account"
         ? customMode ? "1. Configure sua rota WireGuard" : "1. Conecte sua conta ProtonVPN"
@@ -987,6 +1011,11 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                     ) : (
                         <>
                             <Paragraph>A sessão é validada e fica somente no armazenamento protegido do plugin. Senhas e códigos nunca são exibidos no diagnóstico.</Paragraph>
+                            {vpnStatus?.sessionStorage === "memory-only" && (
+                                <Paragraph role="note" aria-live="polite">
+                                    <strong>Esta máquina não guarda a sessão:</strong> o armazenamento seguro do sistema (Secret Service/libsecret) não está disponível. Você entra normalmente, mas a sessão vale só enquanto o Discord estiver aberto e o login será pedido de novo depois de reiniciá-lo — nada é gravado em texto claro no disco.
+                                </Paragraph>
+                            )}
                             {vpnStatus?.platform === "unsupported" && (
                                 <Paragraph role="alert" aria-live="polite">
                                     <strong>Plataforma não suportada:</strong> {vpnStatus.externalReason || "O transporte WireGuard exige Windows x64 ou Linux x64."}
@@ -1035,7 +1064,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                         {progress && progress.total > 0 && <Paragraph>{progress.tested} de {progress.total} servidores testados · {progress.succeeded} aprovados</Paragraph>}
                         {progress?.server && <Paragraph>Servidor selecionado: {progress.server}</Paragraph>}
                         {typeof progress?.pingMs === "number" && <Paragraph>Latência medida: {progress.pingMs} ms</Paragraph>}
-                        {progress?.phase === "completed" && <Paragraph>{customMode ? "A rota WireGuard foi validada com sucesso; a ativação da VPN continua sendo uma ação separada no painel." : "A rota real foi selecionada e salva; a ativação da VPN continua sendo uma ação separada no painel."}</Paragraph>}
+                        {progress?.phase === "completed" && <Paragraph>{customMode ? "A rota WireGuard foi validada com sucesso. Clique em Continuar e, ao concluir, o plugin ativa o túnel e reinicia o Discord." : "A rota real foi selecionada e salva. Clique em Continuar e, ao concluir, o plugin ativa o túnel e reinicia o Discord."}</Paragraph>}
                     </div>
                     {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
                     </div>
@@ -1043,7 +1072,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                 {page === "ready" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                     <div style={onboardingBoxStyle} role="status" aria-live="polite">
-                        <Paragraph>{customMode ? "A configuração WireGuard personalizada passou na validação com sucesso. Ative o túnel quando quiser pelo painel da VPN nas configurações do plugin. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica." : "A rota Proton real foi preparada com sucesso. Ative o túnel quando quiser pelo painel da VPN nas configurações do plugin. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica."}</Paragraph>
+                        <Paragraph>{customMode ? "A configuração WireGuard personalizada passou na validação com sucesso. Ao concluir, o plugin ativa o túnel e reinicia o Discord para a rota já valer. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica." : "A rota Proton real foi preparada com sucesso. Ao concluir, o plugin ativa o túnel e reinicia o Discord para a rota já valer. Probes de rede são diagnósticos de conectividade e não comprovam localização geográfica."}</Paragraph>
                         {vpnStatus?.platform === "linux" && (
                             <Paragraph>No Linux, a ativação moverá o cliente Discord para um network namespace exclusivo, solicitando elevação (pkexec) se necessário e relançando o cliente.</Paragraph>
                         )}
@@ -1447,6 +1476,7 @@ interface PluginVpnStatus {
     externalReason: string | null;
     lastDiagnostic: { detail: string; ok?: boolean; kind?: string } | null;
     message: string;
+    sessionStorage?: "safe-storage" | "file" | "memory-only";
 }
 
 function VpnPanel() {
@@ -1534,7 +1564,12 @@ function VpnPanel() {
             }
             setPassword("");
             setTwoFactorCode("");
-            showToast("Sessão Proton salva na pasta privada do plugin.", Toasts.Type.SUCCESS);
+            showToast(
+                result.persisted === false
+                    ? "Sessão Proton ativa nesta execução do Discord; esta máquina não guarda a sessão e o login será pedido de novo ao reiniciar."
+                    : "Sessão Proton salva na pasta privada do plugin.",
+                Toasts.Type.SUCCESS
+            );
             await refresh();
         } catch (error) {
             if (mountedRef.current) showToast(`Login Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
@@ -1570,7 +1605,12 @@ function VpnPanel() {
             });
             if (!mountedRef.current) return;
             if (!result.success) throw new Error(result.error || "Não foi possível otimizar a rota Proton.");
-            showToast("Rota Proton preparada; nenhuma reinicialização do Discord foi solicitada.", Toasts.Type.SUCCESS);
+            showToast(
+                status?.active
+                    ? "Rota Proton preparada e aplicada na sessão ativa do Discord."
+                    : "Rota Proton preparada. Use \"Ativar agora\" para aplicar a rota; o Discord será reiniciado.",
+                Toasts.Type.SUCCESS
+            );
             await refresh();
         } catch (error) {
             if (mountedRef.current) showToast(`Otimização Proton: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
@@ -1667,6 +1707,11 @@ function VpnPanel() {
                     <Paragraph>{typeof customConfigPath === "string" && customConfigPath.trim() ? "Modo personalizado: arquivo WireGuard configurado; nenhum login Proton é necessário." : "Modo personalizado: configure um arquivo WireGuard nas opções do plugin para continuar."}</Paragraph>
                 ) : (
                     <>
+                        {status?.sessionStorage === "memory-only" && (
+                            <Paragraph role="note" aria-live="polite">
+                                <strong>Esta máquina não guarda a sessão:</strong> o armazenamento seguro do sistema (Secret Service/libsecret) não está disponível, então a sessão Proton vale só enquanto o Discord estiver aberto e o login será pedido de novo depois de reiniciá-lo.
+                            </Paragraph>
+                        )}
                         <TextInput value={username} onChange={value => { usernameRef.current = value; setUsername(value); }} placeholder="Usuário ProtonVPN" aria-label="Usuário ProtonVPN" disabled={busy || optimizing} />
                         <TextInput value={password} onChange={setPassword} placeholder="Senha ProtonVPN" aria-label="Senha ProtonVPN" type="password" disabled={busy || optimizing} />
                         <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" aria-label="Código 2FA (se solicitado)" disabled={busy || optimizing} />
@@ -2113,10 +2158,16 @@ export default definePlugin({
 
         // A primeira execução precisa deixar o usuário atravessar as três etapas do
         // assistente antes de qualquer ativação que possa relançar o Discord.
-        if (!onboardingRequired && typeof Native?.enable === "function") {
-            void Native.enable().then(result => {
+        //
+        // Este caminho é automático (start do renderer), então usa `enableAutomatic`: ele não
+        // relança o Discord e respeita a suspensão de autostart. O relaunch ficou reservado
+        // para o botão do painel (`Native.enable`), porque repeti-lo a cada boot transformava
+        // um relaunch não confirmado num ciclo infinito de reinícios do Discord. Bridge antiga
+        // sem `enableAutomatic` simplesmente não ativa sozinha -- o painel continua ativando.
+        if (!onboardingRequired && typeof Native?.enableAutomatic === "function") {
+            void Native.enableAutomatic().then(result => {
                 if (!isLifecycleCurrent()) return;
-                if (result?.success === false)
+                if (result?.success === false && !result.suppressed)
                     showToast(`GoLiveBypass não conseguiu ativar a VPN: ${result.error || result.message || "veja o log"}`, Toasts.Type.FAILURE);
             }).catch(error => {
                 if (isLifecycleCurrent()) logger.error("Failed to reach the desktop process", error);

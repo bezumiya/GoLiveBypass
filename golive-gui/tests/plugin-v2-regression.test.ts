@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:child_process", () => ({ execFile: vi.fn(), execFileSync: vi.fn() }));
+
+import { inspectWireSock } from "../../goLiveBypass/vpn-windows";
 
 const windowsSource = fs.readFileSync(
     path.resolve(__dirname, "../../goLiveBypass/vpn-windows.ts"),
@@ -11,6 +16,72 @@ const controllerSource = fs.readFileSync(
     "utf8",
 );
 
+const PLUGIN_CONFIG = String.raw`C:\Users\teste\AppData\Local\GoLiveBypass\plugin-vpn\wiresock-discord.conf`;
+const SERVICE_COMMAND = `"C:\\Program Files\\WireSock Secure Connect\\wiresock-client.exe" -config "${PLUGIN_CONFIG}" -allowed-apps "discord.exe"`;
+
+// A leitura inteira do WireSock vem de uma única resposta do PowerShell; os testes de
+// comportamento alimentam essa resposta e observam o veredito público. O CIM devolve o
+// serviço ausente como uma linha própria ("Missing"), como faz o script de inspeção.
+function snapshot(processes: Array<{ pid: number; commandLine: string | null }>, clientProcessId: number | null = null): string {
+    return JSON.stringify({
+        services: [
+            { name: "wiresock-client-service", state: clientProcessId === null ? "Missing" : "Running", command: clientProcessId === null ? null : SERVICE_COMMAND, processId: clientProcessId ?? 0 },
+            { name: "wiresock-pro-client-service", state: "Missing", command: null, processId: 0 },
+        ],
+        processes,
+    });
+}
+
+describe("atribuição do WireSock pelo PID do serviço próprio", () => {
+    const originalPlatform = process.platform;
+    const windows = (value: string) => vi.mocked(execFileSync).mockReturnValue(value as never);
+
+    beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    });
+
+    afterEach(() => {
+        Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+        vi.mocked(execFileSync).mockReset();
+    });
+
+    it("reconhece como próprio o processo sem linha de comando cujo PID é do serviço do plugin", () => {
+        windows(snapshot([{ pid: 4242, commandLine: null }], 4242));
+        expect(inspectWireSock(PLUGIN_CONFIG)).toMatchObject({
+            active: true,
+            owned: true,
+            reliable: true,
+            services: ["wiresock-client-service"],
+            processIds: [4242],
+        });
+    });
+
+    it("não adivinha a origem de um processo sem linha de comando que não pertence ao serviço do plugin", () => {
+        windows(snapshot([{ pid: 4242, commandLine: null }, { pid: 9999, commandLine: null }], 4242));
+        expect(inspectWireSock(PLUGIN_CONFIG)).toMatchObject({
+            active: false,
+            owned: false,
+            reliable: false,
+            processIds: [4242, 9999],
+        });
+    });
+
+    it("sem a leitura do CIM, reporta os serviços do sc.exe sem afirmar que o túnel caiu", () => {
+        vi.mocked(execFileSync).mockImplementation(((file: string, args?: readonly string[]) => {
+            if (file === "powershell.exe") throw new Error("CIM indisponível");
+            return args?.[1] === "wiresock-client-service" ? "STATE : 4 RUNNING" : "STATE : 1 STOPPED";
+        }) as never);
+        expect(inspectWireSock(PLUGIN_CONFIG)).toMatchObject({
+            active: false,
+            owned: false,
+            reliable: false,
+            services: ["wiresock-client-service"],
+            processIds: [],
+            reason: "Não foi possível confirmar o estado do WireSock; estado desconhecido.",
+        });
+    });
+});
+
 describe("plugin v2 WireSock ownership regression", () => {
     it("does not treat a stopped legacy service registration as an active external tunnel", () => {
         expect(windowsSource).toMatch(
@@ -18,13 +89,6 @@ describe("plugin v2 WireSock ownership regression", () => {
         );
         expect(windowsSource).toContain(
             "O serviço WireSock já está registrado com outro perfil",
-        );
-    });
-
-    it("uses CIM when the Service Control Manager query is transiently unavailable", () => {
-        expect(windowsSource).toContain("function serviceRunningFromCim(name: string): boolean | null");
-        expect(windowsSource).toMatch(
-            /function serviceRunning\(name: string\): boolean \| null \{[\s\S]*?const cimState = serviceRunningFromCim\(name\);[\s\S]*?if \(cimState !== null\) return cimState;[\s\S]*?if \(\/STATE\\s\*:\\s\*\\d\+\\s\+RUNNING\/i\.test\(output\)\) return true;/,
         );
     });
 
@@ -44,14 +108,6 @@ describe("plugin v2 WireSock ownership regression", () => {
         expect(activeGuard).toBeGreaterThan(inspection);
         expect(externalGuard).toBeGreaterThan(activeGuard);
         expect(slotGuard).toBeGreaterThan(externalGuard);
-    });
-
-    it("attributes a blank-command-line process to its owned WireSock service by PID", () => {
-        expect(windowsSource).toContain("function serviceProcessId(name: string): number | null");
-        expect(windowsSource).toContain("const ownServiceProcessIds = new Set");
-        expect(windowsSource).toMatch(
-            /containsConfig\(process\.commandLine, configPath\) \|\| ownServiceProcessIds\.has\(process\.pid\)/,
-        );
     });
 
     it("confirma uma leitura inativa sem transformar o watchdog em bloqueio", () => {

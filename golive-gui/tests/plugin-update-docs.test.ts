@@ -29,13 +29,19 @@ describe("documentação das atualizações do plugin", () => {
     expect(installGuide).toContain("não altera o `app.asar`");
   });
 
-  it("registra a capacidade na seção Unreleased do changelog", () => {
-    const unreleased = changelog.match(/## \[Unreleased\][\s\S]*?(?=\n## \[|$)/)?.[0] ?? "";
-    expect(unreleased).toContain("### Atualizações do plugin Vencord/Equicord");
-    expect(unreleased).toContain("canal estável padrão");
-    expect(unreleased).toContain("beta opt-in");
-    expect(unreleased).toContain("validação SHA-256");
-    expect(unreleased).toContain("reload manual");
-    expect(unreleased).toMatch(/separada da GUI e\s+do standalone/);
+  it("registra a capacidade na seção mais recente do changelog", () => {
+    // [Unreleased] enquanto não sai release; depois do corte, o conteúdo passa
+    // para a seção da versão publicada. A seção que importa é a primeira com
+    // conteúdo, não um título fixo.
+    const newest = changelog
+      .split(/\n(?=## \[)/)
+      .filter(section => section.startsWith("## ["))
+      .find(section => section.replace(/^## \[[^\]]+\][^\n]*\n/, "").trim().length > 0) ?? "";
+    expect(newest).toContain("### Atualizações do plugin Vencord/Equicord");
+    expect(newest).toContain("canal estável padrão");
+    expect(newest).toContain("beta opt-in");
+    expect(newest).toContain("validação SHA-256");
+    expect(newest).toContain("reload manual");
+    expect(newest).toMatch(/separada da GUI e\s+do standalone/);
   });
 });

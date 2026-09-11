@@ -80,6 +80,7 @@ function requiredFilesForPlatform(platform: NodeJS.Platform = process.platform, 
         "vpn-controller.ts",
         "vpn-proton.ts",
         "vpn-types.ts",
+        "vpn-snapshot.ts",
         "vpn-windows.ts",
         "vpn-linux.ts",
         "manifest.json",
@@ -844,6 +845,10 @@ export function enable(_: IpcMainInvokeEvent) {
     return controller.enable();
 }
 
+export function enableAutomatic(_: IpcMainInvokeEvent) {
+    return controller.enableAutomatic();
+}
+
 export function shutdown(_: IpcMainInvokeEvent) {
     // Desativar o userplugin no Windows não reinicia o Discord para não interromper
     // chamadas em andamento. No Linux, contudo, um processo dentro de netns não consegue
@@ -861,7 +866,9 @@ export function restartDiscord(_: IpcMainInvokeEvent) {
 }
 
 export function getVpnStatus(_: IpcMainInvokeEvent) {
-    return controller.getStatus();
+    // O modo de armazenamento da sessão é uma propriedade da máquina, não do
+    // tunel: a UI avisa antes do login quando a sessão não poderá ser guardada.
+    return { ...controller.getStatus(), sessionStorage: proton.protonSessionStorageMode() };
 }
 
 export function getProtonOptimizationStatus(_: IpcMainInvokeEvent): PluginOptimizationStatus {
@@ -2241,8 +2248,8 @@ app.whenReady().then(async () => {
         if (controller.shouldSkipAutomaticEnable()) {
             log("warn", "VPN não foi ativada automaticamente após relaunch não confirmado");
         } else {
-            const result = await controller.enable();
-            if (!result.success) log("warn", "VPN não foi ativada no boot", { estado: result.state, erro: result.error });
+            const result = await controller.enableAutomatic();
+            if (!result.success && !result.suppressed) log("warn", "VPN não foi ativada no boot", { estado: result.state, erro: result.error });
         }
     } else if (pluginEnabled()) {
         log("info", "VPN não foi ativada no boot porque o onboarding ainda não foi concluído");
