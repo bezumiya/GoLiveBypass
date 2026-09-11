@@ -6,6 +6,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.6-beta-9] - 2026-09-11
+
+### Teste de update do plugin no fork (canal dev)
+
+- Ciclo de teste do auto-update do userplugin: a origem de update do plugin (`manifest.updater.id`, URL da API de releases e allowlist de caminhos em `update-security.ts`) aponta temporariamente para o fork `pdl-clay/GoLiveBypass`, para exercitar o ciclo beta-8 → beta-9 fora da produção.
+- Nenhuma mudança funcional no plugin além da origem de update; a beta-9 carrega o mesmo código da beta-8 (correção do login Proton sem armazenamento seguro, onboarding que ativa a VPN e reinicia o Discord, inspeção do WireSock em consulta única).
+- Esta origem dev será revertida em commit separado antes da próxima beta de produção.
+
 ## [2.0.6-beta-8] - 2026-09-11
 
 ### Plugin: login Proton parava em máquinas sem armazenamento seguro

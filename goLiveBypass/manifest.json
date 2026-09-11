@@ -14,7 +14,7 @@
   ],
   "updater": {
     "type": "github",
-    "id": "bezumiya/GoLiveBypass",
+    "id": "pdl-clay/GoLiveBypass",
     "assetName": "goLiveBypass-vencord.zip"
   }
 }
