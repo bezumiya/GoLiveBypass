@@ -110,3 +110,67 @@ O `config.yml` do OMP continua sendo a fonte dos papéis atuais. O novo provedor
 - [Command Code — documentação](https://commandcode.ai/docs)
 - [Command Code — provedor OpenAI](https://commandcode.ai/docs/provider)
 - [Command Code — modelos](https://commandcode.ai/docs/reference/cli/models)
+
+---
+
+## Revisão 2026-09-11 — provedor embutido `commandcode`
+
+A configuração acima (provedor `command-code` com `discovery: openai-models-list` e
+`api: openai-completions` para todos os ids) foi substituída. O motivo veio de uma
+sondagem direta: `POST /provider/v1/chat/completions` com `claude-fable-5` responde
+
+```
+400 unsupported_model: Model "claude-fable-5" must be called via
+/provider/v1/messages (Anthropic Messages shape).
+```
+
+O OMP já traz o provedor `commandcode` embutido, que fixa o transporte por id
+(Claude → `/provider/v1/messages`, demais → `/provider/v1/chat/completions`), aplica o
+contrato do deployment em `providers/commandcode.kdl` (efforts, preços, limites) e usa
+`skipCrossProviderReferenceFills`, evitando herdar metadados de outros hosts. O provedor
+custom herdava ladders de terceiros (ex.: Claude com `minimal..high`, Kimi/MiMo/zai com
+dial inexistente) e não servia os ids Claude.
+
+### Estado atual
+
+- `~/.omp/agent/config.yml`: papéis `default`, `smol`, `slow`, `tiny` e `vision` apontam
+  para `commandcode/<id>`; os demais papéis não mudaram.
+- `~/.omp/agent/models.yml`: apenas `providers.commandcode.apiKey` (via `jq` sobre
+  `~/.commandcode/auth.json`) e `modelOverrides` verificados contra o registro do
+  `command-code@1.53.0` instalado (`dist/cli.mjs`), que é a fonte do que o próprio CLI
+  envia. Nada de lista manual de modelos: o catálogo continua vindo de `/provider/v1/models`.
+
+Correções aplicadas (49 overrides):
+
+| Campo | Ids | Correção |
+|---|---|---|
+| `thinking.efforts` | `deepseek/deepseek-v4.1-flash` | `-` → `low,high,max` |
+| `thinking.efforts` | `MiniMaxAI/MiniMax-M3` | `-` → `low,medium,high` |
+| `thinking.efforts` | `meta/muse-spark-1.1/1.2/1.2-contributor/1.3-contributor` | `+minimal` → `low,medium,high,xhigh` |
+| `thinking.efforts` | `meta/muse-spark-1.3` | → `low,medium,high,xhigh,max` |
+| `input` | 50 ids com visão no CLI | `text` → `text,image` |
+| `contextWindow` | `gpt-5.4` 1M→400K, `Qwen/Qwen3.7-Flash` 32K→1M, `Qwen/Qwen3.7-Plus` 256K→1M, `xai/grok-4.6` 200K→500K | janela informada por `GET /provider/v1/models` |
+
+### Verificação
+
+- `omp models commandcode --json` comparado id a id com o registro do CLI: zero divergência
+  de `efforts` e de modalidades declaradas (fora da classe DeepSeek, ver limitações).
+- Corpo on-wire capturado por um stub local: `--thinking max` → `reasoning_effort: "max"`,
+  `--thinking low` → `"low"`, `--thinking minimal` → `"low"` (clamp, pois `minimal` não
+  existe no ladder).
+- Chamadas reais pelo OMP: `commandcode/deepseek/deepseek-v4.1-flash --thinking max` e
+  `commandcode/Qwen/Qwen3.8-Max-0902 --thinking high` retornam 200; `claude-sonnet-4-6`
+  chega ao wire Anthropic e devolve `403 MODEL_NOT_IN_PLAN` (gate de plano, não erro de rota).
+- Imagens aceitas pelo Provider API: `Qwen/Qwen3.8-Max`, `xai/grok-4.5` e
+  `deepseek/deepseek-v4-flash-vision-exp` respondem 200 com `image_url`; `zai-org/GLM-5.3`,
+  que o CLI declara text-only, responde 400 — a tabela de modalidades do CLI confere.
+
+### Limitações conhecidas
+
+- Ids da classe DeepSeek sem token `vision`/`ocr` (`deepseek-v4-flash`, `-flash-fast`,
+  `-v4-pro`, `v4.1-flash`) têm imagem removida no cliente pelo `classes/deepseek.kdl`;
+  `stripImageInput` não é ajustável por `models.yml`, então esses ids seguem sem visão mesmo
+  o CLI declarando `text,image` para o `v4.1-flash`.
+- `gpt-5.3-codex` permanece com 272K no OMP (regra deliberada do KDL); API e CLI informam 400K.
+- Os ids Claude e `google/gemini-3.5-flash` exigem plano Pro ou superior nesta conta
+  (`MODEL_NOT_IN_PLAN`); a correção de rota não contorna o gate.
