@@ -106,7 +106,10 @@ sh -c "
         'Discord PTB ('*) echo 'OK label ptb flatpak' ;;
         *) echo 'FAIL label ptb flatpak' ;;
     esac
-    [ \"\$(label_alvo /usr/lib/vesktop)\" = 'Vesktop (/usr/lib)' ] && echo 'OK label vesktop' || echo 'FAIL label vesktop'
+    case \"\$(label_alvo /usr/lib/vesktop)\" in
+        'Vesktop ('*) echo 'OK label vesktop' ;;
+        *) echo 'FAIL label vesktop' ;;
+    esac
     r=\$(escolher_alvos_inject '/usr/share/discord/resources' '')
     [ \"\$r\" = 'O|/usr/share/discord/resources' ] && echo 'OK 1-oficial sem pergunta' || echo \"FAIL 1-oficial: [\$r]\"
     r=\$(escolher_alvos_inject '/a/discord/resources

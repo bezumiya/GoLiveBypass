@@ -282,11 +282,25 @@ tui_mouse_off()  { printf '%b' "$TUI_MOUSE_OFF" >&2; }
 tui_hide_cursor() { printf '\033[?25l' >&2; }
 tui_show_cursor() { printf '\033[?25h' >&2; }
 
+# Corta um rotulo no limite da caixa da TUI, com ".." no fim do que ficou de fora. Sem isto um
+# rotulo maior que a largura deixava o pad negativo, ele nao era aplicado e a borda direita da
+# caixa saia no meio do texto.
+tui_corta() { # $1 = texto, $2 = largura maxima
+    local txt="$1" max="$2"
+    if [ "$max" -gt 2 ] && [ "${#txt}" -gt "$max" ]; then
+        printf '%s..' "$(printf '%s' "$txt" | cut -c 1-$((max-2)))"
+    else
+        printf '%s' "$txt"
+    fi
+    return 0
+}
+
 # Desenha uma caixa com titulo e linhas de conteudo. Cada elemento de `lines` ja vem
 # com o texto pronto (sem as bordas).
 tui_box() {
     local title="$1"; shift
-    local w=62 line txt i
+    tui_size
+    local w="$(tui_largura)" line txt i
     local top bottom
     top=""; bottom=""
     i=0; while [ "$i" -lt $((w-8)) ]; do top="${top}─"; i=$((i+1)); done
@@ -313,6 +327,18 @@ tui_size() {
         TUI_COLS=80
     fi
     if [ "$TUI_COLS" -le 20 ]; then TUI_COLS=80; fi
+    return 0
+}
+
+# Largura da caixa da TUI. Acompanha o terminal porque o seletor de alvo precisa caber
+# "cliente + onde ele mora + aviso", e as 62 colunas fixas cortavam justamente o aviso nas
+# entradas de caminho longo. Piso de 62 para nao quebrar em terminal estreito, teto de 96 para
+# nao esticar demais em monitor largo.
+tui_largura() {
+    local w=$(( ${TUI_COLS:-80} - 4 ))
+    [ "$w" -lt 62 ] && w=62
+    [ "$w" -gt 96 ] && w=96
+    printf '%s\n' "$w"
     return 0
 }
 
@@ -373,7 +399,7 @@ tui_menu() {
     tui_hide_cursor
     tui_raw_begin
     tui_size
-    local w=62
+    local w="$(tui_largura)"
     local total_rows top pad margin_col margin_row
     # total de linhas desenhadas: topo + n itens + rodape + hints(2) + 1 folga
     total_rows=$((n + 5))
@@ -428,7 +454,7 @@ tui_menu() {
 # (exige >= 1), Esc cancela.
 tui_menu_multi() {
     local title="$1"; shift
-    local n sel key i txt j pad marks marca_txt dim
+    local n sel key i txt j pad marks marca_txt dim aviso_marca aviso_txt
     n=$#
     sel=0
     marks=""
@@ -437,7 +463,7 @@ tui_menu_multi() {
     tui_hide_cursor
     tui_raw_begin
     tui_size
-    local w=62
+    local w="$(tui_largura)"
     local total_rows top margin_col margin_row r
     total_rows=$((n + 5))
     margin_col=$(( ( TUI_COLS - w ) / 2 ))
@@ -458,6 +484,9 @@ tui_menu_multi() {
             local marca antes novo
             marca="$(printf '%s' "$marks" | cut -c $((i+1)))"
             if [ "$marca" = "1" ]; then marca_txt="[x]"; dim="$TUI_FG"; else marca_txt="[ ]"; dim="$TUI_DIM2"; fi
+            # O rotulo e cortado no limite da caixa: sem isso um alvo com caminho longo
+            # empurrava a borda direita e desenhava a caixa torta.
+            txt="$(tui_corta "$txt" $((w-11)))"
             pad=""
             j=0; while [ "$j" -lt $((w-10-${#txt})) ]; do pad="${pad} "; j=$((j+1)); done
             if [ "$i" -eq "$sel" ]; then
@@ -496,7 +525,14 @@ tui_menu_multi() {
                 done
                 ;;
             enter)
-                case "$marks" in *1*) break ;; esac
+                # Enter sem nada marcado nao confirma -- mas antes disso ele nao fazia NADA e
+                # nao dizia nada, com o rodape prometendo "[Enter] confirmar". Quem apertava
+                # Enter via a tela parada e concluia que o instalador nao deixava escolher.
+                # Agora o rodape troca o aviso ate a pessoa marcar algo.
+                case "$marks" in
+                    *1*) break ;;
+                    *) aviso_marca=1 ;;
+                esac
                 ;;
             esc) sel=-1; break ;;
         esac
@@ -687,14 +723,22 @@ is_checkout() {
 # e NAO o Discord puro. O Discord ja vem com o mod embutido no cliente, e o
 # instalador de mod nao injeta neles (o EquilotlCli da "Invalid Discord install"
 # porque o binario nao eh o Discord).
+# Verdadeiro para Equibop/Vesktop/Legcord, que nao sao o Discord puro. O nome do cliente pode
+# estar no MEIO do caminho: no flatpak o alvo e .../files/bin/vesktop/resources, e no
+# ~/.local/share/vesktop ele e a propria raiz. Casar so o final do caminho deixava o Vesktop
+# de fora, e ele era oferecido como Discord oficial -- cujo pnpm inject so sabe responder
+# "Invalid Discord install". Por isso o casamento e por componente, com barra dos dois lados.
 is_parallel_install() {
-    case "$1" in
-        */vesktop|*/Vesktop|*/equibop|*/Equibop|*/legcord|*/Legcord) return 0 ;;
+    case "/$1/" in
+        */vesktop/*|*/Vesktop/*|*/equibop/*|*/Equibop/*|*/legcord/*|*/Legcord/*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-discord_resources() {
+# Busca crua: varre os caminhos conhecidos e pode repetir o MESMO diretorio por caminhos
+# diferentes (/usr/lib e /usr/lib64, quando lib64 e symlink). Os consumidores usam
+# discord_resources() logo abaixo, que ja vem deduplicado.
+discord_resources_raw() {
     local raiz sub base id
 
     base="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -791,7 +835,12 @@ discord_resources() {
     for raiz in /var/lib/flatpak/app "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app"; do
         [ -d "$raiz" ] || continue
         for id in $FLATPAK_IDS; do
-            for sub in "$raiz/$id"/current/active/files/*/resources; do
+            # files/<app>/resources e o layout do Discord; Vesktop, Equibop e Legcord poem o
+            # app em files/bin/<app>/resources. O glob do shell nao atravessa "/", entao o
+            # segundo nivel precisa ser listado: sem ele NENHUM cliente paralelo de flatpak
+            # era encontrado, e o seletor nao tinha o que o usuario tinha instalado.
+            for sub in "$raiz/$id"/current/active/files/*/resources \
+                       "$raiz/$id"/current/active/files/*/*/resources; do
                 if [ -e "$sub/app.asar" ] || [ -e "$sub/_app.asar" ]; then
                     printf '%s\n' "$sub"
                 fi
@@ -814,6 +863,41 @@ discord_resources() {
     # (EquilotlCli) NAO injeta neles - o binario nao eh o Discord e o CLI da
     # "Invalid Discord install". Filtramos no final, e criamos discord_installs()
     # e parallel_installs() separados para o resto do script usar.
+    return 0
+}
+
+# Lista de alvos sem repeticao. A ordem e a da busca crua e a primeira ocorrencia vence.
+# O dedup fica entre a busca e os consumidores para que injected_resources(), installed_mod()
+# e checkout_from_injection() tambem parem de olhar o mesmo diretorio duas vezes.
+discord_resources() {
+    discord_resources_raw | dedup_alvos
+}
+
+# Resolve symlinks para comparar caminhos que sao o MESMO diretorio. Onde /usr/lib64 e um
+# symlink para lib (Arch, Fedora), /usr/lib/equibop e /usr/lib64/equibop eram listados como
+# duas instalacoes diferentes -- o usuario via "Equibop" duas vezes e nao tinha como saber
+# que eram a mesma. Sem readlink, cai no caminho cru (pior caso: volta a duplicar).
+alvo_canonico() {
+    if have readlink; then
+        readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+# Remove da lista os caminhos que apontam para o mesmo lugar, preservando a ordem e ficando
+# com a PRIMEIRA ocorrencia (a mais "canonica" dos loops de busca).
+dedup_alvos() {
+    local vistos="" alvo real
+    while IFS= read -r alvo; do
+        [ -n "$alvo" ] || continue
+        real="$(alvo_canonico "$alvo")"
+        case "$vistos" in
+            *"|$real|"*) continue ;;
+        esac
+        vistos="$vistos|$real|"
+        printf '%s\n' "$alvo"
+    done
     return 0
 }
 
@@ -1339,19 +1423,51 @@ build_mod() {
 # build do Equicord) sobre o app.asar do cliente, com backup automatico.
 # $2 = pasta do cliente (termina em /vesktop|/equibop|/legcord, com app.asar dentro).
 # (Extrato do antigo inject_parallel: o seletor novo escolhe varios alvos.)
+# Nome do cliente a partir do caminho. Mesmo casamento por componente de is_parallel_install:
+# no flatpak o alvo e .../files/bin/<cliente>/resources e no ~/.local/share/<cliente> ele e a
+# propria raiz, entao olhar so o final do caminho nao bastava.
+nome_cliente_paralelo() {
+    case "/$1/" in
+        */equibop/*|*/Equibop/*) printf 'Equibop\n'; return 0 ;;
+        */vesktop/*|*/Vesktop/*) printf 'Vesktop\n'; return 0 ;;
+        */legcord/*|*/Legcord/*) printf 'Legcord\n'; return 0 ;;
+    esac
+    return 1
+}
+
+# O .asar que o build do mod produz para este cliente paralelo. O build do Equicord so empacota
+# equibop.asar (o cliente dele), o do Vencord so vesktop.asar (o dele) -- nenhum dos dois gera
+# o .asar do outro. Devolve 1 quando nao ha build para este par.
+asar_do_paralelo() { # $1 = cliente, $2 = mod
+    case "$1:$2" in
+        Equibop:Equicord) printf 'dist/equibop.asar\n'; return 0 ;;
+        Vesktop:Vencord)  printf 'dist/vesktop.asar\n';  return 0 ;;
+    esac
+    return 1
+}
+
+# Motivo, em uma linha, de este mod nao atender o cliente; vazio quando atende. Usado no
+# rotulo do seletor: oferecer um alvo que so pode falhar nao e escolha de verdade.
+motivo_paralelo() { # $1 = cliente, $2 = mod
+    asar_do_paralelo "$1" "$2" >/dev/null 2>&1 && return 0
+    case "$1" in
+        Legcord) printf 'Legcord nao usa build do mod' ;;
+        Equibop) printf 'precisa de um checkout Equicord' ;;
+        Vesktop) printf 'precisa de um checkout Vencord' ;;
+    esac
+    return 0
+}
+
 patch_parallel_one() {
     local root="$1" target="$2"
-    local asar="" client_name="" app_path="" mod=""
+    local asar="" client_name="" app_path="" mod="" rel=""
 
     [ -n "$target" ] || return 1
 
-    # Mapear path -> nome do cliente
-    case "$target" in
-        */equibop|*/Equibop) client_name="Equibop" ;;
-        */vesktop|*/Vesktop) client_name="Vesktop" ;;
-        */legcord|*/Legcord) client_name="Legcord" ;;
-        *) printf "  [!] Cliente paralelo desconhecido: %s\n" "$target"; return 1 ;;
-    esac
+    client_name="$(nome_cliente_paralelo "$target")" || {
+        printf "  [!] Cliente paralelo desconhecido: %s\n" "$target"
+        return 1
+    }
 
     # Equicord e Vencord sao forks DIFERENTES: o build do Equicord so empacota
     # equibop.asar (o cliente dele), o do Vencord so vesktop.asar (o dele) -- nenhum dos
@@ -1361,17 +1477,14 @@ patch_parallel_one() {
     # e a causa raiz por tras das issues #123/#130/#132/#133 no lado Windows (sempre
     # Vesktop detectado com um checkout Equicord); aqui do lado Linux o bug era o mesmo,
     # so que sem relato ainda.
-    app_path="$target/app.asar"
     mod="$(checkout_mod "$root")"
-    case "$mod:$client_name" in
-        Equicord:Equibop) asar="$root/dist/equibop.asar" ;;
-        Vencord:Vesktop) asar="$root/dist/vesktop.asar" ;;
-        *)
-            printf "  [!] %s nao e gerado por um checkout %s (Equicord builda so o Equibop, Vencord so o Vesktop; Legcord e um app a parte -- nenhum dos dois builda ele). Use um checkout do mod certo para %s, ou injete o %s pelo instalador dele mesmo.\n" \
-                "$client_name" "$mod" "$client_name" "$client_name"
-            return 1
-            ;;
-    esac
+    if ! rel="$(asar_do_paralelo "$client_name" "$mod")"; then
+        printf "  [!] %s nao e gerado por um checkout %s (Equicord builda so o Equibop, Vencord so o Vesktop; Legcord e um app a parte -- nenhum dos dois builda ele). Use um checkout do mod certo para %s, ou injete o %s pelo instalador dele mesmo.\n" \
+            "$client_name" "$mod" "$client_name" "$client_name"
+        return 1
+    fi
+    asar="$root/$rel"
+    app_path="$target/app.asar"
 
     if [ ! -f "$asar" ]; then
         printf "  [!] Build nao gerou %s. Rode 'pnpm build' em %s e tente de novo.\n" "$asar" "$root"
@@ -1446,18 +1559,29 @@ run_inject_root() {
 
 # Rótulo curto de um alvo, para o seletor. O nome vem do caminho (o installer
 # nao tem a deteccao de flavour que o standalone tem).
-label_alvo() { # $1 = resources
-    local nome
+label_alvo() { # $1 = resources (ou o diretorio que contem app.asar)
+    local nome onde
+    # Os clientes paralelos vem antes do Discord: no flatpak o caminho carrega o id do app
+    # (dev.vencord.Vesktop) e o nome da pasta, mas nenhum deles contem "discord".
     case "$1" in
         *discordptb*|*DiscordPTB*)          nome="Discord PTB" ;;
         *discordcanary*|*DiscordCanary*)    nome="Discord Canary" ;;
-        *com.discordapp.Discord*|*discord*|*Discord*) nome="Discord" ;;
         *equibop*|*Equibop*)                nome="Equibop" ;;
         *vesktop*|*Vesktop*)                nome="Vesktop" ;;
         *legcord*|*Legcord*)                nome="Legcord" ;;
+        *discord*|*Discord*)                nome="Discord" ;;
         *)                                  nome="$(basename "$(dirname "$1")")" ;;
     esac
-    printf '%s (%s)' "$nome" "$(dirname "$1")"
+    # Onde ele mora, em uma linha curta. O deploy do flatpak tem um caminho enorme
+    # (app/<id>/<arch>/<branch>/active/files/bin/<app>) e o pai de um alvo que ja E a raiz da
+    # instalacao (~/.local/share/vesktop) nao diz nada -- os dois apareciam como
+    # "Equibop (/home/pdl/.local/share)" e nao dava para distinguir.
+    case "$1" in
+        */flatpak/app/*) onde="flatpak" ;;
+        */resources)     onde="$(dirname "$1")" ;;
+        *)               onde="$1" ;;
+    esac
+    printf '%s (%s)' "$nome" "$onde"
 }
 
 # parse_selecao <entrada> <total> → imprime os indices escolhidos, um por linha.
@@ -1487,14 +1611,27 @@ parse_selecao() {
     printf '%s\n' "$res"
 }
 
-# escolher_alvos_inject <oficiais> <paralelos> → imprime os alvos escolhidos no
+# Imprime, na ordem, o alvo de cada indice (1..N) escolhido. `alvos` e a lista completa no
+# formato "TIPO|caminho", uma por linha. O alvo vem daqui, e nao dos rotulos da tela: era esse
+# deslize que fazia o seletor devolver "Equibop (flatpak)" no lugar do caminho real, e a
+# injecao falhava depois de o usuario escolher.
+alvos_por_indice() { # $1 = lista de alvos, $2.. = indices
+    local alvos="$1"; shift
+    local i
+    for i in "$@"; do
+        printf '%s\n' "$alvos" | sed -n "${i}p"
+    done
+    return 0
+}
+
+# escolher_alvos_inject <oficiais> <paralelos> [mod] → imprime os alvos escolhidos no
 # formato "O|<resources>" (oficial, recebe pnpm inject --location) ou "P|<res>"
 # (paralelo, patch direto). Pergunta so quando ha mais de um alvo no total.
 # -Yes ou entrada nao-interativa: todos os oficiais (e so ha paralelos quando
 # nao existe oficial — comportamento de antes do seletor).
 escolher_alvos_inject() {
-    local oficiais="$1" paralelos="$2"
-    local no np total resp i tipo res linha tentativa
+    local oficiais="$1" paralelos="$2" mod="${3:-}"
+    local no np total resp i tipo res linha tentativa motivo alvos largura limite
     no=0; np=0
     [ -n "$oficiais" ] && no="$(printf '%s\n' "$oficiais" | grep -c . || true)"
     [ -n "$paralelos" ] && np="$(printf '%s\n' "$paralelos" | grep -c . || true)"
@@ -1506,7 +1643,13 @@ escolher_alvos_inject() {
         return 0
     fi
 
-    if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
+    # Sem ninguem para responder, mantem o comportamento de antes do seletor: todos os
+    # oficiais. A condicao passa por tui_is_interactive em vez de repetir "[ ! -t 0 ]" porque
+    # a duplicata deixava o ramo interativo inalcancavel por qualquer caminho que nao fosse um
+    # terminal de verdade -- nem os testes conseguiam exercita-lo. As duas formas sao
+    # equivalentes: tui_is_interactive() e falso exatamente quando -Yes ou quando o stdin nao
+    # e terminal.
+    if [ "$ASSUME_YES" -eq 1 ] || ! tui_is_interactive; then
         if [ -n "$oficiais" ]; then
             printf 'O|%s\n' "$oficiais"
         else
@@ -1515,15 +1658,56 @@ escolher_alvos_inject() {
         return 0
     fi
 
-    # Monta os rotulos na MESMA ordem da saida (oficiais primeiro, depois paralelos).
+    # Duas listas na MESMA ordem: `alvos` tem o caminho real que a injecao usa, e os
+    # posicionais tem o rotulo que aparece na tela. Antes so existia a lista de rotulos e era
+    # ELA que voltava como resultado -- quem escolhia recebia "Equibop (flatpak)" no lugar do
+    # caminho, e a injecao morria depois com "Cliente paralelo desconhecido". O caminho nunca
+    # chegava em patch_parallel_one()/install_location().
+    alvos="$(
+        while IFS= read -r linha; do
+            [ -n "$linha" ] && printf 'O|%s\n' "$linha"
+        done <<EOF
+$oficiais
+EOF
+        while IFS= read -r linha; do
+            [ -n "$linha" ] && printf 'P|%s\n' "$linha"
+        done <<EOF
+$paralelos
+EOF
+    )"
+
+    # Um rotulo por alvo, na mesma ordem. O do paralelo diz se este checkout consegue
+    # atende-lo: um alvo que so pode falhar nao e escolha de verdade, e antes disso o usuario
+    # so descobria depois de escolher (e, pelo defeito acima, nem depois).
+    #
+    # tui_size aqui porque tui_menu_multi so descobre as colunas depois; sem isso o rotulo era
+    # montado sem saber quanto espaco tinha.
+    tui_size
+    largura="$(tui_largura)"
     set --
     while IFS= read -r linha; do
-        [ -n "$linha" ] && set -- "$@" "O|$(label_alvo "$linha")"
+        [ -n "$linha" ] && set -- "$@" "$(label_alvo "$linha")"
     done <<EOF
 $oficiais
 EOF
     while IFS= read -r linha; do
-        [ -n "$linha" ] && set -- "$@" "P|$(label_alvo "$linha")"
+        [ -z "$linha" ] && continue
+        res="$(label_alvo "$linha")"
+        # Sem o mod em maos nao da para dizer se o alvo serve; melhor nao anotar do que anotar
+        # errado.
+        motivo=""
+        if [ -n "$mod" ]; then
+            motivo="$(motivo_paralelo "$(nome_cliente_paralelo "$linha")" "$mod")"
+        fi
+        if [ -n "$motivo" ]; then
+            # Quem cede espaco e o caminho do cliente, nunca o aviso: e o aviso que muda a
+            # escolha, e com o caminho inteiro ele era cortado justamente nos casos ambiguos
+            # (o mesmo cliente em dois lugares), que sao os que mais precisam dele.
+            limite=$((largura - 11 - ${#motivo} - 4))
+            [ "$limite" -lt 12 ] && limite=12
+            res="$(tui_corta "$res" "$limite") -- $motivo"
+        fi
+        set -- "$@" "$res"
     done <<EOF
 $paralelos
 EOF
@@ -1541,7 +1725,7 @@ EOF
             i=0
             for linha in "$@"; do
                 i=$((i+1))
-                printf '    [%d] %s\n' "$i" "${linha#*|}" >&2
+                printf '    [%d] %s\n' "$i" "$linha" >&2
             done
             printf '  Escolha (ex.: 1,3 · 2-4 · t = todos · Enter = todos): ' >&2
             read -r resp || resp=""
@@ -1552,58 +1736,87 @@ EOF
         [ "$tentativa" -lt 3 ] || resp="$(seq_like 1 "$total")"
     fi
 
-    # Repercorre na mesma ordem e imprime so os escolhidos, com o prefixo de tipo.
-    i=0
-    for linha in "$@"; do
-        i=$((i+1))
-        case " $resp " in
-            *" $i "*) printf '%s\n' "$linha" ;;
-        esac
-    done
+    # Repercorre na mesma ordem e imprime o ALVO (nao o rotulo) de cada escolhido.
+    # shellcheck disable=SC2086
+    alvos_por_indice "$alvos" $resp
 }
 
-inject_mod() {
+# Alvos escolhidos para a injecao, no formato "TIPO|caminho". Faz a pergunta de selecao quando
+# ha mais de um alvo; com um so, ou em --yes, nao pergunta.
+selecionar_alvos_inject() {
     local root="$1"
-    local oficiais paralelos escolhidos tipo alvo loc id falha injetou_oficial
+    local oficiais paralelos mod
 
     oficiais="$(discord_installs)"
     paralelos="$(parallel_installs)"
+    # Qual mod este checkout builda. Decide, no seletor, quais clientes paralelos da para
+    # atender (Equicord so builda o Equibop, Vencord so o Vesktop).
+    mod="$(checkout_mod "$root")"
 
     # Caso comum: o user so tem Equibop/Vesktop/Legcord e nao tem Discord puro.
     # O instalador de mod nao funciona em clientes paralelos (eles ja vem com o
     # mod embutido): patch direto do dist/<cliente>.asar, agora multi-alvo.
+    # Tudo em stderr: o stdout desta funcao e a LISTA DE ALVOS que o chamador captura.
     if [ -z "$oficiais" ]; then
         if [ -z "$paralelos" ]; then
             fail "Discord puro nao encontrado, e nenhum cliente paralelo disponivel para patch direto. Instale o Discord (ou use o instalador de plugin goLiveBypass-vencord.zip, que convive com mod)."
         fi
-        printf '\n'
-        printf '  %s[!]%s Nao encontrei o Discord puro, mas achei clientes paralelos:\n' "$C_YELLOW" "$C_OFF"
+        printf '\n' >&2
+        printf '  %s[!]%s Nao encontrei o Discord puro, mas achei clientes paralelos:\n' "$C_YELLOW" "$C_OFF" >&2
         while IFS= read -r p; do
             [ -z "$p" ] && continue
-            printf '        - %s\n' "$p"
+            printf '        - %s\n' "$p" >&2
         done <<EOF
 $paralelos
 EOF
         if [ "$ASSUME_YES" -ne 1 ] && ! confirm "Injetar em algum dos clientes acima (patch direto, vai pedir sudo)"; then
             fail "Discord puro nao encontrado, e nenhum cliente paralelo disponivel para patch direto. Instale o Discord (ou use o instalador de plugin goLiveBypass-vencord.zip, que convive com mod)."
         fi
-        escolhidos="$(escolher_alvos_inject "" "$paralelos")"
-        falha=0
-        while IFS='|' read -r tipo alvo; do
-            [ -z "$alvo" ] && continue
-            patch_parallel_one "$root" "$alvo" || falha=1
-        done <<EOF
-$escolhidos
-EOF
-        [ "$falha" -eq 0 ] || fail "Patch direto falhou."
-        # Marca injecao como OK para o do_install seguir
-        return 0
     fi
 
     # Selecao de alvos: 1 alvo = auto (como antes); varios = nosso seletor
     # (oficiais + paralelos), no lugar da lista do proprio instalador do mod,
     # que so patcheia um e nao conhece clientes paralelos.
-    escolhidos="$(escolher_alvos_inject "$oficiais" "$paralelos")"
+    escolher_alvos_inject "$oficiais" "$paralelos" "$mod"
+}
+
+# Verdadeiro quando nada precisa ser injetado: todo alvo oficial escolhido ja aponta para este
+# checkout e nenhum cliente paralelo foi escolhido. Espelha o $oficialPendente do instalador
+# PowerShell. Sem isto, ter QUALQUER cliente ja apontando para o checkout -- era o caso de quem
+# ja tinha o Equibop injetado -- fazia o instalador pular a injecao inteira e o seletor de alvos
+# NUNCA aparecia, mesmo havendo Vesktop, Legcord e flatpaks intocados para escolher.
+alvos_ja_injetados() { # $1 = root, $2 = escolhidos
+    local root="$1" escolhidos="$2" tipo alvo path
+    while IFS='|' read -r tipo alvo; do
+        [ -z "$alvo" ] && continue
+        case "$tipo" in
+            # Cliente paralelo sempre precisa de patch: nao existe "ja estar" injetado.
+            P) return 1 ;;
+            O)
+                path="$(injected_path "$alvo" || true)"
+                case "$path" in
+                    "$root"/*) ;;
+                    *) return 1 ;;
+                esac
+                ;;
+        esac
+    done <<EOF
+$escolhidos
+EOF
+    return 0
+}
+
+# Injeta nos alvos ja escolhidos por selecionar_alvos_inject.
+injetar_alvos() { # $1 = root, $2 = escolhidos
+    local root="$1" escolhidos="$2"
+    local tipo alvo loc id falha injetou_oficial tem_oficial
+
+    # Ha Discord puro entre os escolhidos? Sem nenhum, o unico caminho e o patch direto dos
+    # paralelos, e ali uma falha e definitiva (nao ha injecao de mod para segurar o resultado).
+    tem_oficial=0
+    case "$escolhidos" in
+        *"O|"*) tem_oficial=1 ;;
+    esac
 
     stop_discord
 
@@ -1658,7 +1871,22 @@ EOF
             grant_flatpak_access "$id" "$root/dist"
         fi
     fi
-    [ "$falha" -eq 0 ] || warn "Algum cliente paralelo nao foi patcheado -- os outros continuam."
+
+    if [ "$falha" -ne 0 ]; then
+        if [ "$tem_oficial" -eq 0 ]; then
+            fail "Patch direto falhou."
+        fi
+        warn "Algum cliente paralelo nao foi patcheado -- os outros continuam."
+    fi
+}
+
+# Injeccao completa (escolha + patch). Atalho para quem nao precisa decidir antes se ha o que
+# fazer; o do_install faz os dois passos em separado justamente para poder pular a injecao
+# quando os alvos escolhidos ja estao prontos.
+inject_mod() {
+    local root="$1" escolhidos
+    escolhidos="$(selecionar_alvos_inject "$root")"
+    injetar_alvos "$root" "$escolhidos"
 }
 
 checkout_mod() {
@@ -2245,8 +2473,16 @@ do_install() {
     install_plugin_source "$root"
     build_mod "$root"
 
-    local flatpak_id=""
-    if injected_from_checkout "$root"; then
+    # A escolha de alvos vem ANTES de decidir se ha o que injetar. Antes disto o instalador
+    # olhava so "o checkout ja esta injetado em algum lugar?" e, com um unico cliente ja
+    # apontando para ele (era o caso de quem tinha o Equibop injetado), pulava a injecao
+    # inteira -- o seletor nunca aparecia, mesmo com Vesktop, Legcord e flatpaks intocados.
+    # Agora so pula quando TODOS os alvos escolhidos ja estao prontos; espelha o
+    # $oficialPendente/Select-InjectionTargets do instalador PowerShell.
+    local flatpak_id="" escolhidos
+    escolhidos="$(selecionar_alvos_inject "$root")"
+
+    if alvos_ja_injetados "$root" "$escolhidos"; then
         step "O Discord ja carrega deste checkout, so reiniciando"
         stop_discord
         # Por aqui o instalador do mod nao roda, e a liberacao do sandbox nao acontece
@@ -2255,7 +2491,7 @@ do_install() {
             grant_flatpak_access "$flatpak_id" "$root/dist"
         fi
     else
-        inject_mod "$root"
+        injetar_alvos "$root" "$escolhidos"
         flatpak_id="$(injected_flatpak_id "$root" || true)"
     fi
 

@@ -45,7 +45,7 @@ LOG="${GLB_LOG:?}"
 anota() { printf '%s\n' "$1" >> "$LOG"; }
 
 RAIZ_FAKE="/checkout/Equicord"
-# Codigo de retorno: 0 = o Discord ja carrega deste checkout, 1 = precisa injetar.
+# 0 = os alvos escolhidos ja estao prontos (nada a injetar), 1 = precisa injetar.
 JA_INJETADO="${GLB_JA_INJETADO:-1}"
 
 select_target() { printf '%s\n' "$RAIZ_FAKE"; }
@@ -53,9 +53,13 @@ select_persistence() { return "$GLB_PERMANENTE"; }
 ensure_toolchain() { :; }
 install_plugin_source() { :; }
 build_mod() { :; }
-injected_from_checkout() { return "$JA_INJETADO"; }
+# O do_install escolhe os alvos ANTES de decidir se injeta (foi o defeito que deixava o
+# seletor inalcancavel quando um cliente qualquer ja estava injetado).
+selecionar_alvos_inject() { printf 'O|%s\n' "$RAIZ_FAKE/resources"; }
+alvos_ja_injetados() { return "$JA_INJETADO"; }
+injetar_alvos() { anota inject; }
+grant_flatpak_access() { :; }
 stop_discord() { :; }
-inject_mod() { anota inject; }
 injected_flatpak_id() { return 1; }
 injected_resources() { printf '%s\n' "$RAIZ_FAKE/dist/desktop"; }
 set_plugin_settings() { anota settings; }
