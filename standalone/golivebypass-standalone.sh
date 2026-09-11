@@ -2694,11 +2694,13 @@ target_can_launch() {
     esac
     if [ -n "$resources" ] && [ -d "$resources" ]; then
         local dc_path
-        dc_path="$(find "$resources/.." -maxdepth 2 -name "Discord" -type f -executable 2>/dev/null | head -1 || true)"
+        dc_path="$(find "$resources/.." -maxdepth 2 -type f -executable \
+            \( -iname "Discord" -o -iname "DiscordCanary" -o -iname "DiscordPTB" \) \
+            2>/dev/null | head -1 || true)"
         [ -n "$dc_path" ] && [ -x "$dc_path" ] && return 0
     fi
     local exe
-    for exe in discord Discord discord-canary discordptb; do
+    for exe in discord Discord discord-canary discordcanary DiscordCanary discordptb DiscordPTB; do
         have "$exe" && return 0
     done
     return 1
@@ -2784,22 +2786,28 @@ start_discord() {
 
     if [ -z "$target_cmd" ] && [ -n "$resources" ] && [ -d "$resources" ]; then
         local dc_path
-        dc_path="$(find "$resources/.." -maxdepth 2 -name "Discord" -type f -executable 2>/dev/null | head -1 || true)"
+        dc_path="$(find "$resources/.." -maxdepth 2 -type f -executable \
+            \( -iname "Discord" -o -iname "DiscordCanary" -o -iname "DiscordPTB" \) \
+            2>/dev/null | head -1 || true)"
         if [ -n "$dc_path" ] && [ -x "$dc_path" ]; then
             target_cmd="$dc_path"
         fi
     fi
 
     if [ -z "$target_cmd" ]; then
-        for exe in discord Discord discord-canary discordptb; do
+	    for exe in discord Discord discord-canary discordcanary DiscordCanary discordptb DiscordPTB; do
             if have "$exe"; then
                 target_cmd="$exe"
                 break
             fi
         done
     fi
-
-    [ -n "$target_cmd" ] || return 1
+    
+    if [ -z "$target_cmd" ]; then
+        printf '[%s] launch=falhou motivo=binario_nao_encontrado resources=%s\n' \
+            "$(date -Is)" "$resources" >>"$discord_log"
+	return 1
+    fi
 
     if [ "${START_DISCORD_HOST_ONLY:-0}" -eq 1 ]; then
         # Rollback: depois de remover um namespace incompleto, reabra o cliente
