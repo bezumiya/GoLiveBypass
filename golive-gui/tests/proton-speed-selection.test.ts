@@ -97,6 +97,7 @@ vi.mock('child_process', () => ({
 }));
 
 import { canReuseMeasuredProfile, generateManualProtonConfig, generateOptimalProtonConfig, generateProtonRouteCatalog, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, removeStagedProtonConfig, runConfgen } from '../electron/proton';
+import * as logger from '../electron/logger';
 
 describe('medidor isolado da regra WireSock', () => {
   beforeEach(() => {
@@ -187,6 +188,22 @@ describe('medidor isolado da regra WireSock', () => {
       expect(result.success).toBe(false);
       expect(result.error).not.toContain('test@example.test');
       expect(result.error).toContain('[account]');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('leva o motivo do helper para o log do relato quando a rota ótima falha', async () => {
+    state.success = false;
+    state.code = 1;
+    state.error = 'nenhum servidor concluiu download e upload pelo túnel; a rota anterior foi preservada';
+    logger._resetForTests();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-optimal-failure-report-'));
+    try {
+      const result = await generateOptimalProtonConfig(dir, { username: 'test', speedTest: true });
+      expect(result.success).toBe(false);
+      // O relato de bug envia o ring buffer: sem o motivo, a issue chega só com
+      // "codigo_saida=1" e a causa precisa ser reproduzida de novo.
+      const recent = logger.getRecent();
+      expect(recent).toContain('erro ao gerar configuração ótima');
+      expect(recent).toContain(state.error);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
   it('usa outro executável temporário, transmite Mbps reais e remove a cópia', async () => {

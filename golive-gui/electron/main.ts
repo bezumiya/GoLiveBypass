@@ -2797,8 +2797,7 @@ function linuxPreflight(force = false): Promise<LinuxPreflight> {
 function stripAnsiCodes(value: string): string {
   return value
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/(?:\x1b|\u009b)\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\uFFFD?\[[0-9;?]*[ -/]*[@-~]/g, "");
+    .replace(/(?:\x1b|\u009b|\uFFFD)\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function tailErroScript(stderr: string, linhas: number): string {
@@ -2806,7 +2805,11 @@ function tailErroScript(stderr: string, linhas: number): string {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
-    .filter((l) => !/^ERROR: ld\.so:/.test(l));
+    .filter((l) => !/^ERROR: ld\.so:/.test(l))
+    // Passos informativos do teardown ocupavam as ultimas linhas e viravam a
+    // mensagem de erro da UI, escondendo o "[X] ..." que explica a falha.
+    .filter((l) => !/^\[\*\]\s*Removendo namespace de rede/i.test(l))
+    .filter((l) => !/^\[OK\]\s*Tunel WireGuard encerrado/i.test(l));
   return uteis.slice(-linhas).join("\n");
 }
 
@@ -3146,6 +3149,8 @@ async function linuxActivate(onChunk: (c: string) => void) {
 
 async function linuxDeactivate(onChunk: (c: string) => void) {
   stopProtonFailoverMonitor();
+  pararWgStatsWatchdog();
+  stopLinuxHealthWatchdog();
   const { code, stderr } = await runScript(["--uninstall"], onChunk);
   if (code !== 0) {
     // Sem manter o marker: o disco continua "nosso"; o boot seguinte reverte a orfa assim
@@ -3156,8 +3161,6 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
         "Falha ao desativar (a elevacao provavelmente falhou)",
     );
   }
-  pararWgStatsWatchdog();
-  stopLinuxHealthWatchdog();
   clearSessionMarker();
   linuxStatusCache = null;
 }

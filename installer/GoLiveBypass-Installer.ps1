@@ -1098,6 +1098,72 @@ function Stop-Discord {
     throw 'O Discord nao fechou. Feche pelo icone na bandeja e rode de novo.'
 }
 
+function Resolve-LocalPluginHelper($source) {
+    # Somente layouts que o usuario apontou (-PluginSource) ou onde o proprio
+    # instalador esta (um pacote de release extraido). Nada de varrer Downloads:
+    # copiar um binario arbitrario de la para dentro do userplugin seria pior do
+    # que falhar e mandar baixar da release com SHA-256 conferido.
+    $candidates = @()
+    $bases = @()
+    if ($source -and -not [string]::IsNullOrWhiteSpace($source)) { $bases += $source }
+    if ($PSScriptRoot -and $PSScriptRoot -ne $source) { $bases += $PSScriptRoot }
+
+    foreach ($base in $bases) {
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        if (Test-Path -LiteralPath $base -PathType Leaf) { $base = Split-Path -Parent $base }
+        $candidates += (Join-Path $base $PluginHelperRelative)
+        # Pacote de release extraido: os fontes do plugin (e o bin) ficam sob goLiveBypass\.
+        $candidates += (Join-Path $base (Join-Path 'goLiveBypass' $PluginHelperRelative))
+        # Checkout do repositorio: o binario e produzido por npm run build:proton.
+        $candidates += (Join-Path $base 'tools\proton-confgen\build\proton-confgen.exe')
+        $candidates += (Join-Path (Join-Path $base '..') 'tools\proton-confgen\build\proton-confgen.exe')
+        $candidates += (Join-Path (Join-Path $base '..') (Join-Path 'goLiveBypass' $PluginHelperRelative))
+        # Helper baixado avulso da release, com o nome do asset ao lado do instalador.
+        $candidates += (Join-Path $base 'proton-confgen.exe')
+        $candidates += @(Get-ChildItem -LiteralPath $base -Filter 'proton-confgen*-win-x64.exe' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    }
+
+    foreach ($cand in $candidates) {
+        if ($cand -and (Test-Path -LiteralPath $cand)) {
+            $item = Get-Item -LiteralPath $cand -ErrorAction SilentlyContinue
+            if ($item -and -not $item.PSIsContainer -and $item.Length -gt 0) {
+                return $item.FullName
+            }
+        }
+    }
+
+    return $null
+}
+
+function Test-HelperSha256($filePath) {
+    if (-not (Test-Path -LiteralPath $filePath)) { return $false }
+    $dir = Split-Path -Parent $filePath
+    $manifestPath = Join-Path $dir 'proton-confgen-manifest.json'
+    $expectedSha = $null
+    if (Test-Path -LiteralPath $manifestPath) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            if ($manifest.assets -and $manifest.assets.'win32-x64' -and $manifest.assets.'win32-x64'.sha256) {
+                $expectedSha = $manifest.assets.'win32-x64'.sha256.ToLowerInvariant()
+            }
+        } catch { }
+    }
+    if (-not $expectedSha) {
+        $shaFile = "$filePath.sha256"
+        if (Test-Path -LiteralPath $shaFile) {
+            try {
+                $content = (Get-Content -LiteralPath $shaFile -Raw).Trim()
+                $expectedSha = ($content -split '\s+')[0].ToLowerInvariant()
+            } catch { }
+        }
+    }
+    if ($expectedSha -and $expectedSha -match '^[0-9a-f]{64}$') {
+        $actual = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        return ($actual -eq $expectedSha)
+    }
+    return $true
+}
+
 function Copy-PluginHelper($target) {
     $destination = Join-Path $target $PluginHelperRelative
     $destinationDir = Split-Path -Parent $destination
@@ -1105,18 +1171,19 @@ function Copy-PluginHelper($target) {
         New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
     }
 
-    # Um checkout local pode ja conter o helper produzido pelo workflow de release.
-    # Prefira-o para que -PluginSource continue sendo um teste fiel do pacote local.
-    if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
-        $local = Join-Path $PluginSource $PluginHelperRelative
-        if (Test-Path -LiteralPath $local) {
+    # 1. Verificar candidatos locais (checkout local, PluginSource, Downloads, zip descompactado)
+    $local = Resolve-LocalPluginHelper $PluginSource
+    if ($local -and (Test-Path -LiteralPath $local)) {
+        if (Test-HelperSha256 $local) {
             Copy-Item -LiteralPath $local -Destination $destination -Force
-            Write-Ok 'Helper Proton copiado do PluginSource'
+            Write-Ok "Helper Proton copiado de $local"
             return
+        } else {
+            Write-Warn "Helper local em $local divergiu do hash esperado; tentando download da release."
         }
     }
 
-    # O helper e binario e nao pode ser obtido por raw.githubusercontent.com. Quando o
+    # 2. O helper e binario e nao pode ser obtido por raw.githubusercontent.com. Quando o
     # instalador baixa as fontes da main, busca o helper x64 da beta mais recente e valida
     # o SHA-256 publicado antes de grava-lo no userplugin.
     $asset = Get-LatestBetaHelperAsset
@@ -1150,6 +1217,16 @@ function Copy-Plugin($root) {
     $stale = Join-Path $target 'index.ts'
     if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
 
+    $sourceBase = $PluginSource
+    if ($PluginSource -and -not [string]::IsNullOrWhiteSpace($PluginSource)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PluginSource (Split-Path -Leaf $PluginFiles[0])))) {
+            $sub = Join-Path $PluginSource $PluginDirName
+            if (Test-Path -LiteralPath (Join-Path $sub (Split-Path -Leaf $PluginFiles[0]))) {
+                $sourceBase = $sub
+            }
+        }
+    }
+
     foreach ($file in $PluginFiles) {
         $leaf = Split-Path -Leaf $file
         if (-not $PluginSource -or [string]::IsNullOrWhiteSpace($PluginSource)) {
@@ -1157,7 +1234,7 @@ function Copy-Plugin($root) {
             continue
         }
 
-        $local = Join-Path $PluginSource $leaf
+        $local = Join-Path $sourceBase $leaf
         if (-not (Test-Path -LiteralPath $local)) { throw "Nao achei $leaf em $PluginSource." }
         Copy-Item -LiteralPath $local -Destination (Join-Path $target $leaf) -Force
     }
@@ -1854,28 +1931,59 @@ $GitHubApi  = "https://api.github.com/repos/$GitHubRepo"
 
 function Get-LatestBetaHelperAsset {
     try {
-        $headers = @{ 'User-Agent' = 'GoLiveBypass-Installer'; 'Accept' = 'application/vnd.github+json' }
-        $releases = Invoke-RestMethod -Uri "$GitHubApi/releases?per_page=20" -Headers $headers -TimeoutSec 15
+        $headers = @{ 'User-Agent' = 'GoLiveBypass-Installer' }
+        $apiHeaders = @{ 'User-Agent' = 'GoLiveBypass-Installer'; 'Accept' = 'application/vnd.github+json' }
+        $releases = Invoke-RestMethod -Uri "$GitHubApi/releases?per_page=20" -Headers $apiHeaders -TimeoutSec 15
         foreach ($release in @($releases)) {
             if ($release.draft -or -not $release.prerelease) { continue }
-            $asset = @($release.assets) |
-                Where-Object { $_.name -match '(^|-)proton-confgen.*-win-x64\.exe$' } |
+
+            $sha256 = $null
+            $asset = $null
+
+            # 1. Preferir proton-confgen-manifest.json para nome canonico e hash SHA-256
+            $manifestAsset = @($release.assets) |
+                Where-Object { $_.name -eq 'proton-confgen-manifest.json' } |
                 Select-Object -First 1
+            if ($manifestAsset) {
+                try {
+                    $manifestContent = Invoke-RestMethod -Uri $manifestAsset.browser_download_url -Headers $headers -TimeoutSec 15
+                    if ($manifestContent.assets -and $manifestContent.assets.'win32-x64') {
+                        $expectedName = $manifestContent.assets.'win32-x64'.asset
+                        $expectedSha = $manifestContent.assets.'win32-x64'.sha256
+                        if ($expectedName -and $expectedSha -and $expectedSha -match '^[0-9a-f]{64}$') {
+                            $asset = @($release.assets) | Where-Object { $_.name -eq $expectedName } | Select-Object -First 1
+                            if ($asset) {
+                                $sha256 = $expectedSha.ToLowerInvariant()
+                            }
+                        }
+                    }
+                } catch { }
+            }
+
+            # 2. Fallback: procurar executavel por padrao de nome e arquivo companion .sha256
+            if (-not $asset) {
+                $asset = @($release.assets) |
+                    Where-Object { $_.name -match '(^|-)proton-confgen.*-win-x64\.exe$' } |
+                    Select-Object -First 1
+            }
             if (-not $asset) { continue }
 
-            $shaAsset = @($release.assets) |
-                Where-Object { $_.name -eq "$($asset.name).sha256" } |
-                Select-Object -First 1
-            if (-not $shaAsset) { continue }
+            if (-not $sha256) {
+                $shaAsset = @($release.assets) |
+                    Where-Object { $_.name -eq "$($asset.name).sha256" } |
+                    Select-Object -First 1
+                if (-not $shaAsset) { continue }
 
-            $shaResponse = Invoke-WebRequest -Uri $shaAsset.browser_download_url -Headers $headers -UseBasicParsing -TimeoutSec 15
-            $shaContent = if ($shaResponse.Content -is [byte[]]) {
-                [Text.Encoding]::UTF8.GetString($shaResponse.Content).Trim()
-            } else {
-                ([string]$shaResponse.Content).Trim()
+                $shaResponse = Invoke-WebRequest -Uri $shaAsset.browser_download_url -Headers $headers -UseBasicParsing -TimeoutSec 15
+                $shaContent = if ($shaResponse.Content -is [byte[]]) {
+                    [Text.Encoding]::UTF8.GetString($shaResponse.Content).Trim()
+                } else {
+                    ([string]$shaResponse.Content).Trim()
+                }
+                $sha256 = ($shaContent -split '\s+')[0].ToLowerInvariant()
             }
-            $sha256 = ($shaContent -split '\s+')[0].ToLowerInvariant()
-            if ($sha256 -notmatch '^[0-9a-f]{64}$') { continue }
+
+            if (-not $sha256 -or $sha256 -notmatch '^[0-9a-f]{64}$') { continue }
 
             return [PSCustomObject]@{
                 Tag = ($release.tag_name -replace '^v', '')

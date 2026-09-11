@@ -775,7 +775,16 @@ export async function generateOptimalProtonConfig(
   const errMsg = res.json?.error || (options.speedTest && res.json?.success
     ? 'A medição não retornou velocidades válidas de download e upload.'
     : undefined) || res.stderr || res.stdout || 'Falha ao selecionar e gerar configuração ProtonVPN.';
-  logger.error('proton', 'erro ao gerar configuração ótima', { codigo_saida: res.code, resposta_json: Boolean(res.json) });
+  // Sem a mensagem do helper o relato de bug chega sem a causa: o motivo já
+  // existe em errMsg e era descartado, deixando só "codigo_saida=1". A linha é
+  // normalizada e limitada porque é copiada para o ring buffer e para a issue.
+  logger.error('proton', 'erro ao gerar configuração ótima', {
+    codigo_saida: res.code,
+    resposta_json: Boolean(res.json),
+    codigo: typeof res.json?.code === 'string' ? res.json.code : undefined,
+    medicao_valida: options.speedTest ? measuredResultValid : undefined,
+    erro: errMsg.replace(/\s+/g, ' ').trim().slice(0, 300),
+  });
   return { success: false, error: errMsg };
 }
 

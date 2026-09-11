@@ -229,7 +229,7 @@ jobs:
         run: |
           mkdir -p goLiveBypass/bin/win32-x64
           cd tools/proton-confgen
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags='-s -w' \
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags='-s -w -buildid=' \
             -o ../../goLiveBypass/bin/win32-x64/proton-confgen.exe ./cmd/protonvpn-wg
           cd ../..
           cd goLiveBypass

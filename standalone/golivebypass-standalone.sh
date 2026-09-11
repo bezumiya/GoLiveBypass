@@ -2678,6 +2678,65 @@ graphics_json() {
         "$(json_escape "${XDG_SESSION_TYPE:-}")" "$(json_escape "$portal")"
 }
 
+# Verifica se um alvo de instalacao possui executavel ou wrapper inicializavel.
+target_can_launch() {
+    local resources="$1" flav="$2" id="${3:-}"
+    if [ -z "$id" ] && [ -n "$resources" ] && have flatpak; then
+        id="$(flatpak_app_id "$resources" 2>/dev/null || true)"
+    fi
+    if [ -n "$id" ] && have flatpak; then
+        return 0
+    fi
+    case "$flav" in
+        equibop|vesktop|legcord)
+            have "$flav" && return 0
+            ;;
+    esac
+    if [ -n "$resources" ] && [ -d "$resources" ]; then
+        local dc_path
+        dc_path="$(find "$resources/.." -maxdepth 2 -name "Discord" -type f -executable 2>/dev/null | head -1 || true)"
+        [ -n "$dc_path" ] && [ -x "$dc_path" ] && return 0
+    fi
+    local exe
+    for exe in discord Discord discord-canary discordptb; do
+        have "$exe" && return 0
+    done
+    return 1
+}
+
+# Escolhe qual Discord relancar apos a ativacao do namespace WireGuard:
+# 1. Se um cliente especifico ja estava em execucao, preserva a mesma instalacao.
+# 2. Se nenhum estava rodando, escolhe o primeiro que possui executavel/flatpak funcional.
+# 3. Fallback: primeira linha do FOUND, como antes.
+select_launch_target() {
+    local found="${1:-}" resources flav detect id escolhido=""
+    [ -n "$found" ] || return 0
+
+    while IFS='|' read -r resources flav detect id; do
+        [ -n "$resources" ] || continue
+        if { [ -n "$id" ] && flatpak_running_id "$id"; } || running_flav "$flav" "$id" "$resources"; then
+            escolhido="$resources|$flav|$detect|$id"
+            break
+        fi
+    done <<EOF
+$found
+EOF
+
+    if [ -z "$escolhido" ]; then
+        while IFS='|' read -r resources flav detect id; do
+            [ -n "$resources" ] || continue
+            if target_can_launch "$resources" "$flav" "$id"; then
+                escolhido="$resources|$flav|$detect|$id"
+                break
+            fi
+        done <<EOF
+$found
+EOF
+    fi
+
+    printf '%s\n' "${escolhido:-$(printf '%s\n' "$found" | head -1)}" | head -1
+}
+
 # Reabre o Discord envelopado dentro do namespace WireGuard (sem proxy).
 start_discord() {
     local linha="${1:-}"
@@ -2708,7 +2767,11 @@ start_discord() {
     rm -f "$_USER_HOME/.config/discordcanary/Singleton"* 2>/dev/null || true
 
     local target_cmd=""
-    if [ -n "$resources" ] && have flatpak && id="$(flatpak_app_id "$resources")"; then
+    id="$(printf '%s' "$linha" | cut -d'|' -f4)"
+    if [ -z "$id" ] && [ -n "$resources" ] && have flatpak; then
+        id="$(flatpak_app_id "$resources" 2>/dev/null || true)"
+    fi
+    if [ -n "$id" ] && have flatpak; then
         target_cmd="flatpak run $id"
     elif [ -n "$linha" ]; then
         flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
@@ -3116,7 +3179,7 @@ fi
 # A partir do stop, qualquer falha fatal precisa remover o namespace parcial e
 # tentar devolver o Discord ao usuario. O trap ja existe para limpar segredos,
 # mas so e habilitado para rollback aqui, depois de autorizacao e limpeza legada.
-ACTIVATION_ROLLBACK_TARGET="$(printf '%s\n' "$FOUND" | head -1)"
+ACTIVATION_ROLLBACK_TARGET="$(select_launch_target "$FOUND")"
 if discord_running; then
     ACTIVATION_ROLLBACK_REOPEN=1
 else
@@ -3158,7 +3221,9 @@ while IFS='|' read -r resources flav detect id; do
         continue
     fi
 
-    setup_wireguard_netns
+    if [ "$ACTIVATION_NETNS_TOUCH_STARTED" -eq 0 ]; then
+        setup_wireguard_netns
+    fi
 
     # So desfazemos _app.asar quando a injecao la dentro e NOSSA (versao antiga, pre-WireGuard,
     # que patcheava o app.asar). Quando e outro mod (Vencord/Equicord), _app.asar e o backup
@@ -3186,8 +3251,8 @@ log_wireguard_readiness
 
 # Modo portatil: reabre o Discord ja com o bypass ativo (mesmo comportamento do app do Windows).
 # head -1 em vez de pipe para o while: nohup num subshell morreria junto com ele.
-start_discord "$(printf '%s\n' "$FOUND" | head -1)"
-if ! wait_discord_started "$(printf '%s\n' "$FOUND" | head -1)"; then
+start_discord "$(printf '%s\n' "${ACTIVATION_ROLLBACK_TARGET:-$FOUND}" | head -1)"
+if ! wait_discord_started "$(printf '%s\n' "${ACTIVATION_ROLLBACK_TARGET:-$FOUND}" | head -1)"; then
     warn "O WireGuard ficou pronto, mas o processo do Discord nao iniciou."
     # Se o launcher chegou a criar um sandbox, mas o reconhecimento expirou, feche-o
     # antes de remover o namespace. Assim não deixamos um Flatpak órfão usando uma

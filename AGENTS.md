@@ -32,6 +32,7 @@ A arquitetura atual da GUI Windows/Linux é **WireGuard por aplicativo**: todo o
 - Em mudanças de estabilidade, timeouts, probes ou troca de saída, avalie GUI, standalone e plugin. Porte o comportamento onde aplicável; documente lacunas no `CHANGELOG.md`, sem copiar mecanicamente arquiteturas distintas.
 - Toda versão com sufixo de prerelease deve ser publicada como **prerelease**, nunca como latest. Canal estável não recebe beta nem downgrade. Consulte a skill de release antes de preparar/publicar versões.
 - Diferencie fatos observados de hipóteses. Histórico de issues não substitui código atual ou reprodução; não atribua upload travado ao endpoint gratuito sem investigar.
+- **A fila de issues é o repositório de produção `bezumiya/GoLiveBypass`**, destino dos relatos da API (`GITHUB_REPO`). `pdl-clay/GoLiveBypass` é o fork de trabalho/teste: não tratar suas issues como fila de produto nem abrir, comentar ou fechar relatos lá. Investigação, comentário de causa/solução e fechamento acontecem na issue de `bezumiya/GoLiveBypass`; confira antes se o mesmo sintoma já tem issue aberta lá e referencie-a em vez de duplicar.
 
 ## Skills do projeto
 
