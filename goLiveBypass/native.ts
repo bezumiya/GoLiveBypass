@@ -7,7 +7,7 @@
 import { RendererSettings } from "@main/settings";
 import { execFile, execFileSync, spawn } from "child_process";
 import { createHash, randomUUID } from "crypto";
-import { app, BrowserWindow, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, type OpenDialogOptions } from "electron";
 import {
     appendFileSync,
     closeSync,
@@ -50,11 +50,11 @@ import {
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
 
-const PLUGIN_VERSION = "2.0.0-beta.1";
+const PLUGIN_VERSION = "2.0.6-beta-10";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
 const PLUGIN_CHECKSUM_ASSET = `${PLUGIN_ASSET}.sha256`;
 const GITHUB_RELEASES_URL = "https://api.github.com/repos/bezumiya/GoLiveBypass/releases?per_page=20";
-const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
+const PLUGIN_UPDATE_TIMEOUT_MS = 2 * 60_000;
 const UNKNOWN_PLUGIN_VERSION = "unknown";
 const PLUGIN_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 const PLUGIN_UPDATE_INITIAL_DELAY_MS = 8_000;
@@ -888,6 +888,28 @@ export function importWireGuardConfig(_: IpcMainInvokeEvent, sourcePath: unknown
         ? controller.importCustomConfig(sourcePath)
         : Promise.resolve({ success: false as const, error: "Informe o caminho de um arquivo WireGuard." });
 }
+export async function selectWireGuardConfig(event: IpcMainInvokeEvent) {
+    try {
+        const parent = BrowserWindow.fromWebContents(event.sender);
+        const options: OpenDialogOptions = {
+            title: "Selecionar configuração WireGuard",
+            properties: ["openFile"],
+            filters: [{ name: "Configuração WireGuard", extensions: ["conf"] }],
+        };
+        const selected = parent
+            ? await dialog.showOpenDialog(parent, options)
+            : await dialog.showOpenDialog(options);
+        const sourcePath = selected.filePaths[0];
+        if (selected.canceled || !sourcePath) return { success: false as const, cancelled: true as const };
+        return await controller.importCustomConfig(sourcePath);
+    } catch (error) {
+        return {
+            success: false as const,
+            error: `Não foi possível importar a configuração WireGuard: ${safeDiagnosticDetail(error, 300)}`,
+        };
+    }
+}
+
 
 export function testWireGuardConfig(_: IpcMainInvokeEvent, sourcePath?: unknown) {
     return controller.testConfig(typeof sourcePath === "string" ? sourcePath : undefined);
@@ -1710,8 +1732,9 @@ function inspectPendingUpdate(): PendingUpdateInspection {
     return { pending, trusted: { ...pending, sourceDigest }, error: null };
 }
 
-function trustedPendingResultState(): { pending: boolean; pendingChannel?: PluginUpdateChannel } {
+function trustedPendingResultState(policy?: PluginUpdatePolicy): { pending: boolean; pendingChannel?: PluginUpdateChannel } {
     const inspection = inspectPendingUpdate();
+    if (policy?.channel === "stable" && inspection.trusted?.channel === "beta") return { pending: false };
     return { pending: Boolean(inspection.trusted), pendingChannel: inspection.trusted?.channel };
 }
 
@@ -1971,7 +1994,7 @@ function runPluginUpdate(policy: PluginUpdatePolicy, revision = pluginUpdatePoli
             updated: false as const,
             current: pluginRuntimeVersion,
             channel: policy.channel,
-            ...trustedPendingResultState(),
+            ...trustedPendingResultState(policy),
             error: "já existe uma atualização do outro canal em andamento",
         });
     }
@@ -1982,7 +2005,7 @@ function runPluginUpdate(policy: PluginUpdatePolicy, revision = pluginUpdatePoli
             updated: false as const,
             current: pluginRuntimeVersion,
             channel: policy.channel,
-            ...trustedPendingResultState(),
+            ...trustedPendingResultState(policy),
             error: safeDiagnosticDetail(error, 500),
         }))
         .finally(() => {
@@ -2028,7 +2051,7 @@ export function configurePluginUpdates(_: IpcMainInvokeEvent, value?: unknown): 
         pluginUpdateFlight = null;
     }
     clearPluginUpdateTimers();
-    if (changed && next.channel === "stable") {
+    if (next.channel === "stable") {
         try {
             const lock = acquirePluginUpdateLock();
             try {
@@ -2040,7 +2063,7 @@ export function configurePluginUpdates(_: IpcMainInvokeEvent, value?: unknown): 
         }
         catch (error) {
             setPluginUpdateLastError(next, pluginUpdatePolicyRevision, safeDiagnosticDetail(error, 500));
-            log("warn", "não consegui descartar o beta pendente ao selecionar stable", { erro: error });
+            log("warn", "não consegui descartar o beta pendente no canal stable", { erro: error });
         }
     }
     if (!next.enabled) return next;
@@ -2057,6 +2080,7 @@ export function getPluginUpdateStatus(_: IpcMainInvokeEvent) {
     try {
         lock = acquirePluginUpdateLock();
         recoverInterruptedPluginUpdate();
+        if (pluginUpdatePolicy.channel === "stable") discardPendingBetaForStable();
         const installedVersion = currentPluginVersion();
         const pendingInspection = inspectPendingUpdate();
         const pending = reconcileReachedPendingUpdate(installedVersion, pendingInspection);

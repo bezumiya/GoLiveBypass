@@ -67,6 +67,7 @@ type Config struct {
 	SessionFile     string
 	AutoPing        bool
 	SpeedTest       bool
+	RequireDiscord  bool
 	ManualProbe     bool
 	ProgressJSON    bool
 	SpeedTestTrace  bool

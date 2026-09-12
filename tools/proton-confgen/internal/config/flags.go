@@ -89,6 +89,7 @@ func Parse() (*Config, error) {
 	// duplicate names before any command mode can execute.
 	flag.BoolVar(&cfg.ProgressJSON, "progress-json", false, "Emit machine-readable progress events as JSON on stderr")
 	flag.BoolVar(&cfg.SpeedTest, "speed-test", false, "Ping all regional routes, validate twelve, then measure download/upload on up to six healthy finalists (up to 30 MiB, about 3m)")
+	flag.BoolVar(&cfg.RequireDiscord, "require-discord", false, "Require Discord HTTPS reachability for every speed-test candidate")
 	flag.BoolVar(&cfg.ManualProbe, "manual-probe", false, "Validate and generate one explicitly selected server without speed test")
 	flag.BoolVar(&cfg.SpeedTestTrace, "speed-test-trace", false, "Print the four speed-test stages in the terminal (ping, shortlist, tunnel, speed)")
 	flag.StringVar(&cfg.TwoFactorCode, "2fa", "", "2FA TOTP code for non-interactive authentication")
@@ -265,6 +266,9 @@ func validateFeatureFlags(cfg *Config) error {
 		if cfg.SpeedTest {
 			return fmt.Errorf("manual-probe cannot be used with -speed-test")
 		}
+	}
+	if cfg.RequireDiscord && !cfg.SpeedTest {
+		return fmt.Errorf("require-discord can only be used with -speed-test")
 	}
 	return validateDuration(cfg)
 }

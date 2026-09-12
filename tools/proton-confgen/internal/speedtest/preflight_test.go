@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -152,6 +155,47 @@ func TestFilterReachableCandidatesConcurrentRetriesFailuresSerially(t *testing.T
 	}
 	if len(events) < len(candidates)+1 || events[len(events)-1].Tested != len(candidates) || events[len(events)-1].Succeeded != len(candidates) {
 		t.Fatalf("retry progress did not settle all routes: %+v", events)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func TestProbeHTTPRequiresDiscordOnlyWhenRequested(t *testing.T) {
+	var requested []string
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requested = append(requested, request.URL.String())
+		status := http.StatusOK
+		body := ""
+		if request.URL.String() == discordGatewayEndpoint {
+			status = http.StatusServiceUnavailable
+			body = "{}"
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    request,
+		}, nil
+	})}
+
+	if err := probeHTTP(context.Background(), client, false); err != nil {
+		t.Fatalf("generic preflight failed: %v", err)
+	}
+	if len(requested) != 1 || requested[0] != speedEndpoint+"/__down?bytes=0" {
+		t.Fatalf("generic preflight requested unexpected endpoints: %v", requested)
+	}
+
+	requested = nil
+	err := probeHTTP(context.Background(), client, true)
+	if err == nil || err.Error() != "Discord HTTPS inacessível pelo túnel" {
+		t.Fatalf("Discord-aware preflight error = %v", err)
+	}
+	if len(requested) != 2 || requested[1] != discordGatewayEndpoint {
+		t.Fatalf("Discord-aware preflight requested unexpected endpoints: %v", requested)
 	}
 }
 

@@ -62,6 +62,7 @@ test("updater restringe metadata e artefatos ao GitHub oficial", () => {
   assert.match(nativeSource, /isCompatiblePluginManifest\(manifest, PLUGIN_ASSET\)/);
   assert.match(source, /checkPluginUpdate\(selectedUpdatePolicy\)/);
   assert.match(source, /updatePlugin\(selectedUpdatePolicy\)/);
+  assert.match(nativeSource, /api\.github\.com\/repos\/bezumiya\/GoLiveBypass\/releases/);
   const asset = "https://github.com/bezumiya/GoLiveBypass/releases/download/v2.0.6-beta-3/goLiveBypass-vencord.zip";
   assert.equal(releaseAssetUrl(asset), asset);
   assert.equal(releaseAssetUrl("https://evil.example/releases/download/v2.0.6/goLiveBypass-vencord.zip"), null);
@@ -87,7 +88,10 @@ test("updater restringe metadata e artefatos ao GitHub oficial", () => {
     updater: { ...officialManifest.updater, id: "pdl-clay/GoLiveBypass" },
   };
   assert.equal(isCompatiblePluginManifest(legacyReleaseManifest, "goLiveBypass-vencord.zip"), true);
+  assert.equal(isCompatiblePluginManifest({ ...legacyReleaseManifest, version: "2.0.6-beta-7" }, "goLiveBypass-vencord.zip"), true);
+  assert.equal(isCompatiblePluginManifest({ ...legacyReleaseManifest, version: "2.0.6-beta-9" }, "goLiveBypass-vencord.zip"), true);
   assert.equal(isCompatiblePluginManifest({ ...legacyReleaseManifest, version: "2.0.6-beta-6" }, "goLiveBypass-vencord.zip"), false);
+  assert.equal(isCompatiblePluginManifest({ ...legacyReleaseManifest, version: "2.0.6-beta-10" }, "goLiveBypass-vencord.zip"), false);
   assert.equal(isOfficialPluginManifest({ ...officialManifest, updater: { ...officialManifest.updater, assetName: "other.zip" } }, "goLiveBypass-vencord.zip"), false);
   assert.equal(
     securePluginUpdateUrl("https://release-assets.githubusercontent.com/release.zip"),
@@ -114,6 +118,23 @@ test("checagem automática limpa erro antigo quando o canal se recupera", () => 
   assert.match(automaticBlock, /setPluginUpdateLastError\(policy, revision, null\)/);
   assert.match(automaticBlock, /setPluginUpdateLastError\(policy, revision, update\.ok \? null : update\.error\)/);
 });
+test("canal stable remove beta pendente mesmo sem troca de política", () => {
+  const configureBlock = nativeSource.slice(nativeSource.indexOf("export function configurePluginUpdates"), nativeSource.indexOf("export function getPluginUpdateStatus"));
+  const statusBlock = nativeSource.slice(nativeSource.indexOf("export function getPluginUpdateStatus"), nativeSource.indexOf("export async function checkPluginUpdate"));
+  assert.match(configureBlock, /if \(next\.channel === "stable"\)[\s\S]*?discardPendingBetaForStable\(\)/);
+  assert.doesNotMatch(configureBlock, /if \(changed && next\.channel === "stable"\)/);
+  assert.match(statusBlock, /if \(pluginUpdatePolicy\.channel === "stable"\) discardPendingBetaForStable\(\)/);
+  assert.match(nativeSource, /policy\?\.channel === "stable" && inspection\.trusted\?\.channel === "beta"/);
+});
+
+test("instalação tem orçamento maior que a consulta de update", () => {
+  assert.match(source, /PLUGIN_UPDATE_CHECK_TIMEOUT_MS = 2 \* 60_000 \+ 15_000/);
+  assert.match(source, /PLUGIN_UPDATE_INSTALL_TIMEOUT_MS = 3 \* 60_000/);
+  assert.match(nativeSource, /PLUGIN_UPDATE_TIMEOUT_MS = 2 \* 60_000/);
+  assert.match(source, /native\.checkPluginUpdate[\s\S]*?PLUGIN_UPDATE_CHECK_TIMEOUT_MS/);
+  assert.match(source, /native\.updatePlugin[\s\S]*?PLUGIN_UPDATE_INSTALL_TIMEOUT_MS/);
+});
+
 
 test("falha automática usa overlay contextual e deduplicado", () => {
   assert.match(source, /function PluginUpdateFailureToast/);

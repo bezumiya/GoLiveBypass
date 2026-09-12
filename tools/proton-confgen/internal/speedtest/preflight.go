@@ -18,12 +18,23 @@ const (
 	// not use the 1.2s ping budget here. The optimized pool retries rejected
 	// handshakes serially because Proton can briefly reject several tunnels
 	// opened with the same freshly registered client key.
-	candidateProbeTimeout = 6 * time.Second
+	candidateProbeTimeout  = 6 * time.Second
+	discordGatewayEndpoint = "https://discord.com/api/v9/gateway"
 )
 
 // ProbeCandidate performs the lightweight tunnel check used before the
 // bandwidth comparison. It never creates a host interface or a system route.
 func ProbeCandidate(ctx context.Context, privateKey string, server api.LogicalServer) error {
+	return probeCandidate(ctx, privateKey, server, false)
+}
+
+// ProbeCandidateForDiscord also rejects routes that cannot reach Discord's
+// gateway API through the same userspace tunnel.
+func ProbeCandidateForDiscord(ctx context.Context, privateKey string, server api.LogicalServer) error {
+	return probeCandidate(ctx, privateKey, server, true)
+}
+
+func probeCandidate(ctx context.Context, privateKey string, server api.LogicalServer, requireDiscord bool) error {
 	peer := vpn.GetBestWireGuardPhysicalServer(&server)
 	if peer == nil {
 		return errors.New("servidor sem um peer WireGuard utilizável")
@@ -35,8 +46,20 @@ func ProbeCandidate(ctx context.Context, privateKey string, server api.LogicalSe
 	defer closeTunnel()
 	probeCtx, cancel := context.WithTimeout(ctx, candidateProbeTimeout)
 	defer cancel()
-	_, err = request(probeCtx, client, http.MethodGet, speedEndpoint+"/__down?bytes=0", nil, 0)
-	return err
+	return probeHTTP(probeCtx, client, requireDiscord)
+}
+
+func probeHTTP(ctx context.Context, client *http.Client, requireDiscord bool) error {
+	if _, err := request(ctx, client, http.MethodGet, speedEndpoint+"/__down?bytes=0", nil, 0); err != nil {
+		return err
+	}
+	if !requireDiscord {
+		return nil
+	}
+	if _, err := request(ctx, client, http.MethodGet, discordGatewayEndpoint, nil, -1); err != nil {
+		return errors.New("Discord HTTPS inacessível pelo túnel")
+	}
+	return nil
 }
 
 // FilterReachableCandidates removes ping finalists whose WireGuard tunnel or
@@ -56,6 +79,12 @@ func FilterReachableCandidates(ctx context.Context, privateKey string, candidate
 // conservative default for callers that do not need the optimization.
 func FilterReachableCandidatesConcurrent(ctx context.Context, privateKey string, candidates []api.LogicalServer, limit, concurrency int, progress ProgressFunc) ([]api.LogicalServer, error) {
 	return filterReachableCandidatesWithConcurrency(ctx, privateKey, candidates, limit, max(1, concurrency), ProbeCandidate, progress)
+}
+
+// FilterDiscordReachableCandidatesConcurrent applies the same tunnel triage
+// while requiring the Discord HTTPS path used by the Windows plugin.
+func FilterDiscordReachableCandidatesConcurrent(ctx context.Context, privateKey string, candidates []api.LogicalServer, limit, concurrency int, progress ProgressFunc) ([]api.LogicalServer, error) {
+	return filterReachableCandidatesWithConcurrency(ctx, privateKey, candidates, limit, max(1, concurrency), ProbeCandidateForDiscord, progress)
 }
 
 type candidateProbeFunc func(context.Context, string, api.LogicalServer) error

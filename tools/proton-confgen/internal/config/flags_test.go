@@ -32,6 +32,8 @@ func TestValidateFeatureFlags(t *testing.T) {
 		{name: "session at cap", cfg: Config{Duration: "7d", NoSave: true}},
 		{name: "session over cap", cfg: Config{Duration: "8d", NoSave: true}, wantErr: true},
 		{name: "persistent over session cap", cfg: Config{Duration: constants.DefaultCertDuration}},
+		{name: "Discord reachability with speed test", cfg: Config{Duration: constants.DefaultCertDuration, SpeedTest: true, RequireDiscord: true}},
+		{name: "Discord reachability without speed test", cfg: Config{Duration: constants.DefaultCertDuration, RequireDiscord: true}, wantErr: true},
 	}
 
 	for _, tt := range tests {

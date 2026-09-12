@@ -605,6 +605,17 @@ function killOwnProcesses(processIds: number[], log: WireSockLogger): void {
 }
 
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+const WIRESOCK_INSPECTION_RETRIES = 6;
+
+async function inspectWireSockUntilReliable(configPath: string): Promise<WireSockInspection> {
+    let inspection = inspectWireSock(configPath);
+    for (let attempt = 1; !inspection.reliable && attempt < WIRESOCK_INSPECTION_RETRIES; attempt++) {
+        await wait(500);
+        inspection = inspectWireSock(configPath);
+    }
+    return inspection;
+}
+
 
 export async function stopOwnedWireSock(configPath: string, log: WireSockLogger): Promise<WireSockCleanupResult> {
     if (!isWindows()) return { stopped: true, servicesResidual: [], processResidual: [], networkLockReset: false, dnsCleared: false, dnsFlushed: false };
@@ -628,7 +639,7 @@ export async function stopOwnedWireSock(configPath: string, log: WireSockLogger)
     }
     for (let attempt = 0; attempt < 2; attempt++) {
         await wait(500);
-        const current = inspectWireSock(configPath);
+        const current = await inspectWireSockUntilReliable(configPath);
         if (!current.reliable) {
             const error = current.reason || UNKNOWN_WIRESOCK_STATE;
             log("error", "limpeza interrompida porque o estado do WireSock ficou desconhecido", { motivo: error });
@@ -655,7 +666,7 @@ export async function stopOwnedWireSock(configPath: string, log: WireSockLogger)
     } catch (error) {
         log("warn", "flushdns falhou", { erro: logError(error) });
     }
-    const residual = inspectWireSock(configPath);
+    const residual = await inspectWireSockUntilReliable(configPath);
     // O veredito e' o mesmo da GUI (electron/wiresock.ts: `!isWireSockActive() && residual.length === 0`)
     // e o mesmo que o README promete: o tunel acabou quando servico E processos proprios
     // sumiram, com leitura confiavel. `active` cobre exatamente esses dois (services/processIds);

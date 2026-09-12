@@ -111,7 +111,7 @@ export interface ConfgenResult {
     json?: Record<string, unknown>;
 }
 
-export const MEASUREMENT_CRITERION_VERSION = 5;
+export const MEASUREMENT_CRITERION_VERSION = 6;
 const MAX_STDOUT_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 512 * 1024;
 const MAX_PROTON_USERNAME_LENGTH = 320;
@@ -1577,7 +1577,10 @@ export async function generateOptimalProtonConfig(
         const staging = path.join(dataDir, `.wireguard.conf.${randomUUID()}.tmp`);
         const args = ["-username", requestedUsername, "-session-file", sessionFileToUse, "-output", staging, "-json", "-ipv6", "-exclude-countries", "BR"];
         if (options.autoPing !== false) args.push("-auto-ping");
-        if (options.speedTest) args.push("-speed-test", "-progress-json");
+        if (options.speedTest) {
+            args.push("-speed-test", "-progress-json");
+            if (process.platform === "win32") args.push("-require-discord");
+        }
         if (options.freeOnly !== false) args.push("-free-only");
         if (options.country?.trim()) args.push("-countries", options.country.trim());
 
@@ -1631,11 +1634,14 @@ export async function runIsolatedSpeedSelection(
     log?: RunConfgenOptions["log"],
     runtimeDirectory?: string,
 ): Promise<ConfgenResult> {
+    if (process.platform === "win32") {
+        return runConfgen({ args, timeoutMs: 210_000, runtimeDirectory, signal, onProgress, log });
+    }
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "golive-plugin-speed-"));
-    const executable = path.join(tempDir, process.platform === "win32" ? "golive-speed-probe.exe" : "golive-speed-probe");
+    const executable = path.join(tempDir, "golive-speed-probe");
     try {
         fs.copyFileSync(findProtonConfgenExe(runtimeDirectory), executable);
-        if (process.platform !== "win32") fs.chmodSync(executable, 0o700);
+        fs.chmodSync(executable, 0o700);
         return await runConfgen({ args, exePath: executable, timeoutMs: 210_000, runtimeDirectory, signal, onProgress, log });
     } finally {
         await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 12, retryDelay: 200 }).catch(() => {});

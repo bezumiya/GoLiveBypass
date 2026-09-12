@@ -110,10 +110,11 @@ const RTCConnectionStore: DiagnosticStore = findStoreLazy("RTCConnectionStore");
 
 const VIDEO_GUARD = "2026-08-video-guard";
 
-const PLUGIN_VERSION = "2.0.0-beta.1";
+const PLUGIN_VERSION = "2.0.6-beta-10";
 const PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS = 15_000;
 const PLUGIN_UPDATE_STATUS_TIMEOUT_MS = 10_000;
-const PLUGIN_UPDATE_OPERATION_TIMEOUT_MS = 45_000;
+const PLUGIN_UPDATE_CHECK_TIMEOUT_MS = 2 * 60_000 + 15_000;
+const PLUGIN_UPDATE_INSTALL_TIMEOUT_MS = 3 * 60_000;
 const CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS = 30_000;
 const PLUGIN_UPDATE_DEFER_MS = 6 * 60 * 60 * 1_000;
 
@@ -535,6 +536,9 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
     const [sessionLoading, setSessionLoading] = useState(true);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [customConfigPath, setCustomConfigPath] = useState(
+        typeof settings.store.customConfigPath === "string" ? settings.store.customConfigPath : ""
+    );
     const [vpnStatus, setVpnStatus] = useState<PluginVpnStatus | null>(null);
     const [optimization, setOptimization] = useState<PluginOptimizationStatus | null>(null);
     const [requestId, setRequestId] = useState<string | null>(null);
@@ -751,6 +755,32 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
         setOptimization(null);
         setPage("route");
     };
+    const selectCustomConfig = async () => {
+        if (!Native || busy || typeof Native.selectWireGuardConfig !== "function") return;
+        setBusy(true);
+        setError(null);
+        try {
+            const result = await Native.selectWireGuardConfig() as {
+                success?: boolean;
+                cancelled?: boolean;
+                path?: string;
+                error?: string;
+            };
+            if (disposedRef.current || result.cancelled) return;
+            if (result.success !== true || typeof result.path !== "string" || !result.path) {
+                throw new Error(result.error || "Não foi possível importar a configuração WireGuard.");
+            }
+            settings.store.customConfigPath = result.path;
+            setCustomConfigPath(result.path);
+        } catch (selectError) {
+            if (!disposedRef.current) {
+                setError(selectError instanceof Error ? selectError.message : "Não foi possível importar a configuração WireGuard.");
+            }
+        } finally {
+            if (!disposedRef.current) setBusy(false);
+        }
+    };
+
 
     const continueToRoute = async () => {
         if (!Native || busy || sessionLoading || (!customMode && !username.trim())) return;
@@ -844,7 +874,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
         try {
             if (customMode) {
                 const result = await withTimeout(
-                    () => Native.testWireGuardConfig(settings.store.customConfigPath) as Promise<{ success?: boolean; error?: string }>,
+                    () => Native.testWireGuardConfig(customConfigPath) as Promise<{ success?: boolean; error?: string }>,
                     CUSTOM_WIREGUARD_VALIDATION_TIMEOUT_MS,
                     "A validação da configuração WireGuard excedeu o tempo limite. Cancele e tente novamente.",
                 );
@@ -1003,8 +1033,11 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                                     <strong>Dependências do sistema:</strong> Pacotes ausentes ({vpnStatus!.dependencies!.join(", ")}). Você pode validar o arquivo agora, mas a ativação exigirá a instalação dos pacotes necessários.
                                 </Paragraph>
                             )}
-                            <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={sessionLoading}>
-                                <Paragraph>{typeof settings.store.customConfigPath === "string" && settings.store.customConfigPath.trim() ? "Arquivo WireGuard personalizado configurado." : "Nenhum arquivo WireGuard personalizado foi configurado ainda."}</Paragraph>
+                            <Button onClick={() => void selectCustomConfig()} disabled={busy || sessionLoading}>
+                                {customConfigPath.trim() ? "Trocar arquivo .conf" : "Selecionar arquivo .conf"}
+                            </Button>
+                            <div style={onboardingBoxStyle} role="status" aria-live="polite" aria-busy={busy}>
+                                <Paragraph>{customConfigPath.trim() ? "Arquivo WireGuard importado para a pasta privada do plugin." : "Nenhum arquivo WireGuard personalizado foi configurado ainda."}</Paragraph>
                             </div>
                             {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
                         </>
@@ -1202,7 +1235,7 @@ function PluginUpdateSettings() {
         try {
             const result = await withTimeout(
                 () => native.checkPluginUpdate(selectedUpdatePolicy),
-                PLUGIN_UPDATE_OPERATION_TIMEOUT_MS,
+                PLUGIN_UPDATE_CHECK_TIMEOUT_MS,
                 "A verificação de atualização excedeu o tempo limite.",
             ) as PluginUpdateCheckResult;
             if (!isOperationMounted()) return;
@@ -1305,7 +1338,7 @@ function PluginUpdateSettings() {
         try {
             const result = await withTimeout(
                 () => native.updatePlugin(selectedUpdatePolicy),
-                PLUGIN_UPDATE_OPERATION_TIMEOUT_MS,
+                PLUGIN_UPDATE_INSTALL_TIMEOUT_MS,
                 "A atualização do plugin excedeu o tempo limite.",
             ) as PluginUpdateResult;
             if (!isOperationMounted()) return;
@@ -1432,7 +1465,7 @@ const settings = definePluginSettings({
     },
     customConfigPath: {
         type: OptionType.STRING,
-        description: "Caminho absoluto de um .conf WireGuard. Ele será copiado para a pasta privada do plugin e filtrado somente para os executáveis deste Discord.",
+        description: "Configuração .conf WireGuard importada para a pasta privada do plugin. Use o botão no assistente ou no painel VPN para selecionar ou trocar o arquivo.",
         default: ""
     },
     protonUsername: {
@@ -1547,6 +1580,30 @@ function VpnPanel() {
             if (mountedRef.current) setBusy(false);
         }
     };
+    const selectCustomConfig = async () => {
+        if (!Native || busy || optimizing || typeof Native.selectWireGuardConfig !== "function") return;
+        setBusy(true);
+        try {
+            const result = await Native.selectWireGuardConfig() as {
+                success?: boolean;
+                cancelled?: boolean;
+                path?: string;
+                error?: string;
+            };
+            if (!mountedRef.current || result.cancelled) return;
+            if (result.success !== true || typeof result.path !== "string" || !result.path) {
+                throw new Error(result.error || "Não foi possível importar a configuração WireGuard.");
+            }
+            settings.store.customConfigPath = result.path;
+            showToast("Configuração WireGuard importada.", Toasts.Type.SUCCESS);
+            await refresh();
+        } catch (error) {
+            if (mountedRef.current) showToast(`GoLiveBypass: ${error instanceof Error ? error.message : String(error)}`, Toasts.Type.FAILURE);
+        } finally {
+            if (mountedRef.current) setBusy(false);
+        }
+    };
+
 
     const login = async () => {
         if (!Native || busy || optimizing) return;
@@ -1704,7 +1761,14 @@ function VpnPanel() {
 
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                 {customMode ? (
-                    <Paragraph>{typeof customConfigPath === "string" && customConfigPath.trim() ? "Modo personalizado: arquivo WireGuard configurado; nenhum login Proton é necessário." : "Modo personalizado: configure um arquivo WireGuard nas opções do plugin para continuar."}</Paragraph>
+                    <>
+                        <Paragraph>{typeof customConfigPath === "string" && customConfigPath.trim() ? "Modo personalizado: arquivo WireGuard importado; nenhum login Proton é necessário." : "Modo personalizado: selecione um arquivo WireGuard para continuar."}</Paragraph>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                            <Button onClick={() => void selectCustomConfig()} disabled={busy || optimizing}>
+                                {typeof customConfigPath === "string" && customConfigPath.trim() ? "Trocar arquivo .conf" : "Selecionar arquivo .conf"}
+                            </Button>
+                        </div>
+                    </>
                 ) : (
                     <>
                         {status?.sessionStorage === "memory-only" && (

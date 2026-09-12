@@ -391,7 +391,13 @@ func generateConfig(cfg *config.Config, vpnClient *vpn.Client) error {
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-		healthyCandidates, probeErr := speedtest.FilterReachableCandidatesConcurrent(ctx, cfg.ClientPrivateKey, candidates, pingTriageLimit, preflightConcurrency, progress)
+		var healthyCandidates []api.LogicalServer
+		var probeErr error
+		if cfg.RequireDiscord {
+			healthyCandidates, probeErr = speedtest.FilterDiscordReachableCandidatesConcurrent(ctx, cfg.ClientPrivateKey, candidates, pingTriageLimit, preflightConcurrency, progress)
+		} else {
+			healthyCandidates, probeErr = speedtest.FilterReachableCandidatesConcurrent(ctx, cfg.ClientPrivateKey, candidates, pingTriageLimit, preflightConcurrency, progress)
+		}
 		if probeErr != nil {
 			cancel()
 			return probeErr

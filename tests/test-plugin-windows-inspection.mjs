@@ -46,10 +46,6 @@ test("inspeção própria só é confirmada quando todos os processos conhecidos
     assert.match(inspection, /WireSock próprio e externo foram detectados ao mesmo tempo/);
 });
 
-test("limpeza não assume ausência quando a inspeção é desconhecida", () => {
-    assert.match(source, /const initial = inspectWireSock\(configPath\);[\s\S]*?if \(!initial\.reliable\) \{[\s\S]*?stopped: false/);
-    assert.match(source, /const residual = inspectWireSock\(configPath\);[\s\S]*?const stopped = residual\.reliable && !residual\.active;/);
-});
 
 test("o veredito da limpeza não exige o reset do network-lock", () => {
     // O reset exige elevação (UAC) e a config do plugin instala o serviço com

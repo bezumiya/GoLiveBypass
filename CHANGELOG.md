@@ -4,7 +4,23 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
-## [Unreleased]
+## [2.0.6-beta-10] - 2026-09-12
+
+### Plugin: arquivo WireGuard e updater
+
+- O modo personalizado agora abre o seletor de arquivos nativo no assistente e no painel VPN, aceita arquivos `.conf`, valida a configuração e copia o arquivo escolhido para a pasta privada do plugin.
+- O updater volta a migrar instalações conhecidas publicadas com o metadata temporário do fork para `bezumiya/GoLiveBypass`. A consulta continua limitada à API e aos artefatos da produção; requisições/downloads passam a ter até dois minutos e a UI reserva três minutos para o build local, eliminando o falso timeout global aos 45 segundos.
+- O canal estável agora descarta qualquer beta pendente também na configuração inicial, não somente quando há troca explícita de canal, e o status nunca reapresenta um beta pendente como atualização estável.
+
+### Plugin Windows: limpeza aguarda o encerramento real do WireSock
+
+- Reproduzido no Discord oficial da VM após a otimização encontrar e ativar uma rota funcional dos EUA: ao parar o serviço para restaurar/reaplicar a rota, o Windows podia reportar o serviço como `Stopped` antes de remover o processo. Nesse intervalo, o CIM ainda listava `wiresock-client.exe`, mas sem `CommandLine` e sem o PID do serviço para comprovar sua origem; a limpeza tratava a leitura transitória como falha definitiva e mostrava “não foi possível confirmar o perfil do processo WireSock; estado desconhecido”.
+- A limpeza agora aguarda por até seis leituras de 500 ms quando a inspeção fica desconhecida, sem encerrar nem assumir a posse do processo durante o intervalo. Se o estado não se tornar confiável dentro do limite, a operação continua falhando de forma segura; quando o processo termina normalmente, a restauração segue sem falso `recovery_required`.
+
+### Plugin Windows: otimização de rota valida o Discord
+
+- Reproduzido no Discord oficial da VM: o botão escolhia a rota apenas pelo teste de banda da Cloudflare; o túnel selecionado saía pelo México e respondia aos probes genéricos, mas o HTTPS do Discord falhava repetidamente. A otimização agora exige que cada candidato alcance `discord.com/api/v9/gateway` pelo mesmo túnel WireGuard antes de medir e selecionar a rota. A GUI e o standalone não habilitam esse critério.
+- O helper de velocidade deixava de ter uma identidade estável no Windows porque era copiado para uma pasta temporária nova a cada clique, causando um novo pedido do Windows Firewall. O plugin passa a executar o `proton-confgen.exe` instalado em caminho estável: há uma autorização inicial do Windows e os ciclos seguintes não repetem o diálogo. Verificado na VM com o plugin recompilado e injetado no Discord oficial; `go test ./...`, `test-plugin-proton-edge.mjs` (22/22) e `test-plugin-proton-audit.mjs` (8/8) também passaram.
 
 ## [2.0.6-beta-9] - 2026-09-11
 

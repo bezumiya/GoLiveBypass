@@ -12,11 +12,15 @@ const TRUSTED_UPDATE_HOSTS = new Set([
   "github-releases.githubusercontent.com",
 ]);
 const OFFICIAL_UPDATE_REPOSITORY = "bezumiya/GoLiveBypass";
-// v2.0.5 was published in the canonical repository with the updater metadata
-// left over from the project's former fork. Keep this narrow compatibility
-// case so stable users can migrate, without trusting arbitrary fork ids.
+// These releases were published with the former fork in updater.id. Accept
+// only the exact known versions so those installed copies can migrate to the
+// canonical repository without trusting arbitrary fork builds.
 const LEGACY_RELEASE_MANIFEST = {
-  version: "2.0.5",
+  versions: {
+    "2.0.5": true,
+    "2.0.6-beta-7": true,
+    "2.0.6-beta-9": true,
+  } as Record<string, true>,
   repository: "pdl-clay/GoLiveBypass",
 } as const;
 const OFFICIAL_API_RELEASE_PATH = "/repos/bezumiya/GoLiveBypass/releases";
@@ -129,7 +133,8 @@ export function isCompatiblePluginManifest(value: unknown, assetName: string): b
     || !hasOwn(value, "version")
     || !hasOwn(value, "updater")
     || value.name !== "GoLiveBypass"
-    || value.version !== LEGACY_RELEASE_MANIFEST.version) return false;
+    || typeof value.version !== "string"
+    || LEGACY_RELEASE_MANIFEST.versions[value.version] !== true) return false;
   const { updater } = value;
   if (!isJsonRecord(updater)
     || !hasOwn(updater, "type")

@@ -21,10 +21,22 @@ test("onboarding do modo customizado mantém duas etapas sem credenciais Proton"
 test("onboarding valida o arquivo customizado antes de concluir", () => {
     const optimizeBlock = source.slice(source.indexOf("const optimizeRoute"), source.indexOf("const cancelOptimization"));
     assert.match(optimizeBlock, /if \(customMode\)/);
-    assert.match(optimizeBlock, /Native\.testWireGuardConfig\(settings\.store\.customConfigPath\)/);
+    assert.match(optimizeBlock, /Native\.testWireGuardConfig\(customConfigPath\)/);
     assert.match(optimizeBlock, /A configuração WireGuard personalizada não passou na validação/);
     assert.match(optimizeBlock, /setPage\("ready"\)/);
 });
+test("modo customizado abre seletor nativo e salva a cópia privada", () => {
+    const native = readFileSync(new URL("../goLiveBypass/native.ts", import.meta.url), "utf8");
+    const onboarding = source.slice(source.indexOf("function PluginOnboardingModal"), source.indexOf("function buildReport"));
+    assert.match(native, /dialog\.showOpenDialog/);
+    assert.match(native, /extensions:\s*\["conf"\]/);
+    assert.match(native, /controller\.importCustomConfig\(sourcePath\)/);
+    assert.match(onboarding, /Native\.selectWireGuardConfig\(\)/);
+    assert.match(onboarding, /settings\.store\.customConfigPath = result\.path/);
+    assert.match(onboarding, /"Selecionar arquivo \.conf"/);
+    assert.match(onboarding, /"Trocar arquivo \.conf"/);
+});
+
 
 test("painel customizado não exibe login Proton e conserva ações do túnel", () => {
     const panel = source.slice(source.indexOf("function VpnPanel"), source.indexOf("function buildReport"));

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:child_process", () => ({ execFile: vi.fn(), execFileSync: vi.fn() }));
 
-import { inspectWireSock } from "../../goLiveBypass/vpn-windows";
+import { inspectWireSock, stopOwnedWireSock } from "../../goLiveBypass/vpn-windows";
 
 const windowsSource = fs.readFileSync(
     path.resolve(__dirname, "../../goLiveBypass/vpn-windows.ts"),
@@ -32,6 +32,16 @@ function snapshot(processes: Array<{ pid: number; commandLine: string | null }>,
     });
 }
 
+function stoppedSnapshot(processes: Array<{ pid: number; commandLine: string | null }>): string {
+    return JSON.stringify({
+        services: [
+            { name: "wiresock-client-service", state: "Stopped", command: SERVICE_COMMAND, processId: 0 },
+            { name: "wiresock-pro-client-service", state: "Missing", command: null, processId: 0 },
+        ],
+        processes,
+    });
+}
+
 describe("atribuição do WireSock pelo PID do serviço próprio", () => {
     const originalPlatform = process.platform;
     const windows = (value: string) => vi.mocked(execFileSync).mockReturnValue(value as never);
@@ -43,6 +53,7 @@ describe("atribuição do WireSock pelo PID do serviço próprio", () => {
     afterEach(() => {
         Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
         vi.mocked(execFileSync).mockReset();
+        vi.useRealTimers();
     });
 
     it("reconhece como próprio o processo sem linha de comando cujo PID é do serviço do plugin", () => {
@@ -79,6 +90,48 @@ describe("atribuição do WireSock pelo PID do serviço próprio", () => {
             processIds: [],
             reason: "Não foi possível confirmar o estado do WireSock; estado desconhecido.",
         });
+    });
+
+    it("não executa parada destrutiva quando a inspeção inicial é desconhecida", async () => {
+        vi.mocked(execFileSync).mockImplementation(((file: string, args?: readonly string[]) => {
+            const script = args?.[3] ?? "";
+            if (file === "powershell.exe" && script.includes("ConvertTo-Json"))
+                return stoppedSnapshot([{ pid: 4242, commandLine: null }]);
+            return "";
+        }) as never);
+
+        const cleanup = await stopOwnedWireSock(PLUGIN_CONFIG, vi.fn());
+
+        expect(cleanup).toMatchObject({
+            stopped: false,
+            processResidual: [4242],
+            error: "Não foi possível confirmar o perfil do processo WireSock; estado desconhecido.",
+        });
+        expect(vi.mocked(execFileSync).mock.calls.some(([file]) => file === "sc.exe" || file === "taskkill.exe")).toBe(false);
+    });
+
+    it("aguarda o processo em encerramento perder o PID antes de concluir a limpeza", async () => {
+        vi.useFakeTimers();
+        let snapshotCall = 0;
+        vi.mocked(execFileSync).mockImplementation(((file: string, args?: readonly string[]) => {
+            const script = args?.[3] ?? "";
+            if (file === "powershell.exe" && script.includes("ConvertTo-Json")) {
+                snapshotCall++;
+                if (snapshotCall === 1) return snapshot([{ pid: 4242, commandLine: null }], 4242);
+                if (snapshotCall === 2) return stoppedSnapshot([{ pid: 4242, commandLine: null }]);
+                return stoppedSnapshot([]);
+            }
+            if (file === "powershell.exe" && script.includes(".PathName")) return SERVICE_COMMAND;
+            return "";
+        }) as never);
+
+        const cleanupPromise = stopOwnedWireSock(PLUGIN_CONFIG, vi.fn());
+        await vi.runAllTimersAsync();
+        const cleanup = await cleanupPromise;
+
+        expect(cleanup).toMatchObject({ stopped: true, servicesResidual: [], processResidual: [] });
+        expect(snapshotCall).toBeGreaterThanOrEqual(4);
+        expect(vi.mocked(execFileSync).mock.calls.some(([file]) => file === "taskkill.exe")).toBe(false);
     });
 });
 

@@ -15,7 +15,7 @@ modificado por esta migração.
 
 ## Linha v2 beta
 
-A versão atual do plugin é **2.0.0-beta.1**. Nesta linha, a VPN WireGuard/WireSock é
+A versão atual do plugin é **2.0.6-beta-10**. Nesta linha, a VPN WireGuard/WireSock é
 iniciada e controlada pelo próprio plugin, com estado privado em
 `%LOCALAPPDATA%\\GoLiveBypass\\plugin-vpn` no Windows ou
 `$XDG_DATA_HOME/GoLiveBypass/plugin-vpn` no Linux (por padrão `~/.local/share/GoLiveBypass/plugin-vpn`).
@@ -28,9 +28,9 @@ checkout fonte continua preferindo os arquivos de `bin/`; nenhuma variável de a
 necessária para o build empacotado.
 
 O beta ainda não é um release estável. O updater ignora prereleases quando consulta o
-canal estável; para testar esta linha, instale o código-fonte do plugin e recompile o
-checkout do Equicord/Vencord. A versão `2.0.0-beta.1` também pode aparecer como
-`2.0.0-beta-1` nas releases; os dois formatos representam a mesma sequência beta.
+canal estável; para testar esta linha, selecione o canal **Beta** nas configurações do
+plugin. A versão `2.0.6-beta-10` é publicada como prerelease e nunca substitui a versão
+estável retornada por `/releases/latest`.
 
 ## Atualizações do plugin
 
