@@ -321,6 +321,7 @@ export class PluginVpnController {
     private readonly profilePath: string;
     private readonly profileAccountPath: string;
     private readonly serviceConfigPath: string;
+    private readonly guiConfigPath: string;
     private readonly ownerPath: string;
     private state: VpnState = "inactive";
     private generation = 0;
@@ -349,11 +350,17 @@ export class PluginVpnController {
         this.profilePath = path.join(this.dataDir, PROFILE_FILE);
         this.profileAccountPath = path.join(this.dataDir, PROFILE_ACCOUNT_FILE);
         this.serviceConfigPath = path.join(this.dataDir, SERVICE_CONFIG_FILE);
+        this.guiConfigPath = path.join(this.options.guiDataDir, SERVICE_CONFIG_FILE);
         this.ownerPath = path.join(this.dataDir, OWNER_FILE);
     }
 
     public get paths() {
         return { dataDir: this.dataDir, profilePath: this.profilePath, serviceConfigPath: this.serviceConfigPath, ownerPath: this.ownerPath };
+    }
+
+    /** Inspeção Windows com as duas configs conhecidas do GoLiveBypass (plugin e GUI). */
+    private inspectWindows(): windows.WireSockInspection {
+        return windows.inspectWireSock(this.serviceConfigPath, this.guiConfigPath);
     }
 
     public isRelaunching(): boolean {
@@ -372,7 +379,7 @@ export class PluginVpnController {
             if (inspection.externalConflict && !owner) return false;
             return inspection.active || Boolean(owner);
         }
-        const inspection = windows.inspectWireSock(this.serviceConfigPath);
+        const inspection = this.inspectWindows();
         if (isUnknownWireSockInspection(inspection)) return this.state !== "blocked_external";
         if (inspection.active) return inspection.owned;
         if (this.state === "blocked_external") return false;
@@ -395,7 +402,7 @@ export class PluginVpnController {
         try {
             await this.migrateGuiState();
             const owner = this.readOwner();
-            const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            const inspection = this.inspectWindows();
             if (isUnknownWireSockInspection(inspection)) {
                 this.initialized = false;
                 this.state = "recovery_required";
@@ -657,7 +664,7 @@ export class PluginVpnController {
                 message: "Windows x64 necessário",
             };
         }
-        const inspection = windows.inspectWireSock(this.serviceConfigPath);
+        const inspection = this.inspectWindows();
         if (isUnknownWireSockInspection(inspection)) {
             const message = this.state === "active" || this.state === "restart_pending"
                 ? unknownWireSockMessage(inspection)
@@ -677,7 +684,14 @@ export class PluginVpnController {
                 message,
             };
         }
-        if (inspection.reliable && inspection.active && !inspection.owned) {
+        // Durante uma operação em andamento (ativação explícita com retomada, parada,
+        // relaunch) o poll do renderer não pode flipar o estado para blocked_external:
+        // a inspeção ainda vê a instância gerenciada que esta operação vai encerrar.
+        const operationInProgress = this.state === "preparing"
+            || this.state === "starting"
+            || this.state === "stopping"
+            || this.state === "restart_pending";
+        if (inspection.reliable && inspection.active && !inspection.owned && !operationInProgress) {
             const reason = inspection.reason || "WireSock externo está ativo.";
             if (this.state !== "blocked_external" || this.externalReason !== reason) this.blockExternal(reason);
         }
@@ -693,6 +707,8 @@ export class PluginVpnController {
             discordPid: this.discordPid,
             profilePath: fs.existsSync(this.profilePath) ? this.profilePath : null,
             configPath: fs.existsSync(this.serviceConfigPath) ? this.serviceConfigPath : null,
+            managedConflict: inspection.reliable && inspection.active && !inspection.owned
+                && (inspection.origin === "gui" || inspection.origin === "managed"),
             externalReason: this.externalReason,
             lastDiagnostic: this.lastDiagnostic,
             message: reportedState === "inactive" ? "VPN inativa" : this.statusMessage(),
@@ -729,7 +745,7 @@ export class PluginVpnController {
 
     private async adoptActiveTunnelAtBoot(): Promise<VpnOperationResult> {
         const owner = this.readOwner();
-        const inspection = isLinux() ? linux.inspectLinuxNetworkSync(owner) : windows.inspectWireSock(this.serviceConfigPath);
+        const inspection = isLinux() ? linux.inspectLinuxNetworkSync(owner) : this.inspectWindows();
         if (!inspection.reliable) {
             this.options.log("warn", "ativação automática não confirmou o estado da VPN; ativação explícita segue disponível", { mode: "diagnostic-only" });
             return { success: false, suppressed: true, state: this.state, error: "Não foi possível confirmar o estado da VPN no boot." };
@@ -889,7 +905,7 @@ export class PluginVpnController {
                 if (inspection.active || owner || this.state !== "inactive")
                     return { success: false, error: "Restaure a rede antes de sair da conta Proton." };
             } else {
-                const inspection = windows.inspectWireSock(this.serviceConfigPath);
+                const inspection = this.inspectWindows();
                 if (isUnknownWireSockInspection(inspection))
                     return { success: false, error: unknownWireSockMessage(inspection) };
                 if (inspection.active || owner || this.state !== "inactive")
@@ -1549,7 +1565,7 @@ export class PluginVpnController {
             this.externalReason = "A VPN do plugin nesta versão está disponível somente no Windows x64.";
             return { success: false, state: this.state, error: this.externalReason };
         }
-        const existing = windows.inspectWireSock(this.serviceConfigPath);
+        const existing = this.inspectWindows();
         if (isUnknownWireSockInspection(existing)) {
             this.state = "recovery_required";
             this.externalReason = null;
@@ -1582,7 +1598,12 @@ export class PluginVpnController {
             }
             return { success: true, state: "active", message: this.statusMessage() };
         }
-        if (existing.active && !existing.owned) {
+        // Conflito gerenciado (GUI/pool do GoLiveBypass) não é VPN externa: somente a
+        // ativação explícita (`relaunch`) pode retomá-lo. Boot, restauração interna,
+        // watchdog e status continuam sem encerrar processos.
+        const managedConflict = relaunch && existing.active && !existing.owned
+            && (existing.origin === "gui" || existing.origin === "managed");
+        if (existing.active && !existing.owned && !managedConflict) {
             this.blockExternal(existing.reason || "WireSock externo está ativo.");
             return { success: false, state: this.state, error: this.externalReason || undefined };
         }
@@ -1627,7 +1648,29 @@ export class PluginVpnController {
             owner.probePath = probe;
             await this.writeOwner(owner);
             this.state = "starting";
-            const startedResult = await windows.startWireSockService(this.serviceConfigPath, raw, apps, this.options.log);
+            let startedResult: windows.WireSockStartResult | null = null;
+            for (let attempt = 0; attempt < 2 && startedResult === null; attempt++) {
+                if (managedConflict || attempt > 0) {
+                    const takeover = await windows.stopManagedWireSock(this.serviceConfigPath, this.guiConfigPath, this.options.log);
+                    if (!takeover.stopped) throw new Error(takeover.error || "A retomada da instância GoLiveBypass falhou.");
+                }
+                try {
+                    startedResult = await windows.startWireSockService(this.serviceConfigPath, raw, apps, this.options.log);
+                } catch (startError) {
+                    // Uma instância gerenciada pode reaparecer entre o preflight e a
+                    // instalação do serviço (a GUI reativa sozinha). Um único retry com
+                    // nova retomada; nada de loop.
+                    const reinspect = this.inspectWindows();
+                    const managedAgain = reinspect.reliable && reinspect.active && !reinspect.owned
+                        && (reinspect.origin === "gui" || reinspect.origin === "managed");
+                    if (attempt === 0 && managedAgain) {
+                        this.options.log("warn", "instância gerenciada reapareceu durante a ativação; retomando de novo", { mode: "diagnostic-only" });
+                        continue;
+                    }
+                    throw startError;
+                }
+            }
+            if (!startedResult) throw new Error("Não foi possível iniciar o serviço WireSock após a retomada.");
             started = true;
             owner.configPath = startedResult.configPath;
             owner.restarting = relaunch;
@@ -1648,7 +1691,7 @@ export class PluginVpnController {
             return { success: true, state: "active", message: this.statusMessage() };
         } catch (error) {
             this.stopWatchdog();
-            const currentInspection = windows.inspectWireSock(this.serviceConfigPath);
+            const currentInspection = this.inspectWindows();
             // Só derruba o túnel que ESTA tentativa criou. Quando o erro é o conflito com
             // outra instância viva (claimActiveOwnership recusa o lock alheio), o WireSock
             // ativo é dela: derrubá-lo aqui destruía uma VPN que estava funcionando e ainda
@@ -1860,7 +1903,7 @@ export class PluginVpnController {
         if (!isSupportedWindowsArchitecture(process.platform, process.arch)) return { success: false, state: "blocked_external", error: "A VPN do plugin nesta versão exige Windows x64." };
         this.stopWatchdog();
         this.diagnosticGeneration++;
-        const inspection = windows.inspectWireSock(this.serviceConfigPath);
+        const inspection = this.inspectWindows();
         if (isUnknownWireSockInspection(inspection)) {
             this.state = "recovery_required";
             this.externalReason = null;
@@ -2228,7 +2271,7 @@ export class PluginVpnController {
             && this.generation === vpnGeneration
             && this.state === "active";
         try {
-            const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            const inspection = this.inspectWindows();
             if (!inspection.reliable) {
                 if (isCurrent()) this.setDiagnostic("wireguard", false, inspection.reason || "Estado do WireSock desconhecido.");
                 this.options.log("warn", "watchdog não conseguiu confirmar o estado do WireSock", { mode: "diagnostic-only" });
@@ -2242,7 +2285,7 @@ export class PluginVpnController {
                 for (let attempt = 0; attempt < 5 && confirmation.reliable && !confirmation.active; attempt++) {
                     await new Promise<void>(resolve => setTimeout(resolve, 1_000));
                     if (!isCurrent()) return;
-                    confirmation = windows.inspectWireSock(this.serviceConfigPath);
+                    confirmation = this.inspectWindows();
                 }
                 if (!confirmation.reliable) {
                     if (isCurrent()) this.setDiagnostic("wireguard", false, confirmation.reason || "Estado do WireSock desconhecido.");
@@ -2487,9 +2530,15 @@ export class PluginVpnController {
         return this.withOwnerMutex(async () => {
             const existing = this.readOwner();
             const ownerFileExists = fs.existsSync(this.ownerPath);
-            const inspection = windows.inspectWireSock(this.serviceConfigPath);
+            const inspection = this.inspectWindows();
             if (isUnknownWireSockInspection(inspection)) throw new Error(unknownWireSockMessage(inspection));
-            if (inspection.reliable && inspection.active && !inspection.owned) throw new Error(inspection.reason || "WireSock externo está ativo.");
+            // Conflito gerenciado (GUI/pool do GoLiveBypass) não bloqueia a reserva do lock:
+            // a retomada acontece depois, no start, já sob posse desta instância. WireSock
+            // externo ou leitura desconhecida continuam recusados aqui.
+            const managedConflict = inspection.reliable && inspection.active && !inspection.owned
+                && (inspection.origin === "gui" || inspection.origin === "managed");
+            if (inspection.reliable && inspection.active && !inspection.owned && !managedConflict)
+                throw new Error(inspection.reason || "WireSock externo está ativo.");
             if (this.isLiveForeignOwner(existing)) throw new Error("Outra instância do GoLiveBypass já controla a VPN.");
             if (existing?.pid === process.pid) {
                 this.probePath = existing.probePath;

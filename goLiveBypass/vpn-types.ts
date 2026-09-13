@@ -87,6 +87,8 @@ export interface VpnStatus {
     interfaceName?: string | null;
     requiresRelaunch?: boolean;
     dependencies?: string[];
+    /** Conflito Windows comprovadamente do GoLiveBypass; ativação explícita pode retomá-lo. */
+    managedConflict?: boolean;
     externalReason: string | null;
     lastDiagnostic: VpnDiagnostic | null;
     message: string;

@@ -95,9 +95,10 @@ test("plugin mantém AllowedApps estreito e network-lock desativado", () => {
     assert.match(pluginController, /Update\.exe/);
 });
 
-test("plugin bloqueia WireSock externo e respeita o slot global do serviço", () => {
-    assert.match(pluginWindows, /allServicesOwned/);
-    assert.match(pluginWindows, /allProcessesOwned/);
+test("plugin distingue WireSock gerenciado do externo e respeita o slot global", () => {
+    assert.match(pluginWindows, /configArgumentEquals/);
+    assert.match(pluginWindows, /origin = "mixed"/);
+    assert.match(pluginWindows, /stopManagedWireSock/);
     assert.match(pluginWindows, /assertPluginServiceSlot/);
     assert.match(pluginController, /blocked_external/);
 });

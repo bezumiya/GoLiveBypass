@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("../goLiveBypass/vpn-controller.ts", import.meta.url), "utf8");
 const login = source.slice(source.indexOf("public loginProton"), source.indexOf("public checkProtonSession"));
-const customImport = source.slice(source.indexOf("public async importCustomConfig"), source.indexOf("public testConfig"));
+const customImport = source.slice(source.indexOf("public importCustomConfig"), source.indexOf("public testConfig"));
 const activation = source.slice(source.indexOf("private async startInternal"), source.indexOf("private async stopInternal"));
 
 test("login Proton é serializado com ativação e otimização", () => {
@@ -62,7 +62,7 @@ test("a proteção de ownership externo continua explícita", () => {
 
 test("o status também expõe WireSock externo antes de uma tentativa de ativação", () => {
     const status = source.slice(source.indexOf("public getStatus"), source.indexOf("\n    public enable"));
-    assert.match(status, /if \(inspection\.reliable && inspection\.active && !inspection\.owned\)/);
+    assert.match(status, /if \(inspection\.reliable && inspection\.active && !inspection\.owned[^)]*\)/);
     assert.match(status, /if \(this\.state !== "blocked_external" \|\| this\.externalReason !== reason\) this\.blockExternal\(reason\)/);
 });
 

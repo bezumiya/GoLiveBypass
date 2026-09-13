@@ -45,7 +45,21 @@ export interface WireSockInspection {
     services: string[];
     processIds: number[];
     reason: string | null;
+    /** Origem agregada dos recursos ativos: só faz sentido com `reliable && active`. */
+    origin: WireSockOrigin;
+    /** Serviços ativos cuja config aponta para o GoLiveBypass (plugin ou GUI). */
+    managedServices: string[];
+    /** PIDs ativos cuja config aponta para o GoLiveBypass (plugin ou GUI). */
+    managedProcessIds: number[];
 }
+
+/**
+ * Origem agregada dos recursos WireSock ativos. `managed` cobre apenas configs
+ * comprovadamente do GoLiveBypass (plugin ou GUI); `mixed` mistura gerenciado com
+ * externo/desconhecido e nunca autoriza encerrar nada; `unknown` é leitura
+ * inconclusiva.
+ */
+export type WireSockOrigin = "plugin" | "gui" | "managed" | "external" | "mixed" | "unknown";
 
 const UNKNOWN_WIRESOCK_STATE = "Não foi possível confirmar o estado do WireSock; estado desconhecido.";
 
@@ -92,6 +106,58 @@ function normalizedPath(value: string): string {
 function containsConfig(commandLine: string | null, configPath: string): boolean {
     if (!commandLine) return false;
     return normalizedPath(commandLine).includes(normalizedPath(configPath));
+}
+
+/**
+ * Separa uma linha de comando do Windows preservando argumentos entre aspas. Os caminhos
+ * gerados pelo GoLiveBypass não contêm aspas literais; por isso basta tratar `"` como
+ * delimitador e espaços fora delas como separadores.
+ */
+function commandTokens(commandLine: string): string[] {
+    const tokens: string[] = [];
+    let token = "";
+    let quoted = false;
+    for (const character of commandLine.trim()) {
+        if (character === '"') {
+            quoted = !quoted;
+            continue;
+        }
+        if (/\s/.test(character) && !quoted) {
+            if (token) {
+                tokens.push(token);
+                token = "";
+            }
+            continue;
+        }
+        token += character;
+    }
+    if (token) tokens.push(token);
+    return tokens;
+}
+
+/**
+ * Extrai o argumento do flag `-config`/`--config` da linha de comando. Comparar por flag
+ * (e não por substring da linha inteira) impede que `-allowed-apps`, caminhos de log ou
+ * `wiresock-discord.conf.bak` sejam confundidos com a config aplicada.
+ */
+function configArgument(commandLine: string | null): string | null {
+    if (!commandLine) return null;
+    const tokens = commandTokens(commandLine);
+    for (let index = 0; index < tokens.length - 1; index++) {
+        const flag = tokens[index].toLowerCase();
+        if (flag === "-config" || flag === "--config") return normalizedPath(tokens[index + 1]);
+    }
+    return null;
+}
+
+/**
+ * Compara o argumento de config normalizado por igualdade, não por substring de
+ * diretório: `wiresock-discord.conf.bak` ou um perfil do usuário colocado dentro da
+ * pasta GoLiveBypass não podem ser confundidos com a config aplicada.
+ */
+function configArgumentEquals(commandLine: string | null, configPath: string): boolean {
+    const argument = configArgument(commandLine);
+    return argument !== null && argument === normalizedPath(configPath);
 }
 
 function serviceExists(name: string): boolean {
@@ -193,12 +259,13 @@ function assertPluginServiceSlot(configPath: string): void {
     if (running === null) throw new Error("Não foi possível confirmar o estado do serviço WireSock; operação interrompida por segurança.");
     if (!running) return;
     const command = serviceCommand(name);
-    if (!command || !containsConfig(command, configPath))
+    if (!command || !configArgumentEquals(command, configPath))
         throw new Error("O serviço WireSock já está registrado com outro perfil (possivelmente pela GUI ou por outro plugin). Desative-o antes de usar a VPN do plugin.");
 }
 
-export function inspectWireSock(configPath?: string): WireSockInspection {
-    if (!isWindows()) return { active: false, owned: false, reliable: true, services: [], processIds: [], reason: null };
+export function inspectWireSock(configPath?: string, guiConfigPath?: string): WireSockInspection {
+    if (!isWindows())
+        return { active: false, owned: false, reliable: true, services: [], processIds: [], reason: null, origin: "unknown", managedServices: [], managedProcessIds: [] };
     const snapshot = readWireSockSnapshot(VPN_SERVICE_NAMES);
     if (!snapshot) {
         // Sem o snapshot a leitura já é desconhecida de qualquer forma: os processos não têm
@@ -214,6 +281,9 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
             services: VPN_SERVICE_NAMES.filter(name => serviceRunningFromSc(name) === true),
             processIds: [],
             reason: UNKNOWN_WIRESOCK_STATE,
+            origin: "unknown",
+            managedServices: [],
+            managedProcessIds: [],
         };
     }
     const serviceStates = snapshot.services.map(service => ({ name: service.name, running: service.running }));
@@ -231,11 +301,16 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
             services,
             processIds,
             reason: UNKNOWN_WIRESOCK_STATE,
+            origin: "unknown",
+            managedServices: [],
+            managedProcessIds: [],
         };
     }
     const active = services.length > 0 || processes.length > 0;
-    if (!active) return { active: false, owned: false, reliable: true, services: [], processIds: [], reason: null };
-    if (!configPath) return { active, owned: false, reliable: true, services, processIds, reason: "WireSock já está ativo fora do perfil do plugin." };
+    if (!active)
+        return { active: false, owned: false, reliable: true, services: [], processIds: [], reason: null, origin: "unknown", managedServices: [], managedProcessIds: [] };
+    if (!configPath)
+        return { active, owned: false, reliable: true, services, processIds, reason: "WireSock já está ativo fora do perfil do plugin.", origin: "unknown", managedServices: [], managedProcessIds: [] };
 
     const commandOf = (name: string) => snapshot.services.find(service => service.name === name)?.command ?? null;
     if (services.some(name => commandOf(name) === null)) {
@@ -246,17 +321,45 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
             services,
             processIds,
             reason: "Não foi possível confirmar o perfil do serviço WireSock; estado desconhecido.",
+            origin: "unknown",
+            managedServices: [],
+            managedProcessIds: [],
         };
     }
-    const ownService = services.filter(name => containsConfig(commandOf(name), configPath));
-    const ownServiceProcessIds = new Set(snapshot.services
-        .filter(service => service.running === true && containsConfig(service.command, configPath))
+    // Cada recurso ativo recebe uma origem comprovada pelo argumento de config. Um processo
+    // sem linha de comando só herda a origem do serviço cujo ProcessId coincide com o PID;
+    // fora disso a leitura inteira é desconhecida (nada pode ser encerrado com segurança).
+    // O pool de rotas da GUI vive dentro da pasta dela e também é instância gerenciada.
+    const guiPoolPrefix = guiConfigPath
+        ? `${normalizedPath(path.win32.join(path.win32.dirname(guiConfigPath), "proton-route-pool"))}\\`
+        : null;
+    const isGuiConfig = (argument: string | null): boolean => {
+        if (!argument || !guiConfigPath) return false;
+        return argument === normalizedPath(guiConfigPath) || (guiPoolPrefix !== null && argument.startsWith(guiPoolPrefix));
+    };
+    const classify = (commandLine: string | null): "plugin" | "gui" | "external" | null => {
+        const argument = configArgument(commandLine);
+        if (argument !== null && argument === normalizedPath(configPath)) return "plugin";
+        if (isGuiConfig(argument)) return "gui";
+        if (commandLine && commandLine.trim().length > 0) return "external";
+        return null;
+    };
+    const serviceOrigin = new Map<string, "plugin" | "gui" | "external">();
+    for (const name of services) serviceOrigin.set(name, classify(commandOf(name)) ?? "external");
+    const servicePidsOf = (origin: "plugin" | "gui") => new Set(snapshot.services
+        .filter(service => service.running === true && serviceOrigin.get(service.name) === origin)
         .map(service => service.processId)
         .filter((pid): pid is number => pid !== null));
-    const processOwnershipReliable = processes.every(process =>
-        (typeof process.commandLine === "string" && process.commandLine.trim().length > 0)
-        || ownServiceProcessIds.has(process.pid));
-    if (!processOwnershipReliable) {
+    const pluginServicePids = servicePidsOf("plugin");
+    const guiServicePids = servicePidsOf("gui");
+    const processOrigin = processes.map(process => {
+        const direct = classify(process.commandLine);
+        if (direct) return direct;
+        if (pluginServicePids.has(process.pid)) return "plugin" as const;
+        if (guiServicePids.has(process.pid)) return "gui" as const;
+        return null;
+    });
+    if (processOrigin.some(origin => origin === null)) {
         return {
             active: false,
             owned: false,
@@ -264,25 +367,41 @@ export function inspectWireSock(configPath?: string): WireSockInspection {
             services,
             processIds,
             reason: "Não foi possível confirmar o perfil do processo WireSock; estado desconhecido.",
+            origin: "unknown",
+            managedServices: [],
+            managedProcessIds: [],
         };
     }
-    const ownProcess = processes.filter(process =>
-        containsConfig(process.commandLine, configPath) || ownServiceProcessIds.has(process.pid));
-    const allServicesOwned = services.every(name => containsConfig(commandOf(name), configPath));
-    const allProcessesOwned = processes.every(process =>
-        containsConfig(process.commandLine, configPath) || ownServiceProcessIds.has(process.pid));
-    if ((ownService.length > 0 || ownProcess.length > 0) && allServicesOwned && allProcessesOwned)
-        return { active, owned: true, reliable: true, services, processIds, reason: null };
-    return {
-        active,
-        owned: false,
-        reliable: true,
-        services,
-        processIds,
-        reason: ownService.length > 0 || ownProcess.length > 0
+    const ownServices = services.filter(name => serviceOrigin.get(name) === "plugin");
+    const ownProcesses = processes.filter((_, index) => processOrigin[index] === "plugin");
+    const managedServices = services.filter(name => serviceOrigin.get(name) === "gui");
+    const managedProcesses = processes.filter((_, index) => processOrigin[index] === "gui");
+    const managedProcessIds = managedProcesses.map(process => process.pid);
+    const externalCount = (services.length - ownServices.length - managedServices.length)
+        + (processes.length - ownProcesses.length - managedProcesses.length);
+    const hasManaged = managedServices.length + managedProcessIds.length > 0;
+    const hasOwn = ownServices.length + ownProcesses.length > 0;
+    if (hasOwn && !hasManaged && externalCount === 0)
+        return { active, owned: true, reliable: true, services, processIds, reason: null, origin: "plugin", managedServices: [], managedProcessIds: [] };
+
+    let origin: WireSockOrigin;
+    let reason: string;
+    if (externalCount > 0 && (hasManaged || hasOwn)) {
+        origin = "mixed";
+        reason = hasOwn && !hasManaged
             ? "WireSock próprio e externo foram detectados ao mesmo tempo; a operação foi bloqueada."
-            : "WireSock já está ativo por outro perfil, pela GUI ou por outro plugin.",
-    };
+            : "WireSock externo e uma instância GoLiveBypass estão ativos ao mesmo tempo; a operação foi bloqueada.";
+    } else if (externalCount > 0) {
+        origin = "external";
+        reason = "WireSock externo já está ativo fora do GoLiveBypass.";
+    } else if (hasOwn) {
+        origin = "managed";
+        reason = "WireSock próprio e da GUI GoLiveBypass estão ativos ao mesmo tempo.";
+    } else {
+        origin = "gui";
+        reason = "Outra superfície do GoLiveBypass (GUI) está com o WireSock ativo.";
+    }
+    return { active, owned: false, reliable: true, services, processIds, reason, origin, managedServices, managedProcessIds };
 }
 
 export function wireSockSearchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -597,21 +716,25 @@ export function clearWireSockDns(log: WireSockLogger): boolean {
     }
 }
 
-function killOwnProcesses(processIds: number[], log: WireSockLogger): void {
+function killProcesses(processIds: number[], label: string, log: WireSockLogger): void {
     for (const pid of processIds) {
         if (!runAsAdministrator("taskkill.exe", ["/F", "/T", "/PID", String(pid)], log))
-            log("warn", "não consegui encerrar processo WireSock próprio", { pid });
+            log("warn", `não consegui encerrar processo WireSock ${label}`, { pid });
     }
+}
+
+function killOwnProcesses(processIds: number[], log: WireSockLogger): void {
+    killProcesses(processIds, "próprio", log);
 }
 
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const WIRESOCK_INSPECTION_RETRIES = 6;
 
-async function inspectWireSockUntilReliable(configPath: string): Promise<WireSockInspection> {
-    let inspection = inspectWireSock(configPath);
+async function inspectWireSockUntilReliable(configPath: string, guiConfigPath?: string): Promise<WireSockInspection> {
+    let inspection = inspectWireSock(configPath, guiConfigPath);
     for (let attempt = 1; !inspection.reliable && attempt < WIRESOCK_INSPECTION_RETRIES; attempt++) {
         await wait(500);
-        inspection = inspectWireSock(configPath);
+        inspection = inspectWireSock(configPath, guiConfigPath);
     }
     return inspection;
 }
@@ -699,6 +822,77 @@ export async function stopOwnedWireSock(configPath: string, log: WireSockLogger)
                 : "O WireSock próprio ainda permanece ativo.",
         }),
     };
+}
+
+/**
+ * Retomada gerenciada: encerra somente serviços e processos cuja config foi comprovada
+ * como instância do GoLiveBypass (GUI ou pool de rotas dela) e libera o slot para o plugin.
+ * Nunca toca em WireSock externo, em leitura desconhecida ou em mistura dos dois. Chamada
+ * apenas pela ativação explícita do usuário, depois de o controller reservar o owner.lock.
+ */
+export async function stopManagedWireSock(configPath: string, guiConfigPath: string, log: WireSockLogger): Promise<WireSockCleanupResult> {
+    if (!isWindows()) return { stopped: true, servicesResidual: [], processResidual: [], networkLockReset: false, dnsCleared: false, dnsFlushed: false };
+    const initial = await inspectWireSockUntilReliable(configPath, guiConfigPath);
+    if (!initial.reliable) {
+        const error = initial.reason || UNKNOWN_WIRESOCK_STATE;
+        log("warn", "retomada adiada porque o estado do WireSock é desconhecido", { motivo: error });
+        return { stopped: false, servicesResidual: initial.services, processResidual: initial.processIds, networkLockReset: false, dnsCleared: false, dnsFlushed: false, error };
+    }
+    if (!initial.active) return { stopped: true, servicesResidual: [], processResidual: [], networkLockReset: false, dnsCleared: false, dnsFlushed: false };
+    if (initial.origin !== "gui" && initial.origin !== "managed") {
+        const error = initial.reason || "WireSock externo detectado";
+        log("warn", "retomada recusada para preservar WireSock não gerenciado", { motivo: error, origem: initial.origin });
+        return { stopped: false, servicesResidual: initial.services, processResidual: initial.processIds, networkLockReset: false, dnsCleared: false, dnsFlushed: false, error };
+    }
+
+    // Somente serviços comprovadamente gerenciados: no veredito "gui"/"managed" não existe
+    // recurso externo, então a lista ativa é exatamente o conjunto encerrável.
+    for (const name of initial.services) {
+        if (!runAsAdministrator("sc.exe", ["stop", name], log)) {
+            log("warn", "o Windows não autorizou parar o serviço WireSock gerenciado", { servico: name });
+            return { stopped: false, servicesResidual: initial.services, processResidual: initial.processIds, networkLockReset: false, dnsCleared: false, dnsFlushed: false, error: "O Windows não autorizou encerrar a instância anterior do GoLiveBypass." };
+        }
+    }
+    let stopped = false;
+    for (let attempt = 0; attempt < 2 && !stopped; attempt++) {
+        await wait(500);
+        const current = await inspectWireSockUntilReliable(configPath, guiConfigPath);
+        if (!current.reliable) {
+            const error = current.reason || UNKNOWN_WIRESOCK_STATE;
+            log("error", "retomada interrompida porque o estado do WireSock ficou desconhecido", { motivo: error });
+            return { stopped: false, servicesResidual: current.services, processResidual: current.processIds, networkLockReset: false, dnsCleared: false, dnsFlushed: false, error };
+        }
+        if (!current.active) { stopped = true; break; }
+        if (current.origin !== "gui" && current.origin !== "managed") {
+            const error = current.reason || "WireSock externo apareceu durante a retomada";
+            log("error", "retomada interrompida ao detectar WireSock não gerenciado", { motivo: error, origem: current.origin });
+            return { stopped: false, servicesResidual: current.services, processResidual: current.processIds, networkLockReset: false, dnsCleared: false, dnsFlushed: false, error };
+        }
+        killProcesses(current.processIds, "gerenciado", log);
+    }
+    if (!stopped) {
+        const residual = await inspectWireSockUntilReliable(configPath, guiConfigPath);
+        const error = residual.reliable && residual.active
+            ? "A instância anterior do GoLiveBypass não encerrou; tente novamente."
+            : residual.reason || UNKNOWN_WIRESOCK_STATE;
+        log("error", "retomada não confirmou o encerramento da instância gerenciada", { services: residual.services, pids: residual.processIds });
+        return { stopped: false, servicesResidual: residual.services, processResidual: residual.processIds, networkLockReset: false, dnsCleared: false, dnsFlushed: false, error };
+    }
+
+    // Tudo que foi encerrado era GoLiveBypass comprovado: o lock e o DNS do adaptador
+    // pertenciam à sessão morta, não a uma VPN externa viva.
+    const executable = findWireSockCandidate()?.executable;
+    const networkLockReset = executable ? resetNetworkLock(executable, log) : false;
+    const dnsCleared = clearWireSockDns(log);
+    let dnsFlushed = false;
+    try {
+        execFileSync("ipconfig.exe", ["/flushdns"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
+        dnsFlushed = true;
+    } catch (error) {
+        log("warn", "flushdns falhou", { erro: logError(error) });
+    }
+    log("info", "WireSock da GUI GoLiveBypass encerrado; plugin assumiu o serviço", { networkLockReset });
+    return { stopped: true, servicesResidual: [], processResidual: [], networkLockReset, dnsCleared, dnsFlushed };
 }
 
 function httpsCheck(url: string): Promise<boolean> {

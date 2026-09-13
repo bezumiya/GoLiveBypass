@@ -124,7 +124,7 @@ const RTCConnectionStore: DiagnosticStore = findStoreLazy("RTCConnectionStore");
 
 const VIDEO_GUARD = "2026-08-video-guard";
 
-const PLUGIN_VERSION = "2.0.6-beta-12";
+const PLUGIN_VERSION = "2.0.6-beta-13";
 const PLUGIN_UPDATE_STATUS_POLL_INTERVAL_MS = 15_000;
 const PLUGIN_UPDATE_STATUS_TIMEOUT_MS = 10_000;
 const PLUGIN_UPDATE_CHECK_TIMEOUT_MS = 2 * 60_000 + 15_000;
@@ -2254,7 +2254,7 @@ function VpnPanel() {
         ? (status?.externalReason || "Plataforma não suportada")
         : isDependencyMissing
             ? (status?.dependencies?.length ? `Dependências ausentes: ${status.dependencies.join(", ")}` : (status?.externalReason || "Dependências ausentes"))
-            : isBlockedExternal
+            : isBlockedExternal && !status?.managedConflict
                 ? (status?.externalReason || "Túnel externo ativo")
                 : isRecoveryRequired
                     ? "Recuperação de rede pendente"

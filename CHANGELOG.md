@@ -4,6 +4,14 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [2.0.6-beta-13] - 2026-09-13
+
+### Plugin Windows: retomada segura do WireSock da GUI
+
+- Ao clicar em **Ativar agora**, o plugin reconhece pelo argumento `-config` uma instância WireSock pertencente à GUI GoLiveBypass ou ao pool de rotas dela, encerra somente os serviços e PIDs comprovadamente gerenciados e assume o serviço com a configuração privada `plugin-vpn\wiresock-discord.conf`. A ativação automática do boot e o watchdog continuam sem encerrar processos.
+- Perfis WireSock externos, mistos ou com origem desconhecida continuam bloqueados e preservados. A comparação exige o caminho exato do argumento de configuração, aceita caminhos Windows entre aspas e não confunde sufixos como `.bak`.
+- Verificado no Equicord da VM Windows x64: o painel inicialmente identificou a configuração da GUI, manteve **Ativar agora** disponível, registrou a retomada, relançou o Discord e confirmou serviço/PID próprios, HTTPS do Discord e isolamento por `AllowedApps`. Linux, standalone e o transporte legado não foram alterados.
+
 ## [2.0.6-beta-12] - 2026-09-12
 
 ### Plugin: seleção manual de rota Proton e diagnóstico do login

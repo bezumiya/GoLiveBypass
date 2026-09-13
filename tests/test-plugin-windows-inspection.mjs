@@ -39,11 +39,12 @@ test("slot de serviço também bloqueia estado de serviço desconhecido", () => 
     assert.match(serviceSlot, /if \(!running\) return/);
 });
 
-test("inspeção própria só é confirmada quando todos os processos conhecidos são do perfil", () => {
-    assert.match(inspection, /const allServicesOwned = services\.every/);
-    assert.match(inspection, /const allProcessesOwned = processes\.every/);
-    assert.match(inspection, /reliable: true, services, processIds, reason: null/);
-    assert.match(inspection, /WireSock próprio e externo foram detectados ao mesmo tempo/);
+test("inspeção distingue plugin, GUI gerenciada e WireSock externo", () => {
+    assert.match(inspection, /const classify = \(commandLine: string \| null\)/);
+    assert.match(inspection, /argument === normalizedPath\(configPath\)/);
+    assert.match(inspection, /origin = "gui"/);
+    assert.match(inspection, /origin = "external"/);
+    assert.match(inspection, /origin = "mixed"/);
 });
 
 
