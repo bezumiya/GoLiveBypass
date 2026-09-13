@@ -129,6 +129,17 @@ export function montarLog(
     }
   }
 
+  // Diagnostico de rota do standalone (Linux): `wireguard_gateway_probe` grava ali o
+  // resultado do handshake + HTTP ate o gateway do Discord, e e a unica prova de rota que
+  // sobrevive quando `wg` exige root (a telemetria da GUI fica "indisponivel" sem sudo).
+  // Sem este arquivo o relato de "Temporary Network Error" chega sem evidencia de tunel.
+  // Mesmo leitor limitado dos outros logs; a redacao final cobre o bloco inteiro.
+  const diagnosticoWg = lerArquivoSeguro(path.join(settingsDir(dadosRaiz), "logs", "wireguard-diagnostics.log"));
+  if (diagnosticoWg) {
+    partes.push("=== wireguard-diagnostics.log (INSTALL_DIR) ===");
+    partes.push(diagnosticoWg);
+  }
+
   // Log do bypass — 1o o que o standalone realmente escreve no INSTALL_DIR
   // (<settingsDir>/golivebypass.log), depois o espelho estavel logs/bypass.log
   // e o app.asar injetado (fallbacks).

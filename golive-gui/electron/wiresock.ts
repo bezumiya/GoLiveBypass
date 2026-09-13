@@ -180,11 +180,67 @@ export function classifyWireSockActivationFailure(error: unknown): WireSockActiv
   };
 }
 
+// `execFile` rejeita com um Error que carrega `code` (numero do processo ou
+// string do spawn). Ler por narrowing evita um cast que confiaria numa forma
+// nao verificada logo na fronteira do processo externo.
+function wireSockErrorCode(error: unknown): unknown {
+  if (error && typeof error === "object" && "code" in error) return error.code;
+  return undefined;
+}
+
 export function wireSockInstallerExitKind(error: unknown): "reboot" | "cancel" | "failure" {
-  const code = Number((error as { code?: unknown })?.code);
+  const code = Number(wireSockErrorCode(error));
   if (code === 3010 || code === 1641) return "reboot";
   if (code === 1223 || /cancel(?:led|ed)|user.?declin|recus/i.test(detalheErro(error))) return "cancel";
   return "failure";
+}
+
+/** URL oficial com a plataforma resolvida (o placeholder nao pode ir para o log). */
+export function wireSockOfficialInstallerUrl(platform: "x64" | "x86" | "ARM64"): string {
+  return WIRESOCK_OFFICIAL_DOWNLOAD.replace("{platform}", platform);
+}
+
+export interface WireSockInstallFailure {
+  kind: "reboot" | "cancel" | "failure";
+  code: number | null;
+  message: string;
+}
+
+/**
+ * O `execFile` rejeita com a linha de comando inteira do PowerShell quando o
+ * instalador elevado sai com erro. Esse texto nao e mensagem de produto: o
+ * renderer exibiria `-Verb RunAs`, o caminho da pasta temporaria e o resto da
+ * receita. Aqui so saem o codigo de saida e uma acao a executar; a causa nao e
+ * inventada quando o codigo nao mapeia para um caso conhecido (mesmo tratamento
+ * de `wireSockInstallerExitKind`), e o texto do instalador fica no log.
+ */
+export function describeWireSockInstallFailure(error: unknown): WireSockInstallFailure {
+  const kind = wireSockInstallerExitKind(error);
+  const rawCode = wireSockErrorCode(error);
+  const code = typeof rawCode === "number" && Number.isFinite(rawCode) ? rawCode : null;
+  if (kind === "reboot") {
+    return {
+      kind,
+      code,
+      message: "O instalador WireSock solicitou reinicialização. Reinicie o Windows e tente ativar novamente.",
+    };
+  }
+  if (kind === "cancel") {
+    return {
+      kind,
+      code,
+      message: "A instalação do WireSock foi cancelada pelo usuário; nenhuma tentativa adicional foi executada.",
+    };
+  }
+  const codigo = code === null ? "" : ` (código ${code})`;
+  return {
+    kind,
+    code,
+    message:
+      `O instalador oficial do WireSock terminou com erro${codigo}. Instale manualmente o WireSock SDK 3.4.8.1 ` +
+      "(wiresock.net) e tente ativar de novo; se o instalador oficial também falhar, envie o relato de bug " +
+      "pelo app para levarmos o código de saída ao log.",
+  };
 }
 
 function wireSockBootTime(): number {
@@ -232,7 +288,7 @@ function wireSockPlatform(): { hash: keyof typeof WIRESOCK_INSTALLER_HASHES; que
 }
 
 function downloadOfficialWireSock(platform: "x64" | "x86" | "ARM64", target: string): Promise<void> {
-  const start = WIRESOCK_OFFICIAL_DOWNLOAD.replace("{platform}", platform);
+  const start = wireSockOfficialInstallerUrl(platform);
   const maxBytes = 512 * 1024 * 1024;
   const request = (url: string, redirects = 0): Promise<void> => new Promise((resolve, reject) => {
     let parsed: URL;
@@ -282,14 +338,26 @@ async function installOfficialWireSock(onProgress?: (message: string) => void): 
     onProgress?.("Instalando o WireSock SDK validado…");
     const file = installer.replace(/'/g, "''");
     const command = `try { $p=Start-Process -FilePath '${file}' -ArgumentList @('/quiet','/norestart') -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop; if($null -eq $p){ exit 1223 }; exit [int]$p.ExitCode } catch { $c=$_.Exception.HResult; if($c -eq -2147023673 -or $_.Exception.NativeErrorCode -eq 1223){ exit 1223 }; Write-Error $_; exit 1 }`;
+    // A saida do instalador (stdout/stderr) nao vai para o renderer: ela vira a
+    // linha de log que sustenta o diagnostico quando a causa e desconhecida.
+    let installerOutput = "";
     await new Promise<void>((resolve, reject) => {
-      const child = execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true }, (error) => error ? reject(error) : resolve());
+      const child = execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true }, (error, stdout, stderr) => {
+        if (!error) { resolve(); return; }
+        installerOutput = `${stdout ?? ""} ${stderr ?? ""}`;
+        reject(error);
+      });
       child.once("error", reject);
     }).catch((error) => {
-      const kind = wireSockInstallerExitKind(error);
-      if (kind === "reboot") markWireSockRebootPending();
-      if (kind === "cancel") throw new Error("A instalação do WireSock foi cancelada pelo usuário; nenhuma tentativa adicional foi executada.");
-      throw error;
+      const failure = describeWireSockInstallFailure(error);
+      logger.logEvent("warn", "wiresock", "instalador.oficial.falhou", {}, {
+        url: wireSockOfficialInstallerUrl(platform.query),
+        kind: failure.kind,
+        codigo_saida: failure.code ?? "desconhecido",
+        instalador: logger.clipLogText(installerOutput, 300),
+      });
+      if (failure.kind === "reboot") markWireSockRebootPending();
+      throw new Error(failure.message);
     });
     const selected = await findCompatibleWireSockAsync();
     if (!selected) throw new Error("O instalador oficial terminou, mas não deixou um par WireSock SDK compatível.");
@@ -668,7 +736,7 @@ async function ensureWireSockInstalledOnce(onProgress?: (message: string) => voi
     return existing;
   }
 
-  logger.info("wiresock", "nenhuma instalação compatível; usando instalador oficial com hash fixado", { url: WIRESOCK_OFFICIAL_DOWNLOAD });
+  logger.info("wiresock", "nenhuma instalação compatível; usando instalador oficial com hash fixado", { url: wireSockOfficialInstallerUrl(wireSockPlatform().query) });
   return installOfficialWireSock(onProgress);
 }
 

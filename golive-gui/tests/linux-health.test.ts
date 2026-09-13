@@ -16,4 +16,17 @@ describe("saúde do túnel Linux", () => {
     expect(classifyLinuxHealth({ ...base, wg: { ...base.wg, handshakeAgoS: 181 } }).healthy).toBe(false);
   });
 
+  it("sem privilégio para a telemetria, aproveita o probe já coletado", () => {
+    const semTelemetria = { ...base, wg: { ...base.wg, ok: false } };
+    const comProbe = classifyLinuxHealth({ ...semTelemetria, probeReady: true });
+    const semProbe = classifyLinuxHealth({ ...semTelemetria, probeReady: false });
+    // O booleano não muda: nos dois casos o watchdog continua só logando.
+    expect(comProbe.healthy).toBe(false);
+    expect(semProbe.healthy).toBe(false);
+    expect(comProbe.reason).toMatch(/telemetria WireGuard indisponível/);
+    expect(comProbe.reason).toMatch(/acessível/);
+    expect(semProbe.reason).toMatch(/gateway Discord inacessível/);
+    expect(semProbe.reason).not.toBe(comProbe.reason);
+  });
+
 });

@@ -204,6 +204,58 @@ test("instalador Windows distribui todas as fontes do plugin WireGuard", () => {
     assert.match(windowsInstaller, /Copy-PluginHelper/);
     assert.match(windowsInstaller, /Get-LatestBetaHelperAsset/);
     assert.match(windowsInstaller, /Get-FileHash.*SHA256/);
+
+    // #270/#276: a remocao da pasta do plugin nunca pode ficar no Remove-Item cru
+    // sem retry — UnauthorizedAccessException transiente (AV, nuvem, Discord aberto)
+    // abortava Uninstall/Restore/Update. Os tres pontos de remocao usam o mesmo
+    // caminho com retry e erro acionavel.
+    assert.match(windowsInstaller, /function Remove-PluginTarget/);
+    assert.equal(
+        (windowsInstaller.match(/Remove-PluginTarget \$target/g) || []).length,
+        3,
+        "os tres pontos de remocao (Uninstall, Restore, UpdateFromZip) devem passar por Remove-PluginTarget",
+    );
+    // M2: sem sucesso silencioso — pasta que sobrevive ao retry lanca erro
+    // acionavel; nenhum callsite pode ignorar o resultado com Out-Null.
+    assert.doesNotMatch(windowsInstaller, /Remove-PluginTarget \$target \| Out-Null/);
+    assert.match(windowsInstaller, /apos 3 tentativas/);
+    assert.match(windowsInstaller, /Feche o Discord/);
+    // M1: o Discord injetado segura o userplugin aberto — todos os tres fluxos
+    // param o Discord ANTES de remover/substituir a pasta.
+    const uninstallBody = section(windowsInstaller, "function Invoke-Uninstall {", "function Get-CheckoutMod");
+    assert.ok(
+        uninstallBody.indexOf("Stop-Discord") < uninstallBody.indexOf("Remove-PluginTarget"),
+        "Uninstall deve parar o Discord antes de remover o userplugin",
+    );
+    const restoreBody = section(windowsInstaller, "function Invoke-RestoreEverything {", "function Show-MainMenu");
+    assert.ok(
+        restoreBody.indexOf("Stop-Discord") < restoreBody.indexOf("Remove-PluginTarget"),
+        "Restore deve parar o Discord antes de remover o userplugin",
+    );
+    const updateZipBody = section(windowsInstaller, "function Invoke-UpdateFromZip", "Write-Ok 'Plugin extraido'");
+    assert.ok(
+        updateZipBody.indexOf("Stop-Discord") < updateZipBody.indexOf("Remove-PluginTarget"),
+        "Update deve parar o Discord antes de substituir o userplugin",
+    );
+    // Helper antigo rodando segura o proprio binario: encerrar SOMENTE processo
+    // cujo executavel esta dentro do alvo (nunca por nome global).
+    assert.match(windowsInstaller, /function Stop-PluginHelperInTarget/);
+    assert.match(windowsInstaller, /ExecutablePath/);
+    assert.match(windowsInstaller, /StartsWith\($raiz\)|StartsWith\(\$raiz\)/);
+    assert.match(windowsInstaller, /Encerrando proton-confgen da instalacao antiga/);
+
+    // #272: o throw do helper carrega diagnostico da consulta (tags/assets) e
+    // cada descarte da busca fica registrado — release sem helper fica
+    // distinguivel de falha de rede/API no relato automatico.
+    assert.match(windowsInstaller, /HelperAssetScan/);
+    assert.match(windowsInstaller, /Consulta: \$detalhes/);
+    assert.match(windowsInstaller, /manifest aponta .* mas o asset nao esta na release/);
+    assert.match(windowsInstaller, /sem companion \.sha256/);
+    assert.match(windowsInstaller, /invalido ou ausente/);
+    // Diagnostico enxuto: o registro e silencioso (so o throw carrega a
+    // varredura), e a lista de assets por candidata vem truncada.
+    assert.doesNotMatch(windowsInstaller, /\$scan = \{ param\(\$msg\)[^}]*Write-Host/);
+    assert.match(windowsInstaller, /\+\$\(\$total - 3\) mais/);
 });
 
 test("instaladores do plugin nao distribuem o seletor de saida legado", () => {

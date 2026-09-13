@@ -4,6 +4,40 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [2.0.6-beta-14] - 2026-09-13
+
+### Instalador Windows: remoção da pasta do plugin tolera travamento transiente (#270, #276)
+
+- Relatos: o instalador abortava com `UnauthorizedAccessException` ("O acesso ao caminho 'proton-confgen.exe' foi negado") no `Remove-Item -LiteralPath $target -Recurse -Force` cru, em três pontos: `Invoke-Uninstall`, `Invoke-RestoreEverything` e `Invoke-UpdateFromZip`. A pasta `src\userplugins\goLiveBypass` ficava presa por antivírus, sincronização de nuvem (OneDrive/Dropbox) ou o próprio Discord com arquivo aberto — falha transiente que uma nova tentativa resolve, mas que antes virava relato automático e instalação interrompida.
+- Correção: os três pontos passam pelo novo `Remove-PluginTarget`, que tenta remover até três vezes com pausa crescente entre tentativas (1s, 2s) e, esgotadas as tentativas, lança erro com o caminho real e instrução acionável ("Feche o Discord e verifique se antivírus ou sincronização de nuvem não segura a pasta") em vez do erro cru do provider do PowerShell. O utilitário `.NET` `Remove-CaminhoSilencioso` continua nos caminhos de limpeza silenciosa (temporários), onde não havia relato.
+- Verificação na VM Windows com fixture: o script parseia sem erro, o alvo removível é removido e o alvo sob lock falha de forma acionável (mensagem com o caminho e instrução), sem sucesso silencioso. O fluxo completo com `proton-confgen`/Discord rodando ainda não foi executado — a reprodução do travamento real (antivírus/nuvem/cliente aberto) segue pendente na VM.
+
+### Helper proton-confgen: login Proton tolera travamento transiente do arquivo de sessão (#271)
+
+- Relato: login da conta Proton falhava 9 segundos depois de um `check-session` bem-sucedido, com `failed to migrate session file: failed to commit session file: Access is denied.` — a leitura da sessão migrava o arquivo para o formato protegido e o `MoveFileEx` do Windows falhava porque o destino estava momentaneamente travado (antivírus, sincronização, segunda instância do helper).
+- Correção: `replaceSessionFile` no Windows tenta o replace atômico até 4 vezes com backoff curto (150ms × tentativa), apenas para a classe transiente `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION` e `ERROR_ACCESS_DENIED`. Falha permanente (arquivo ausente, caminho inválido) continua falhando imediatamente — sem retentar o que não vai mudar. O erro retornado preserva o texto do código Win32 para diagnóstico, sem conteúdo de sessão.
+- Limite: o caminho alterado é Windows-only (`//go:build windows`); o `os.Rename` das outras plataformas não recebia o sintoma. Validado com `go test`/`go vet`/`go build` sob `GOOS=windows` (incluindo o teste de classificação nova rodado em Windows via wine); reprodução real com arquivo travado segue pendente na VM.
+
+### Instalador Windows: diagnóstico sanitizado na busca do helper da beta (#272)
+
+- Relato: quando a busca do helper `proton-confgen` nas releases beta não achava asset válido, o instalador abortava com mensagem genérica, sem dizer qual release foi consultada nem por que cada candidata foi descartada — impossível distinguir "release sem helper publicado" de "falha de rede/API" no relato automático.
+- Correção: `Get-LatestBetaHelperAsset` registra silenciosamente (sem imprimir linha por release) o motivo do descarte de cada candidata: manifest sem entrada `win32-x64` ou com hash inválido, asset apontado pelo manifest ausente da release, executável sem companion `.sha256`, companion ilegível e hash inválido — além do total de releases consultadas e da falha da consulta em si. A varredura só chega ao usuário quando a busca falha de verdade, concatenada no `throw` de `Copy-PluginHelper` (e, por isso, no relato automático). A lista de assets por candidata é truncada a três nomes para o relato não virar KB. Só tags e nomes de assets públicos; nenhum conteúdo baixado entra no diagnóstico. Nenhuma mudança na regra de escolha: o helper só é aceito com hash publicado (manifest ou `.sha256` companion) e conferido.
+
+### GUI Windows: falha do instalador WireSock sanitizada e diagnosticável (#273)
+
+- Relato: quando o instalador oficial do WireSock falhava, o renderer exibia a linha de comando inteira do PowerShell elevado (`-Verb RunAs`, caminho temporário e receita do spawn) e o log não preservava a saída do instalador — a causa ficava inconclusiva.
+- Correção: a saída (stdout/stderr) do instalador não vai mais ao renderer; vira linha de log `instalador.oficial.falhou` com URL oficial resolvida, classificação (`reboot`/`cancel`/`failure`), código de saída quando numérico e trecho da saída do instalador (300 caracteres). A mensagem ao usuário passa a ser ação executável (reiniciar, ou instalar o SDK manualmente em wiresock.net) sem inventar causa para código não mapeado. Leitura do `code` de `execFile` por narrowing em vez de cast.
+- Limite: a causa dos códigos não mapeados continua inconclusiva por design — o relato carrega o código e a saída bruta para investigação, não um diagnóstico. Não reproduzido na VM nesta etapa.
+- Testes: `golive-gui/tests/wiresock-installation.test.ts` cobre classificação por código (3010/1641, 1223), sanitização da mensagem (sem `-Verb RunAs` nem caminho temporário) e presença do log com código de saída.
+
+### GUI: bugreport inclui o diagnóstico de rota do standalone (#275)
+
+- Relato: relatos de "Temporary Network Error" chegavam sem evidência de túnel — o `wireguard_gateway_probe` do standalone grava handshake + HTTP até o gateway do Discord no `wireguard-diagnostics.log`, único arquivo que sobrevive quando `wg` exige root, e o bugreport não o anexava.
+- Correção: `montarLog` anexa `wireguard-diagnostics.log` do `INSTALL_DIR` com o mesmo leitor limitado dos outros logs; a redação final cobre o bloco inteiro.
+- Complemento no classificador de saúde Linux (`classifyLinuxHealth`): telemetria `wg` indisponível deixa de colapsar dois estados diferentes em uma linha — sem handshake legível, a mensagem distingue "gateway acessível pelo túnel" (probe ok) de "gateway inacessível" (probe falhou). Permanece log-only: nenhuma mudança de comportamento de ativação.
+- Limite: o arquivo só existe quando o standalone chegou a rodar probes; instalações só-GUI sem falha de rede não terão o bloco. Não reproduzido na VM nesta etapa.
+- Testes: `golive-gui/tests/bugreport-logs.test.ts` (novo) cobre a inclusão do bloco e a redação; `golive-gui/tests/linux-health.test.ts` cobre as duas razões distintas.
+
 ## [2.0.6-beta-13] - 2026-09-13
 
 ### Plugin Windows: retomada segura do WireSock da GUI

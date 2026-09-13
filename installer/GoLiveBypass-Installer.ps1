@@ -112,6 +112,54 @@ function Remove-CaminhoSilencioso($caminho) {
     } catch { }
 }
 
+# Encerra SOMENTE um processo proton-confgen cujo ExecutablePath esteja dentro
+# da pasta do plugin que vai ser removida/substituida (issues #270/#276: o
+# helper de uma instalacao anterior segura o proprio binario aberto). Nunca
+# mata por nome global: outro checkout do usuario pode ter o mesmo executavel.
+# Devolve a lista de PIDs encerrados.
+function Stop-PluginHelperInTarget($target) {
+    $encerrados = @()
+    if (-not $target) { return $encerrados }
+    $raiz = [System.IO.Path]::GetFullPath($target).TrimEnd('\').ToLowerInvariant() + '\'
+    foreach ($proc in (Get-Process -Name 'proton-confgen' -ErrorAction SilentlyContinue)) {
+        $caminho = $null
+        try { $caminho = $proc.Path } catch { }
+        if (-not $caminho) { try { $caminho = $proc.ExecutablePath } catch { } }
+        if (-not $caminho) { continue }
+        $cheio = [System.IO.Path]::GetFullPath($caminho).TrimEnd('\').ToLowerInvariant()
+        if (-not $cheio.StartsWith($raiz)) { continue }
+        Write-Warn "Encerrando proton-confgen da instalacao antiga (PID $($proc.Id)): $caminho"
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        $encerrados += $proc.Id
+    }
+    if ($encerrados.Count -gt 0) { Start-Sleep -Milliseconds 500 }
+    return $encerrados
+}
+
+# Remove a pasta de instalacao do plugin (issues #270/#276: o Remove-Item cru
+# abortava com UnauthorizedAccessException transiente — antivírus, sincronizacao
+# de nuvem, Discord ou o helper proton-confgen com arquivo aberto). Antes da
+# primeira tentativa encerra somente o helper cujo executavel esta DENTRO do
+# alvo; tres tentativas com pausa crescente. NUNCA sucesso silencioso: se a
+# pasta sobreviver, lanca erro acionavel — quem chama nao segue com instalacao
+# pela metade nem mistura de versoes.
+function Remove-PluginTarget($target) {
+    if (-not $target) { throw 'Remove-PluginTarget: caminho do alvo vazio.' }
+    if (-not (Test-Path -LiteralPath $target)) { return }
+
+    Stop-PluginHelperInTarget $target
+
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            Remove-Item -LiteralPath $target -Recurse -Force
+        } catch { }
+        if (-not (Test-Path -LiteralPath $target)) { return }
+        if ($i -lt 3) { Start-Sleep -Seconds $i }
+    }
+
+    throw "Nao consegui remover '$target' apos 3 tentativas. Feche o Discord e verifique se antivírus ou sincronizacao de nuvem (OneDrive/Dropbox) nao segura a pasta; depois rode de novo."
+}
+
 # O npm instala pnpm.ps1, pnpm.cmd e, em algumas variantes, pnpm.exe lado a lado. O
 # command discovery do PowerShell prefere o .ps1, mas esse shim pode apontar para um
 # entrypoint antigo e falhar mesmo depois de `pnpm --version` responder. Resolva somente
@@ -1245,7 +1293,10 @@ function Copy-PluginHelper($target) {
     # o SHA-256 publicado antes de grava-lo no userplugin.
     $asset = Get-LatestBetaHelperAsset
     if (-not $asset) {
-        throw 'Nao encontrei o helper proton-confgen da beta. Use um pacote de release ou -PluginSource com bin\win32-x64\proton-confgen.exe.'
+        # Issue #272: o relato carrega a varredura sanitizada (tags e nomes de
+        # assets publicos) para distinguir release sem helper de falha de API.
+        $detalhes = if ($script:HelperAssetScan) { ($script:HelperAssetScan -join ' | ') } else { 'nenhuma release examinada' }
+        throw "Nao encontrei o helper proton-confgen da beta. Use um pacote de release ou -PluginSource com bin\win32-x64\proton-confgen.exe. Consulta: $detalhes"
     }
 
     $temporary = Join-Path $env:TEMP ("golivebypass-proton-confgen-{0}.exe" -f ([guid]::NewGuid().ToString('N')))
@@ -1484,16 +1535,18 @@ function Invoke-Uninstall {
     if (-not $root) { throw 'Nao encontrei o checkout do Equicord/Vencord. Use -Source.' }
 
     $target = Join-Path $root "src\userplugins\$PluginDirName"
+    # O Discord injetado segura arquivos do userplugin abertos; pare ANTES de
+    # remover, para a remocao nao falhar por lock do proprio cliente.
+    Stop-Discord
     if (Test-Path -LiteralPath $target) {
         Write-Step "Removendo $target"
-        Remove-Item -LiteralPath $target -Recurse -Force
+        Remove-PluginTarget $target
     } else {
         Write-Warn 'O plugin nao estava instalado nesse checkout.'
     }
 
     Remove-Tor
     Build-Mod $root
-    Stop-Discord
     Start-Discord
 
     Write-Host ''
@@ -1728,12 +1781,14 @@ function Invoke-RestoreEverything {
     $root = Find-Checkout
     if ($root) {
         $target = Join-Path $root "src\userplugins\$PluginDirName"
+        # Mesmo raciocinio do Uninstall: o Discord injetado segura o userplugin
+        # aberto; pare antes de remover para o lock nao virar falha falsa.
+        Stop-Discord
         if (Test-Path -LiteralPath $target) {
             Write-Step "Removendo $target"
-            Remove-Item -LiteralPath $target -Recurse -Force
+            Remove-PluginTarget $target
         }
 
-        Stop-Discord
         Push-Location -LiteralPath $root
         try {
             Write-Step 'Desfazendo a injecao'
@@ -1806,10 +1861,20 @@ $GitHubRepo = 'bezumiya/GoLiveBypass'
 $GitHubApi  = "https://api.github.com/repos/$GitHubRepo"
 
 function Get-LatestBetaHelperAsset {
+    # Diagnostico sanitizado (issue #272): o relato do throw em Copy-PluginHelper
+    # precisa dizer qual release foi consultada e por que cada candidata caiu.
+    # So tags e nomes de assets publicos — nada de conteudo baixado.
+    $script:HelperAssetScan = [System.Collections.Generic.List[string]]::new()
+    # Registro silencioso: so vai ao usuario (e ao relato automatico) quando a
+    # busca falha de verdade, via throw com a varredura — evita poluir a saida
+    # com uma linha por release examinada.
+    $scan = { param($msg) $script:HelperAssetScan.Add($msg) }
     try {
         $headers = @{ 'User-Agent' = 'GoLiveBypass-Installer' }
         $apiHeaders = @{ 'User-Agent' = 'GoLiveBypass-Installer'; 'Accept' = 'application/vnd.github+json' }
         $releases = Invoke-RestMethod -Uri "$GitHubApi/releases?per_page=20" -Headers $apiHeaders -TimeoutSec 15
+        Write-Step "Busca do helper: $(@($releases).Count) release(s) consultadas."
+        & $scan "$(@($releases).Count) release(s) consultadas."
         foreach ($release in @($releases)) {
             if ($release.draft -or -not $release.prerelease) { continue }
 
@@ -1830,10 +1895,18 @@ function Get-LatestBetaHelperAsset {
                             $asset = @($release.assets) | Where-Object { $_.name -eq $expectedName } | Select-Object -First 1
                             if ($asset) {
                                 $sha256 = $expectedSha.ToLowerInvariant()
+                            } else {
+                                & $scan "$($release.tag_name): manifest aponta '$expectedName' mas o asset nao esta na release."
                             }
+                        } else {
+                            & $scan "$($release.tag_name): manifest sem asset/sha256 validos."
                         }
+                    } else {
+                        & $scan "$($release.tag_name): manifest sem entrada win32-x64."
                     }
-                } catch { }
+                } catch {
+                    & $scan "$($release.tag_name): manifest nao pode ser lido."
+                }
             }
 
             # 2. Fallback: procurar executavel por padrao de nome e arquivo companion .sha256
@@ -1842,24 +1915,43 @@ function Get-LatestBetaHelperAsset {
                     Where-Object { $_.name -match '(^|-)proton-confgen.*-win-x64\.exe$' } |
                     Select-Object -First 1
             }
-            if (-not $asset) { continue }
+            if (-not $asset) {
+                # Lista truncada: o relato nao precisa da colecao inteira de
+                # assets para apontar a causa; tres nomes bastam.
+                $nomes = (@($release.assets) | Select-Object -First 3 | ForEach-Object { $_.name }) -join ', '
+                $total = @($release.assets).Count
+                $sufixo = if ($total -gt 3) { ", +$($total - 3) mais" } else { '' }
+                & $scan "$($release.tag_name): sem proton-confgen*-win-x64.exe ($total asset(s): $(if ($nomes) { $nomes } else { '<vazio>' })$sufixo)."
+                continue
+            }
 
             if (-not $sha256) {
                 $shaAsset = @($release.assets) |
                     Where-Object { $_.name -eq "$($asset.name).sha256" } |
                     Select-Object -First 1
-                if (-not $shaAsset) { continue }
-
-                $shaResponse = Invoke-WebRequest -Uri $shaAsset.browser_download_url -Headers $headers -UseBasicParsing -TimeoutSec 15
-                $shaContent = if ($shaResponse.Content -is [byte[]]) {
-                    [Text.Encoding]::UTF8.GetString($shaResponse.Content).Trim()
-                } else {
-                    ([string]$shaResponse.Content).Trim()
+                if (-not $shaAsset) {
+                    & $scan "$($release.tag_name): asset $($asset.name) sem companion .sha256."
+                    continue
                 }
-                $sha256 = ($shaContent -split '\s+')[0].ToLowerInvariant()
+
+                try {
+                    $shaResponse = Invoke-WebRequest -Uri $shaAsset.browser_download_url -Headers $headers -UseBasicParsing -TimeoutSec 15
+                    $shaContent = if ($shaResponse.Content -is [byte[]]) {
+                        [Text.Encoding]::UTF8.GetString($shaResponse.Content).Trim()
+                    } else {
+                        ([string]$shaResponse.Content).Trim()
+                    }
+                    $sha256 = ($shaContent -split '\s+')[0].ToLowerInvariant()
+                } catch {
+                    & $scan "$($release.tag_name): companion .sha256 nao pode ser lido."
+                    continue
+                }
             }
 
-            if (-not $sha256 -or $sha256 -notmatch '^[0-9a-f]{64}$') { continue }
+            if (-not $sha256 -or $sha256 -notmatch '^[0-9a-f]{64}$') {
+                & $scan "$($release.tag_name): hash de $($asset.name) invalido ou ausente."
+                continue
+            }
 
             return [PSCustomObject]@{
                 Tag = ($release.tag_name -replace '^v', '')
@@ -1868,6 +1960,8 @@ function Get-LatestBetaHelperAsset {
             }
         }
     } catch {
+        Write-Warn "Consulta de releases falhou: $($_.Exception.Message)."
+        & $scan "Consulta de releases falhou: $($_.Exception.Message)."
         return $null
     }
     return $null
@@ -2137,7 +2231,13 @@ function Invoke-UpdateFromZip($root, $zipUrl, $expectedVersion) {
     }
 
     $target = Join-Path $root "src\userplugins\$PluginDirName"
-    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+    # A substituicao do userplugin exige liberar os locks do Discord injetado;
+    # sem parar antes, a remocao falha por arquivo aberto. Efeito colateral
+    # assumido: o Discord fica fechado no fim do update e o usuario decide
+    # quando reabri-lo — o fluxo NAO relanca automaticamente, para nao criar
+    # um segundo processo em cima do uninject/build que vem a seguir.
+    Stop-Discord
+    Remove-PluginTarget $target
     New-Item -ItemType Directory -Path $target -Force | Out-Null
 
     # O zip tem a pasta raiz goLiveBypass/; copia o conteudo
