@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.6-beta-17] - 2026-09-14
+
 ### GUI Windows: migração segura da sessão Proton (#288, #290)
 
 - O helper fecha a sessão legada antes de migrá-la para DPAPI e mantém a substituição atômica. Em arquivo readonly ou bloqueio transitório de compartilhamento, remove somente o atributo readonly e tenta novamente por janela limitada; em falha persistente preserva o cache anterior e devolve `SESSION_PERSISTENCE`, sem acusar senha incorreta ou aceitar fallback em texto claro.
@@ -17,6 +19,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - A chamada oficial usa `pnpm run inject --location <raiz>` sem o separador extra; stdout/stderr e exceções são limitados no diagnóstico.
 - O exit code deixou de ser a autoridade: cada `resources` oficial só é aprovado quando seu stub aponta para o checkout selecionado. Código não-zero ou exceção com pós-condição confirmada fica como aviso; código zero sem pós-condição falha.
 - Testes seguros cobrem argumentos, saída limitada, exceção, código não-zero e dois alvos independentes; não executam Discord real.
+
+## [Unreleased]
 
 ### Plugin Windows: retomada segura do WireSock da GUI
 
