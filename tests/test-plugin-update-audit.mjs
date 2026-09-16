@@ -9,7 +9,7 @@ const workflowSource = readFileSync(new URL("../.github/workflows/build-gui.yml"
 
 test("a versão usada pelo updater acompanha o manifest reescrito no asset", () => {
     const nativeFallback = nativeSource.match(/const PLUGIN_VERSION = "([^"]+)"/)?.[1];
-    assert.equal(nativeFallback, "2.0.6-beta-19");
+    assert.equal(nativeFallback, "2.0.6-beta-20");
     assert.match(workflowSource, /sed -i .*manifest\.json/);
     assert.doesNotMatch(workflowSource, /native\.ts/);
     assert.match(nativeSource, /function readInstalledPluginVersion\(/);

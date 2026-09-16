@@ -15,7 +15,7 @@ describe("núcleo de logs do plugin", () => {
         const lines: string[] = [];
         const logger = createPluginLogger({
             component: "plugin.native",
-            pluginVersion: "2.0.6-beta-19",
+            pluginVersion: "2.0.6-beta-20",
             platform: "linux",
             arch: "x64",
             now: clock().now,
@@ -47,7 +47,7 @@ describe("núcleo de logs do plugin", () => {
             operation_id: "login-1",
             attempt_id: "attempt-1",
             phase: "failed",
-            plugin_version: "2.0.6-beta-19",
+            plugin_version: "2.0.6-beta-20",
             platform: "linux",
             arch: "x64",
         });

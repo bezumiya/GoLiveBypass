@@ -11,7 +11,7 @@ export type LinuxPreflight = {
   dependencies: { missing: string[]; required: string[] };
   elevation: { available: boolean; method: string };
   netns: { available: boolean };
-  kernel: { wireguard: "available" | "unknown" | string };
+  kernel: { wireguard: "available" | "loaded" | "missing" | "unknown" | string };
   discord: { found: boolean; count: number; firstPath: string };
   errors: string[];
   installCommand: string;
@@ -83,6 +83,7 @@ export function linuxPreflightMessage(preflight: LinuxPreflight): string {
   if (preflight.dependencies.missing.length > 0) {
     return `Dependências ausentes: ${preflight.dependencies.missing.join(", ")}.`;
   }
+  if (preflight.kernel.wireguard === "missing") return "O módulo WireGuard não está disponível neste kernel.";
   if (!preflight.elevation.available) return "É necessária autorização sudo ou pkexec para criar o túnel.";
   if (!preflight.netns.available) return "O sistema não permite consultar namespaces de rede (ip netns).";
   if (!preflight.discord.found) return "Nenhuma instalação do Discord foi encontrada.";

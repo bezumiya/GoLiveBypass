@@ -40,6 +40,24 @@ describe("preflight Linux", () => {
     expect(linuxPreflightRepairable(result)).toBe(false);
   });
 
+  it("mantém o estado do módulo informativo para permitir a carga na ativação", () => {
+    const make = (state: string, ok = true) => parseLinuxPreflight(JSON.stringify({
+      ok,
+      distro: "CachyOS",
+      dependencies: { missing: [], required: ["wg", "ip", "curl"] },
+      elevation: { available: true, method: "sudo" },
+      netns: { available: true },
+      kernel: { wireguard: state },
+      discord: { found: true, count: 1 },
+      errors: state === "missing" ? ["modulo wireguard ausente"] : [],
+    }));
+    for (const state of ["loaded", "available", "missing", "unknown"]) {
+      expect(make(state).kernel.wireguard).toBe(state);
+    }
+    expect(linuxPreflightMessage(make("missing"))).toBe("Ambiente Linux pronto para ativar.");
+    expect(linuxPreflightMessage(make("missing", false))).toContain("não está disponível");
+  });
+
   it("permite reparar pacotes conhecidos quando falta iproute2, mas não inventa capacidade pronta", () => {
     const base = parseLinuxPreflight(JSON.stringify({
       ok: false, platform: "linux", dependencies: { missing: ["iproute2"], required: ["wg", "ip", "curl"] },
@@ -76,6 +94,81 @@ describe("preflight Linux", () => {
     expect(activation.indexOf("linuxPreflight(")) .toBeLessThan(activation.indexOf("--cleanup-legacy"));
     expect(activation).toContain('await linuxStatus() === "ACTIVE"');
     expect(source).toContain("let linuxStatusInFlight: Promise<string> | null = null");
+  });
+
+  it("carrega o modulo WireGuard antes de fechar o Discord e aborta sem namespace em falha", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const ensureStart = source.indexOf("ensure_wireguard_module() {");
+    const ensureEnd = source.indexOf("\n}\n\n# Ler campo a campo", ensureStart);
+    expect(ensureStart).toBeGreaterThanOrEqual(0);
+    expect(ensureEnd).toBeGreaterThan(ensureStart);
+    const ensureCall = source.indexOf("ensure_wireguard_module || fail", ensureStart);
+    const stopCall = source.indexOf("\nstop_discord", ensureCall);
+    expect(ensureCall).toBeGreaterThan(ensureStart);
+    expect(stopCall).toBeGreaterThan(ensureCall);
+    const ensureFunction = source.slice(ensureStart, ensureEnd + 2);
+
+    const runCase = (loaded: boolean, modprobeSucceeds: boolean) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wireguard-module-"));
+      tempRoots.push(root);
+      const bin = path.join(root, "bin");
+      fs.mkdirSync(bin);
+      fs.writeFileSync(path.join(bin, "modprobe"), "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(path.join(bin, "modprobe"), 0o755);
+      const state = path.join(root, "sys", "module", "wireguard");
+      if (loaded) fs.mkdirSync(state, { recursive: true });
+      const trace = path.join(root, "trace");
+      const harness = path.join(root, "module.sh");
+      fs.writeFileSync(harness, [
+        "#!/bin/sh",
+        "have() { command -v \"$1\" >/dev/null 2>&1; }",
+        "wireguard_module_loaded() { [ -e \"$MODULE_STATE\" ]; }",
+        "elevate() {",
+        "  printf '%s\\n' \"$*\" >> \"$TRACE\"",
+        "  if [ \"$1\" = modprobe ] && [ \"$MODPROBE_SUCCEEDS\" = 1 ]; then /bin/mkdir -p \"$MODULE_STATE\"; return 0; fi",
+        "  return 1",
+        "}",
+        ensureFunction,
+        "authorize_install_elevation() { printf '%s\\n' authorization >> \"$TRACE\"; return 0; }",
+        "setup_wireguard_netns() { printf '%s\\n' namespace >> \"$TRACE\"; printf '%s\\n' 'ip link add' >> \"$TRACE\"; }",
+        "stop_discord() { printf '%s\\n' stop >> \"$TRACE\"; }",
+        "fail() { printf '%s\\n' \"$1\" >&2; exit 1; }",
+        "if ! authorize_install_elevation; then fail 'autorizacao recusada'; fi",
+        "if ! ensure_wireguard_module; then fail 'modulo nao preparado'; fi",
+        "stop_discord",
+        "setup_wireguard_netns",
+      ].join("\n"));
+      fs.chmodSync(harness, 0o755);
+      const run = spawnSync("/bin/sh", [harness], {
+        env: {
+          ...process.env,
+          PATH: bin,
+          MODULE_STATE: state,
+          MODPROBE_SUCCEEDS: modprobeSucceeds ? "1" : "0",
+          TRACE: trace,
+        },
+        encoding: "utf8",
+      });
+      return {
+        run,
+        trace: fs.existsSync(trace) ? fs.readFileSync(trace, "utf8") : "",
+      };
+    };
+
+    const alreadyLoaded = runCase(true, false);
+    expect(alreadyLoaded.run.status, alreadyLoaded.run.stderr).toBe(0);
+    expect(alreadyLoaded.trace).toBe("authorization\nstop\nnamespace\nip link add\n");
+
+    const loadedByActivation = runCase(false, true);
+    expect(loadedByActivation.run.status, loadedByActivation.run.stderr).toBe(0);
+    expect(loadedByActivation.trace).toBe("authorization\nmodprobe wireguard\nstop\nnamespace\nip link add\n");
+
+    const loadFailed = runCase(false, false);
+    expect(loadFailed.trace).not.toContain("ip link add");
+    expect(loadFailed.run.stderr).toContain("ativacao foi cancelada antes de fechar o Discord");
+    expect(loadFailed.trace).toBe("authorization\nmodprobe wireguard\n");
+    expect(loadFailed.trace).not.toContain("stop");
+    expect(loadFailed.trace).not.toContain("namespace");
   });
 
   it("autoriza a elevacao antes de fechar o Discord no fluxo de instalacao", () => {
@@ -474,5 +567,146 @@ describe("preflight Linux", () => {
   it("mantém o modo de reparo protegido contra a CLI standalone", () => {
     const script = path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh");
     expect(() => execFileSync("bash", [script, "--ensure-dependencies"], { env: { ...process.env, GOLIVE_GUI: "" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).toThrow();
+  });
+
+  it("confirma o processo no namespace, usa readonly sem prompt e faz rollback se ele sumir", async () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const extract = (name: string) => {
+      const match = source.match(new RegExp(`${name}\\(\\) \\{[\\s\\S]*?\\n\\}\\n`));
+      if (!match) throw new Error(`Funcao ${name} nao encontrada`);
+      return match[0].trim();
+    };
+    const pidFunction = extract("discord_pid_flav");
+    const elevatedFunction = extract("discord_pid_in_netns_elevated");
+    const waitFunction = extract("wait_discord_started");
+
+    const runWait = (scenario: "outside" | "inside" | "disappeared") => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wait-netns-"));
+      tempRoots.push(root);
+      const state = path.join(root, "state");
+      const harness = path.join(root, "wait.sh");
+      fs.writeFileSync(harness, [
+        "#!/bin/sh",
+        "id() { [ \"$1\" = -u ] && { printf '1000\\n'; return 0; }; return 1; }",
+        "have() { case \"$1\" in ip|sudo|readlink|pgrep) return 0 ;; *) return 1 ;; esac; }",
+        "elevate() { printf 'interactive\\n' >> \"$TRACE\"; \"$@\"; }",
+        "elevate_readonly() { printf 'readonly\\n' >> \"$TRACE\"; \"$@\"; }",
+        "pgrep() {",
+        "  calls=0; [ -f \"$STATE\" ] && calls=$(cat \"$STATE\")",
+        "  calls=$((calls + 1)); printf '%s\\n' \"$calls\" > \"$STATE\"",
+        "  if [ \"$SCENARIO\" = disappeared ] && [ \"$calls\" -gt 1 ]; then return 1; fi",
+        "  [ \"$1\" = -x ] && printf '4242\\n'",
+        "}",
+        "ip() {",
+        "  if [ \"$1\" = netns ] && [ \"$2\" = identify ]; then",
+        "    [ \"$SCENARIO\" = inside ] && { printf 'discord-vpn\\n'; return 0; }",
+        "    [ \"$SCENARIO\" = outside ] && { printf 'host\\n'; return 0; }",
+        "    return 1",
+        "  fi",
+        "  return 1",
+        "}",
+        "readlink() {",
+        "  case \"$1\" in /proc/*/ns/net) [ \"$SCENARIO\" = inside ] && printf 'net:[4026533000]\\n' || printf 'net:[4026532000]\\n' ;;",
+        "  /run/netns/discord-vpn) [ \"$SCENARIO\" = inside ] && printf 'net:[4026533000]\\n' || printf 'net:[4026532001]\\n' ;; esac",
+        "}",
+        "sleep() { :; }",
+        "NETNS_NAME=discord-vpn",
+        "NONINTERACTIVE=0",
+        pidFunction,
+        elevatedFunction,
+        waitFunction,
+        "wait_discord_started '/resources|discord||'",
+      ].join("\n"));
+      fs.chmodSync(harness, 0o755);
+      return spawnSync("/bin/sh", [harness], {
+        env: { ...process.env, SCENARIO: scenario, STATE: state, TRACE: path.join(root, "trace") },
+        encoding: "utf8",
+      });
+    };
+
+    expect(runWait("outside").status).toBe(1);
+    expect(runWait("inside").status).toBe(0);
+    expect(runWait("disappeared").status).toBe(1);
+
+    const readonlyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "golive-readonly-netns-"));
+    tempRoots.push(readonlyRoot);
+    const readonlyHarness = path.join(readonlyRoot, "readonly.sh");
+    fs.writeFileSync(readonlyHarness, [
+      "#!/bin/sh",
+      "id() { [ \"$1\" = -u ] && { printf '1000\\n'; return 0; }; return 1; }",
+      "have() { case \"$1\" in ip|sudo|readlink) return 0 ;; *) return 1 ;; esac; }",
+      "elevate() { printf 'interactive\\n' >> \"$TRACE\"; return 99; }",
+      "elevate_readonly() { printf 'readonly\\n' >> \"$TRACE\"; \"$@\"; }",
+      "ip() { printf 'discord-vpn\\n'; }",
+      "NETNS_NAME=discord-vpn",
+      "NONINTERACTIVE=1",
+      elevatedFunction,
+      "discord_pid_in_netns_elevated 4242",
+    ].join("\n"));
+    fs.chmodSync(readonlyHarness, 0o755);
+    const readonlyTrace = path.join(readonlyRoot, "trace");
+    const readonlyRun = spawnSync("/bin/sh", [readonlyHarness], {
+      env: { ...process.env, TRACE: readonlyTrace },
+      encoding: "utf8",
+    });
+    expect(readonlyRun.status, readonlyRun.stderr).toBe(0);
+    expect(fs.readFileSync(readonlyTrace, "utf8")).toBe("readonly\n");
+
+    const failureStart = source.indexOf('if ! wait_discord_started "$(printf');
+    const failureEnd = source.indexOf("\nfi", failureStart) + 3;
+    expect(failureStart).toBeGreaterThanOrEqual(0);
+    expect(failureEnd).toBeGreaterThan(failureStart);
+    const failureBlock = source.slice(failureStart, failureEnd);
+    const rollbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wait-rollback-"));
+    tempRoots.push(rollbackRoot);
+    const rollbackHarness = path.join(rollbackRoot, "rollback.sh");
+    fs.writeFileSync(rollbackHarness, [
+      "#!/bin/sh",
+      "wait_discord_started() { return 1; }",
+      "stop_discord() { printf 'stop\\n' >> \"$TRACE\"; }",
+      "teardown_wireguard_netns() { printf 'teardown\\n' >> \"$TRACE\"; }",
+      "warn() { :; }",
+      "fail() { printf '%s\\n' \"$1\" >&2; exit 1; }",
+      "ACTIVATION_ROLLBACK_TARGET=target",
+      "FOUND=target",
+      "INSTALL_DIR=/tmp/golive-test",
+      failureBlock,
+    ].join("\n"));
+    fs.chmodSync(rollbackHarness, 0o755);
+    const rollbackTrace = path.join(rollbackRoot, "trace");
+    const rollbackRun = spawnSync("/bin/sh", [rollbackHarness], {
+      env: { ...process.env, TRACE: rollbackTrace },
+      encoding: "utf8",
+    });
+    expect(rollbackRun.status).toBe(1);
+    expect(fs.readFileSync(rollbackTrace, "utf8")).toBe("stop\nteardown\n");
+    expect(rollbackRun.stderr).toContain("Discord nao iniciou dentro do namespace WireGuard");
+  });
+
+  it("mantem no-op apenas para ACTIVE e libera reparo quando status fica INACTIVE", async () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "../standalone/golivebypass-standalone.sh"), "utf8");
+    const main = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    expect(main).toContain('runScript(["--status", "--json", "--non-interactive"])');
+    const guardStart = main.indexOf('if (await linuxStatus() === "ACTIVE")');
+    const guardEnd = main.indexOf("\n  await ensureProtonActivationProfile", guardStart);
+    expect(guardStart).toBeGreaterThanOrEqual(0);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    const guard = main.slice(guardStart, guardEnd);
+    let persistenceCalls = 0;
+    const makeGuarded = (status: "ACTIVE" | "INACTIVE") => new Function(
+      "linuxStatus",
+      "logger",
+      "persistBypassEnabled",
+      `return async function() { ${guard}; return "continued"; }`,
+    )(
+      async () => status,
+      { info: () => {} },
+      () => { persistenceCalls += 1; },
+    ) as () => Promise<"continued" | undefined>;
+    expect(await makeGuarded("ACTIVE")()).toBeUndefined();
+    expect(persistenceCalls).toBe(1);
+    expect(await makeGuarded("INACTIVE")()).toBe("continued");
+    expect(persistenceCalls).toBe(1);
+    expect(source).toContain("discord_pid_in_netns_elevated");
   });
 });

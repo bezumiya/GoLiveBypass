@@ -5,6 +5,22 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
+
+## [2.0.6-beta-20] - 2026-09-16
+
+### GUI Linux: carregamento automático do módulo WireGuard
+
+- Causa: o preflight reconhecia `wireguard.ko` disponível pelo `modinfo`, mas a ativação falhava em kernels onde o módulo ainda não estava carregado; isso ocorria depois do fechamento do Discord e podia iniciar uma preparação incompleta.
+- Correção: a GUI agora pede ao standalone para carregar `wireguard` via `elevate modprobe` somente quando `/sys/module/wireguard` ainda não existe, confirma a carga antes de criar a interface e aborta de forma sanitizada antes de fechar o Discord quando não consegue fazê-lo. O preflight distingue módulo carregado, disponível porém descarregado e ausente, sem executar `modprobe` em modo somente leitura.
+- Testes cobrem a idempotência, a carga delegada à elevação e o rollback sem fechamento do Discord/namespace quando a carga falha. Não houve ativação real nem prova de carga neste host.
+
+### GUI Linux: confirmação de processo no namespace (#278)
+
+- Causa confirmada no caminho reportado: `wait_discord_started` aceitava qualquer processo `Discord` encontrado por `pgrep`, sem provar que o PID correto tinha entrado em `discord-vpn`; o watchdog/status também podiam concluir `INACTIVE` porque a inspeção do namespace era feita sem elevação.
+- Correção: a ativação só conclui após confirmar, pelo caminho elevado já autorizado na própria ativação, o PID do cliente no namespace. Falha nessa confirmação fecha o processo observado, remove o namespace e propaga uma causa sanitizada; status, probe e watchdog usam apenas consultas readonly não interativas (`sudo -n`) e permanecem log-only.
+- A guarda serial existente continua tratando uma ativação concorrente/duplicada como no-op quando o estado confirmado é `ACTIVE`, sem encerrar uma sessão recém-confirmada. `portal=ausente`, updater 404 e falhas de handshake/HTTP/IP continuam diagnósticos, não bloqueios.
+- Hipótese restante: um encerramento espontâneo posterior do Electron (por Wayland/Flatpak/portal ou atualização) não pode ser atribuído à confirmação de namespace sem log de crash correspondente. Limitação: não houve ativação real, `sudo`/`pkexec`, encerramento do Discord ou alteração de rede/namespace neste host.
+
 ### Instaladores: canais stable/beta do plugin
 
 - Windows (`-Channel stable|beta`) e Linux (`--channel stable|beta`) usam stable por padrão. Em modo interativo, stable é a opção recomendada, com o canal mais previsível e somente releases estáveis; beta é opt-in: um canal de testes em que você ajuda a comunidade ao testar, encontrar e corrigir erros antes da versão estável. Nenhum canal promete estabilidade.

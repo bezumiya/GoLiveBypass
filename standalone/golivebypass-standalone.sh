@@ -1338,6 +1338,41 @@ elevate_readonly() {
         elevate "$@"
     fi
 }
+# O preflight nao carrega o modulo: ele apenas diferencia um modulo disponivel
+# no kernel de um modulo ja carregado. A ativacao interativa faz a carga depois
+# da autorizacao, mas antes de fechar o Discord ou criar o namespace.
+wireguard_module_loaded() {
+    [ -e /sys/module/wireguard ]
+}
+
+ensure_wireguard_module() {
+    if wireguard_module_loaded; then
+        return 0
+    fi
+
+    if ! have modprobe; then
+        printf '%s\n' 'Falha: o comando modprobe nao esta disponivel para carregar o modulo WireGuard.' >&2
+        return 1
+    fi
+
+    # Nunca encaminhar stderr do modprobe: caminhos do kernel e mensagens do
+    # provedor de elevacao nao pertencem ao diagnostico exibido ao usuario.
+    if ! elevate modprobe wireguard >/dev/null 2>&1; then
+        printf '%s\n' 'Falha: nao foi possivel carregar o modulo WireGuard; a ativacao foi cancelada antes de fechar o Discord.' >&2
+        return 1
+    fi
+
+    if wireguard_module_loaded; then
+        return 0
+    fi
+
+    if have modinfo && modinfo wireguard >/dev/null 2>&1; then
+        printf '%s\n' 'Falha: o modulo WireGuard existe, mas o kernel nao o ativou.' >&2
+    else
+        printf '%s\n' 'Falha: o modulo WireGuard nao esta disponivel neste kernel.' >&2
+    fi
+    return 1
+}
 
 # Ler campo a campo em vez de dar source: /etc/os-release e shell valido, e um arquivo torto
 # executaria comando neste script, que logo depois chama sudo.
@@ -1586,7 +1621,16 @@ linux_preflight_json() {
 
     if [ "$(id -u)" -eq 0 ] || have sudo || have pkexec; then elevated=true; else errors="${errors}${errors:+,}elevacao (sudo ou pkexec)"; fi
     if have ip && ip netns list >/dev/null 2>&1; then netns_ok=true; else errors="${errors}${errors:+,}ip netns"; fi
-    if [ -e /sys/module/wireguard ] || { have modinfo && modinfo wireguard >/dev/null 2>&1; }; then kernel="available"; fi
+    if wireguard_module_loaded; then
+        kernel="loaded"
+    elif have modinfo; then
+        if modinfo wireguard >/dev/null 2>&1; then
+            kernel="available"
+        else
+            kernel="missing"
+            errors="${errors}${errors:+,}modulo wireguard ausente"
+        fi
+    fi
 
     if [ -n "$missing" ]; then
         install="$(linux_dependency_install_command "$distro" "$id_like" "$missing" || true)"
@@ -2100,6 +2144,33 @@ discord_pid_in_netns() {
     [ "$(readlink "/proc/$pid/ns/net" 2>/dev/null)" = "$(readlink "/run/netns/$NETNS_NAME" 2>/dev/null)" ]
 }
 
+# Confirma o PID no namespace usando a autorizacao da ativacao quando disponivel.
+# Em --status/--probe, `elevate_readonly` usa somente sudo -n e nunca abre prompt.
+discord_pid_in_netns_elevated() {
+    local pid="$1" identified="" pid_ns="" netns_ns=""
+    [ -n "$pid" ] || return 1
+
+    if [ "$(id -u)" -eq 0 ]; then
+        identified="$(ip netns identify "$pid" 2>/dev/null || true)"
+        if [ "$identified" = "$NETNS_NAME" ]; then return 0; fi
+        pid_ns="$(readlink "/proc/$pid/ns/net" 2>/dev/null || true)"
+        netns_ns="$(readlink "/run/netns/$NETNS_NAME" 2>/dev/null || true)"
+    elif [ "${NONINTERACTIVE:-0}" -eq 1 ]; then
+        identified="$(elevate_readonly ip netns identify "$pid" 2>/dev/null || true)"
+        if [ "$identified" = "$NETNS_NAME" ]; then return 0; fi
+        pid_ns="$(elevate_readonly readlink "/proc/$pid/ns/net" 2>/dev/null || true)"
+        netns_ns="$(elevate_readonly readlink "/run/netns/$NETNS_NAME" 2>/dev/null || true)"
+    else
+        # A ativacao ja passou por authorize_install_elevation; nao e uma nova
+        # entrada interativa, apenas a prova final do processo iniciado.
+        identified="$(elevate ip netns identify "$pid" 2>/dev/null || true)"
+        if [ "$identified" = "$NETNS_NAME" ]; then return 0; fi
+        pid_ns="$(elevate readlink "/proc/$pid/ns/net" 2>/dev/null || true)"
+        netns_ns="$(elevate readlink "/run/netns/$NETNS_NAME" 2>/dev/null || true)"
+    fi
+    [ -n "$pid_ns" ] && [ "$pid_ns" = "$netns_ns" ]
+}
+
 # Mata os clientes paralelos pelo caminho do app.asar: o nome do processo nao basta
 # (o Electron generico nao tem o nome do cliente), mas o cmdline carrega a pasta instalada.
 kill_parallel_by_path() {
@@ -2486,6 +2557,7 @@ ensure_wireguard_conf() {
 setup_wireguard_netns() {
     have ip || fail "Comando 'ip' nao encontrado no sistema."
     have wg || fail "Comando 'wg' (wireguard-tools) nao encontrado. Instale com seu gerenciador de pacotes."
+    wireguard_module_loaded || fail "Modulo WireGuard nao esta carregado; ativacao cancelada antes de criar o namespace."
 
     ensure_wireguard_conf
     local wg_file="$INSTALL_DIR/wireguard.conf"
@@ -2860,15 +2932,18 @@ start_discord() {
 }
 
 # O launcher confirma apenas que o processo foi solicitado; o Electron pode falhar
-# logo depois (DISPLAY/Wayland, atualização em andamento, bwrap ou Flatpak sem
-# override). Aguarde o processo real antes de declarar a ativação concluída.
+# logo depois (DISPLAY/Wayland, atualizacao, bwrap ou Flatpak sem override). Aguarde
+# o PID correto e confirme sua rede no namespace antes de declarar a ativacao concluida.
 wait_discord_started() {
-    local linha="${1:-}" flav="" flatpak_id="" resources="" tentativas=40
+    local linha="${1:-}" flav="" flatpak_id="" resources="" pid="" tentativas=40
     resources="$(printf '%s' "$linha" | cut -d'|' -f1)"
     flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
     flatpak_id="$(printf '%s' "$linha" | cut -d'|' -f4)"
     while [ "$tentativas" -gt 0 ]; do
-        if running_flav "$flav" "$flatpak_id" "$resources"; then return 0; fi
+        pid="$(discord_pid_flav "$flav" "$flatpak_id" "$resources" 2>/dev/null || true)"
+        if [ -n "$pid" ] && discord_pid_in_netns_elevated "$pid"; then
+            return 0
+        fi
         tentativas=$((tentativas - 1))
         [ "$tentativas" -gt 0 ] && sleep 0.5
     done
@@ -2904,6 +2979,11 @@ if [ "$MODE" = "install" ] && st_tui_is_interactive; then
     esac
     # Se veio de "Ver status" ou "Desinstalar", despacha abaixo (code continua).
 fi
+
+# O menu TUI tambem pode selecionar status depois do parser de argumentos.
+case "$MODE" in
+    status|probe) NONINTERACTIVE=1 ;;
+esac
 
 case "$MODE" in
     check-update) standalone_check_update; exit 0 ;;
@@ -3043,13 +3123,14 @@ if [ "$MODE" = "install" ]; then
         fail "Preflight Linux reprovado. Instale as dependencias e tente novamente.${preflight_hint:+ Comando: $preflight_hint}"
     fi
 fi
-
 if [ "$MODE" = "probe" ]; then
     if wireguard_gateway_probe; then
         exit 0
     fi
     exit 1
 fi
+
+
 
 if [ "$MODE" = "refresh" ]; then
     refresh_wireguard_route
@@ -3073,7 +3154,7 @@ if [ "$MODE" = "status" ]; then
             discord_pid=""
             if discord_pid="$(discord_pid_flav "$flav" "$id" "$resources" 2>/dev/null)"; then
                 running="sim"
-                if discord_pid_in_netns "$discord_pid"; then in_namespace="sim"; fi
+                if discord_pid_in_netns_elevated "$discord_pid"; then in_namespace="sim"; fi
             fi
             printf '{"path":"%s","state":"%s","flavour":"%s","detected_by":"%s","running":"%s","inNamespace":"%s"' "$resources" "$(injection_state "$resources")" "$flav" "$detect" "$running" "$in_namespace"
             [ -n "$discord_pid" ] && printf ',"pid":"%s"' "$discord_pid"
@@ -3178,6 +3259,7 @@ authorize_install_elevation || fail "Nao foi possivel autorizar a ativacao Linux
 # troca segura para o usuario que deve possuir a sessao grafica.
 ACTIVATION_RUN_USER="${SUDO_USER:-$(id -un 2>/dev/null || whoami)}"
 prepare_run_user "$ACTIVATION_RUN_USER" || fail "Nao foi possivel preparar a execucao segura do Discord. O Discord nao foi encerrado."
+ensure_wireguard_module || fail "Nao foi possivel preparar o modulo WireGuard. O Discord nao foi encerrado."
 # A limpeza legada apaga recursos e configuracoes antigas; so pode acontecer
 # depois de a autorizacao da ativacao ter sido concluida.
 if [ "$CLEANUP_LEGACY" -eq 1 ]; then

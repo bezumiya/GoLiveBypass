@@ -1869,7 +1869,7 @@ let ultimosGraficosLinux = "";
 async function linuxWgStats(): Promise<WgTunnelStats> {
   const semDados: WgTunnelStats = { ok: false, handshakeAgoS: null, rxBytes: null, txBytes: null, endpoint: null };
   try {
-    const { code, stdout } = await runScript(["--status", "--json"]);
+    const { code, stdout } = await runScript(["--status", "--json", "--non-interactive"]);
     if (code !== 0) return { ...semDados, error: `script de status saiu com codigo ${code}` };
     const data = JSON.parse(stdout);
     const wg = data?.wg;
@@ -1889,7 +1889,7 @@ async function linuxWgStats(): Promise<WgTunnelStats> {
 }
 
 async function checkLinuxTunnelHealth(): Promise<{ healthy: boolean; reason: string }> {
-  const statusResult = await runScript(["--status", "--json"]);
+  const statusResult = await runScript(["--status", "--json", "--non-interactive"]);
   if (statusResult.code !== 0) return { healthy: false, reason: "script de status indisponível" };
   const data = JSON.parse(statusResult.stdout || "{}");
   const discords = Array.isArray(data.discords) ? data.discords : [];
@@ -2686,7 +2686,7 @@ function linuxStatus(): Promise<string> {
   if (linuxStatusInFlight) return linuxStatusInFlight;
   if (linuxStatusCache && linuxStatusCache.expiresAt > now) return Promise.resolve(linuxStatusCache.value);
   const generation = ++linuxStatusGeneration;
-  const operation = runScript(["--status", "--json"])
+  const operation = runScript(["--status", "--json", "--non-interactive"])
     .then(({ code, stdout, stderr }) => {
       if (code !== 0) {
         if (linuxStatusLogAllowed(`exit:${code}`)) {
@@ -2697,14 +2697,16 @@ function linuxStatus(): Promise<string> {
       }
       try {
         const data = JSON.parse(stdout);
+        const discords = Array.isArray(data?.discords) ? data.discords : [];
         if (data?.graphics && typeof data.graphics === "object") {
           const g = data.graphics as Record<string, unknown>;
           ultimosGraficosLinux = `backend=${String(g.backend ?? "?")} wayland=${String(g.waylandDisplay ?? "")} session=${String(g.sessionType ?? "")} portal=${String(g.portal ?? "?")}`;
         }
-        const discords = Array.isArray(data.discords) ? data.discords : [];
         const netnsAtivo = data?.netns === true;
         const anyRunning = discords.some((d: { running?: string; inNamespace?: string }) => d.running === "sim" && (!netnsAtivo || d.inNamespace === "sim"));
         const status = discords.length === 0 ? "NOT_FOUND" : (netnsAtivo && anyRunning ? "ACTIVE" : "INACTIVE");
+        // O status INACTIVE tambem precisa liberar qualquer nova ativacao:
+        // somente ACTIVE confirmado e um no-op.
         // O status pode ser consultado por bandeja, janela e watchdog ao mesmo tempo.
         // Registra detalhes somente quando a assinatura muda ou a cada 30s, evitando
         // que a varredura do bootstrap volte a formar um loop de logs.
@@ -3095,8 +3097,7 @@ async function linuxActivate(onChunk: (c: string) => void) {
     throw new Error(`${linuxPreflightMessage(preflight)}${comando}`);
   }
   // Dois cliques da bandeja podem ter lido INACTIVE antes de entrarem na fila.
-  // Reconfirma dentro da operação para que o segundo nunca suba uma segunda
-  // instância sobre um namespace já ativo.
+  // Reconfirma dentro da operacao; somente o ACTIVE confirmado vira no-op.
   if (await linuxStatus() === "ACTIVE") {
     logger.info("linux", "ativacao duplicada ignorada; tunel ja ativo");
     persistBypassEnabled(true);
@@ -3116,7 +3117,7 @@ async function linuxActivate(onChunk: (c: string) => void) {
   // que ficou orfa. Os resources sao lidos do --status --json (a injecao no Linux e do
   // script, nao do getDiscordInstalls).
   try {
-    const estado = await runScript(["--status", "--json"]);
+    const estado = await runScript(["--status", "--json", "--non-interactive"]);
     const data = JSON.parse(estado.stdout || "{}");
     const nossos = Array.isArray(data?.discords)
       ? data.discords
@@ -3143,7 +3144,6 @@ async function linuxActivate(onChunk: (c: string) => void) {
   iniciarWgStatsWatchdog(linuxWgStats);
   startLinuxHealthWatchdog();
   linuxStatusCache = null;
-  startProtonFailoverMonitor();
   persistBypassEnabled(true);
 }
 
@@ -5056,7 +5056,7 @@ ipcMain.handle("test-wg-conf", async () => {
 
     if (status === "ACTIVE" && IS_LINUX) {
       try {
-        const probe = await runScript(["--probe", "--json"]);
+        const probe = await runScript(["--probe", "--json", "--non-interactive"]);
         readiness = JSON.parse(probe.stdout || "{}");
         const out = execSync(
           "ip netns exec discord-vpn curl -m 3 -s https://cloudflare.com/cdn-cgi/trace",

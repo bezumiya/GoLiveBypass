@@ -34,7 +34,7 @@ const CHAVE_WIREGUARD = "aG9sYUNsYXZlUHJpdmFkYU5hby5Qb2RlVmF6YXI=";
 
 function metaBase() {
     return montarMeta({
-        versao: "2.0.6-beta-19",
+        versao: "2.0.6-beta-20",
         plataforma: "linux-x64",
         electron: "43.0.0",
         node: "22.0.0",
@@ -226,7 +226,7 @@ test("dedup de 48h só reprova a mesma assinatura dentro da janela", () => {
 
 test("meta é lista branca e não carrega caminho, endpoint nem token", () => {
     const meta = montarMeta({
-        versao: "2.0.6-beta-19",
+        versao: "2.0.6-beta-20",
         plataforma: "linux-x64",
         electron: "43.0.0",
         node: "22.0.0",
@@ -241,7 +241,7 @@ test("meta é lista branca e não carrega caminho, endpoint nem token", () => {
     ]);
     assert.deepEqual(meta, {
         app: "golive-plugin",
-        versao: "2.0.6-beta-19",
+        versao: "2.0.6-beta-20",
         plataforma: "linux-x64",
         electron: "43.0.0",
         node: "22.0.0",

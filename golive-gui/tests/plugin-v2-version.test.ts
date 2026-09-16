@@ -9,7 +9,7 @@ const read = (file: string) => fs.readFileSync(path.join(root, file), "utf8");
 
 describe("linha major v2 do plugin", () => {
   it("declara a mesma versão beta no manifest, UI e updater", () => {
-    const expected = "2.0.6-beta-19";
+    const expected = "2.0.6-beta-20";
     expect(JSON.parse(read("manifest.json")).version).toBe(expected);
     expect(read("index.tsx")).toContain(`const PLUGIN_VERSION = "${expected}"`);
     expect(read("native.ts")).toContain(`const PLUGIN_VERSION = "${expected}"`);

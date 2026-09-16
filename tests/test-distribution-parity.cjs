@@ -235,11 +235,11 @@ test("instaladores do plugin nao distribuem o seletor de saida legado", () => {
 });
 
 test("manifesto local e linha v2 beta", () => {
-    assert.equal(manifest.version, "2.0.6-beta-19");
+    assert.equal(manifest.version, "2.0.6-beta-20");
 });
 
 test("plugin mostra versao e oferece verificacao na configuracao", () => {
-    assert.match(pluginRenderer, /PLUGIN_VERSION = "2\.0\.6-beta-19"/);
+    assert.match(pluginRenderer, /PLUGIN_VERSION = "2\.0\.6-beta-20"/);
     assert.match(pluginRenderer, /checkPluginUpdate\(/);
     assert.match(pluginRenderer, /Atualizar/);
 });
