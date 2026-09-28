@@ -424,7 +424,7 @@ async function updateStatus() {
     statusCard.hidden = false;
   }
   if (restoreInternetBtn) {
-    restoreInternetBtn.hidden = window.api.platform !== 'win32' || currentState === 'ACTIVE';
+    restoreInternetBtn.hidden = (window.api.platform !== 'win32' && window.api.platform !== 'darwin') || currentState === 'ACTIVE';
   }
   if (protonOptimizationInFlight || protonManualSelectionInFlight) toggleBtn.disabled = true;
   // Depois de mudar o estado, ajusta a janela ao novo tamanho do conteudo.
@@ -1702,6 +1702,9 @@ async function optimizeProtonRoute(onStartup = false, speedTest = true) {
     setProtonFeedback((err as Error)?.message || String(err), 'err');
     await updateStatus();
   } finally {
+    // Sem este reset o botão Ativar ficava desabilitado para sempre depois de
+    // qualquer otimização (updateStatus reaplica disabled enquanto a flag vale).
+    protonOptimizationInFlight = false;
     stopProtonOptimizeAnimation();
     protonOptimizationRequestId = '';
     if (tabProton) tabProton.disabled = false;

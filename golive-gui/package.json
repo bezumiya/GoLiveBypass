@@ -13,14 +13,14 @@
     "build:proton": "node scripts/build-proton.mjs",
     "build": "npm run compile && electron-builder --publish never",
     "build:win": "npm run compile && electron-builder --win --x64 --publish never",
-    "build:mac": "npm run compile && electron-builder --mac --arm64 --publish never",
+    "build:mac": "npm run compile && electron-builder --mac --universal --publish never",
     "preview": "vite preview",
     "sync-bypass": "node scripts/sync-bypass.mjs",
     "check-bypass": "node scripts/sync-bypass.mjs --check",
     "test": "vitest run",
     "build:linux": "npm run compile && electron-builder --linux AppImage --publish never",
     "publish:win": "npm run compile && electron-builder --win --x64 --publish always",
-    "publish:mac": "npm run compile && electron-builder --mac --arm64 --publish always",
+    "publish:mac": "npm run compile && electron-builder --mac --universal --publish always",
     "publish:linux": "npm run compile && electron-builder --linux AppImage --publish always"
   },
   "build": {
@@ -65,16 +65,17 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64"
+            "universal"
           ]
         },
         {
           "target": "zip",
           "arch": [
-            "arm64"
+            "universal"
           ]
         }
       ],
+      "x64ArchFiles": "Contents/Resources/extra/proton-confgen/**",
       "icon": "build/icon.png",
       "identity": null,
       "hardenedRuntime": false,

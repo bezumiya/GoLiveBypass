@@ -11,13 +11,14 @@
 
 ## Arquitetura e arquivos
 
-A arquitetura atual da GUI Windows/Linux é **WireGuard por aplicativo**: todo o tráfego do Discord usa o túnel, o restante do computador mantém sua rede normal e o `app.asar` permanece vanilla. Proxy/PAC, Tor e injeção são caminhos legados ainda presentes no repositório. Não aplicar as premissas de mídia direta do legado ao WireGuard; não presumir paridade de macOS, plugin e standalone com a GUI.
+A arquitetura atual da GUI Windows/Linux é **WireGuard por aplicativo**: todo o tráfego do Discord usa o túnel, o restante do computador mantém sua rede normal e o `app.asar` permanece vanilla. Proxy/PAC, Tor e injeção são caminhos legados ainda presentes no repositório. Não aplicar as premissas de mídia direta do legado ao WireGuard; não presumir paridade de macOS, plugin e standalone com a GUI. No macOS a GUI roteia **por destino** (utun + rotas só para o Discord), não por processo: ao mudar a lista de destinos, revise `discordStaticPrefixes`/`discordHostnames` e justifique no comentário qualquer faixa que não seja exclusiva do Discord (como a de mídia na Cloudflare).
 
 | Área | Onde começar |
 | --- | --- |
 | GUI Electron/TypeScript/Vite | `golive-gui/package.json`, `golive-gui/electron/main.ts` |
 | WireSock Windows e prova de rota | `golive-gui/electron/wiresock.ts`, `route-proof.ts`, `discord-scope-proof.ts` no mesmo diretório |
 | Linux e standalone | `golive-gui/electron/linux-helper.ts`, `standalone/golivebypass-standalone.sh` |
+| macOS (túnel por destino) | `golive-gui/electron/macos-tunnel.ts`, `tools/proton-confgen/cmd/golive-tunnel/` |
 | Proton e geração de perfil | `golive-gui/electron/proton.ts`, `tools/proton-confgen/` |
 | Plugin Vencord/Equicord WireGuard | `goLiveBypass/vpn-controller.ts`, `vpn-windows.ts`, `vpn-linux.ts`, `vpn-proton.ts`, `native.ts`; instaladores em `installer/` |
 | Proxy legado e standalone | `standalone/golivebypass.js`, `standalone/golivebypass-standalone.sh` |

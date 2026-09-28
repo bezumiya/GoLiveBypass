@@ -6,6 +6,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### GUI macOS: túnel WireGuard por destino (beta)
+
+- Novo helper `golive-tunnel` (`tools/proton-confgen/cmd/golive-tunnel`): wireguard-go numa `utun`, com rotas somente para os destinos do Discord (blocos da Discord Inc., IPs Cloudflare do gateway/API, hosts resolvidos a cada minuto e `104.29.128.0/19`, faixa de mídia de voz/Go Live de São Paulo). Cada rota é conferida com `route get`; IPv6 sem endereço no túnel vira rota de rejeição para o Discord cair em IPv4.
+- O helper roda como root pelo prompt de administrador do macOS e é controlado por socket Unix em `/var/run/golivebypass`, restrito ao uid de quem ativou (`LOCAL_PEERCRED`). A configuração WireGuard viaja pelo socket; o root não lê arquivos da pasta do usuário.
+- Ativar pede a senha antes de fechar o Discord (cancelar não deixa o usuário sem o cliente); desativar, trocar rota Proton, failover e pausa durante a medição não pedem de novo. **Restaurar internet** também funciona no macOS e encerra um helper travado.
+- `proton-confgen` e `golive-tunnel` passam a ser compilados para `darwin-x64` e `darwin-arm64` em subpastas próprias (o binário Linux ocupa `build/proton-confgen`); o `.dmg` passa a ser universal.
+- Lacunas conhecidas: sem reativação automática no login do Mac e sem asset de reparo do helper Proton para macOS.
+
+### Corrigido
+
+- GUI: o botão **Ativar Bypass** ficava desabilitado para sempre depois de **Otimizar rota**, porque `protonOptimizationInFlight` nunca voltava para `false`.
+
 ## [2.0.6] - 2026-09-18
 
 ### Devlog da release estável

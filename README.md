@@ -52,7 +52,7 @@ Criamos um aplicativo completo que faz todo o trabalho de forma **100% automáti
 |---|---|---|
 | **Windows** | WireSock/WFP filtra `Discord.exe`, `Discord`, `Update.exe` e seus processos relacionados | Continua na conexão normal |
 | **Linux** | Network namespace `discord-vpn` com interface WireGuard dedicada | Continua na conexão normal |
-| **macOS** | Temporariamente indisponível até existir um túnel WireGuard por aplicativo | — |
+| **macOS** (beta) | Helper `golive-tunnel` cria uma interface `utun` (wireguard-go) e roteia por ela só os destinos do Discord: blocos da Discord Inc., IPs Cloudflare do gateway/API e a faixa de mídia de voz/Go Live | Continua na conexão normal |
 
 O túnel cobre o processo do Discord inteiro — gateway, login, voz, vídeo e anexos — evitando a divergência de IP que motivou a migração. A mídia não é roteada por um proxy SOCKS separado.
 
@@ -61,16 +61,37 @@ O túnel cobre o processo do Discord inteiro — gateway, login, voz, vídeo e a
 2. Baixe o arquivo da sua plataforma, na lista no fim da página:
    - **Windows:** `GoLiveBypass-*.exe` (portátil, roda direto sem instalar)
    - **Linux:** `GoLiveBypass-*.AppImage`
+   - **macOS (beta, Intel e Apple Silicon):** `GoLiveBypass.dmg`
 3. Abra o arquivo que você acabou de baixar.
 
 O programa **não é assinado**. O sistema avisa na primeira vez. Na 2.0.0, a GUI é a única variante estável; o instalador do plugin está disponível em beta e o standalone segue pausado.
 
 **Windows (SmartScreen):** **Mais informações → Executar assim mesmo**.
 
-#### macOS
+#### macOS (beta)
 
-O suporte macOS está temporariamente indisponível na 2.0.0. A GUI não usa mais injeção ou PAC;
-o suporte será retomado quando houver um túnel WireGuard por aplicativo confiável.
+O macOS não tem filtro por processo sem uma Network Extension assinada pela Apple, então a GUI
+roteia **por destino**: o helper `golive-tunnel` sobe uma interface `utun` com wireguard-go e
+instala rotas somente para o Discord:
+
+- `66.22.192.0/18`, `195.62.89.0/24` e `2a0e:5940::/29`, registrados para a Discord Inc.;
+- os IPs Cloudflare dedicados do gateway/API (`162.159.128–138.232–235`) e os endereços que
+  `gateway.discord.gg`, `discord.com`, `*.discordapp.*` e `*.discord.media` resolverem, renovados
+  a cada minuto;
+- `104.29.128.0/19`, onde hoje responde o UDP de voz/vídeo/Go Live dos servidores de São Paulo.
+  Esse bloco é da Cloudflare e não exclusivo do Discord; sem ele, o servidor de mídia vê o IP
+  brasileiro e recusa a transmissão mesmo com o gateway liberado.
+
+O restante do computador continua na rede normal. Diferenças em relação a Windows/Linux:
+
+- É o **destino** que decide, não o processo: o Discord aberto no navegador também usa o túnel.
+- Ao ativar, o macOS pede a **senha de administrador** uma vez (criar `utun` e rotas exige root).
+  Desativar, trocar a rota Proton e o failover não pedem de novo.
+- Sem IPv6 no perfil, os destinos IPv6 do Discord são recusados na hora (rota de rejeição) para
+  o Discord cair em IPv4, que passa pelo túnel.
+- "Iniciar com o Mac" não reativa o bypass no login: isso exigiria a senha sem ninguém olhando.
+
+Na primeira abertura: clique com o botão direito no app → **Abrir** (o app não é assinado).
 
 ### Como Usar
 1. O aplicativo vai detectar o seu Discord automaticamente.

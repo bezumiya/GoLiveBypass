@@ -13,6 +13,16 @@ const targets = [
   { key: 'linux-x64', output: 'build/proton-confgen', env: { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' } },
   { key: 'win32-x64', output: 'build/proton-confgen.exe', env: { GOOS: 'windows', GOARCH: 'amd64', CGO_ENABLED: '0' } },
 ];
+// macOS: os helpers vão para uma subpasta por arquitetura porque o binário
+// Linux já ocupa build/proton-confgen. Ainda não há asset de reparo para o Mac,
+// então eles ficam fora do manifesto conferido pelo CI.
+const darwinTargets = [
+  { arch: 'x64', env: { GOOS: 'darwin', GOARCH: 'amd64', CGO_ENABLED: '0' } },
+  { arch: 'arm64', env: { GOOS: 'darwin', GOARCH: 'arm64', CGO_ENABLED: '0' } },
+].flatMap(({ arch, env }) => [
+  { output: `build/darwin-${arch}/proton-confgen`, pkg: './cmd/protonvpn-wg', env },
+  { output: `build/darwin-${arch}/golive-tunnel`, pkg: './cmd/golive-tunnel', env },
+]);
 // O estado VCS do checkout não pode alterar os bytes do helper entre a GUI e o
 // asset de reparo publicado. Isso também torna o manifesto reproduzível no CI.
 const buildArgs = ['build', '-buildvcs=false', '-trimpath', '-ldflags=-s -w -buildid=', '-o'];
@@ -20,6 +30,15 @@ const buildArgs = ['build', '-buildvcs=false', '-trimpath', '-ldflags=-s -w -bui
 // Explicit env objects work with cmd.exe, PowerShell and POSIX shells alike.
 for (const target of targets) {
   const result = spawnSync('go', [...buildArgs, target.output, './cmd/protonvpn-wg'], {
+    cwd,
+    env: { ...process.env, ...target.env },
+    stdio: 'inherit',
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+for (const target of darwinTargets) {
+  const result = spawnSync('go', [...buildArgs, target.output, target.pkg], {
     cwd,
     env: { ...process.env, ...target.env },
     stdio: 'inherit',

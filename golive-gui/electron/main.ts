@@ -45,6 +45,7 @@ import { PROTON_CAPTCHA_IPC_CHANNEL, isAllowedProtonCaptchaNavigation, parseProt
 import { observeRouteDiagnostic } from "./route-diagnostics";
 import { decideRouteProof, maskedIP, type RouteProbeResult } from "./route-proof";
 import { prepareDiscordScopeProbes } from "./discord-scope-proof";
+import { configureMacTunnel, ensureMacTunnelHelper, findMacHelper, getMacTunnelStats, getMacTunnelStatus, MAC_TUNNEL_HELPER, MacTunnelAuthorizationCancelled, macTunnelRouteInterfaceSync, pauseMacTunnel, stopMacTunnel, waitForMacTunnelHandshake, type StopMacTunnelResult } from "./macos-tunnel";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -771,15 +772,14 @@ if (!gotLock) {
     // Se a GUI reabriu com o bypass ja ativo (netns/
     // WireSock de uma sessao anterior sobrevivendo ao restart da janela), o vigia do tunel
     // precisa retomar aqui — sem isto, so uma ativacao nova (clique) o arma.
-    if (!isMac) {
-      try {
-        const statusInicial = IS_LINUX ? await linuxStatus() : getStatus();
-        if (statusInicial === "ACTIVE") {
-          iniciarWgStatsWatchdog(wgStatsProvider);
-          startLinuxHealthWatchdog();
-        }
-      } catch {}
-    }
+    try {
+      const statusInicial = IS_LINUX ? await linuxStatus() : getStatus();
+      if (statusInicial === "ACTIVE") {
+        if (isMac) macRouteState = "active";
+        iniciarWgStatsWatchdog(wgStatsProvider);
+        startLinuxHealthWatchdog();
+      }
+    } catch {}
 
     // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
     if (!launchedHidden()) createWindow();
@@ -838,7 +838,8 @@ app.on("before-quit", (event) => {
     ? withWireSockLifecycle("encerrar-linux", () => linuxDeactivate(() => {}))
     : IS_WINDOWS
       ? withWireSockLifecycle("encerrar-windows", () => deactivateAll())
-      : Promise.resolve();
+      // O ramo macOS de deactivateAll já entra na fila sozinho.
+      : isMac ? deactivateAll() : Promise.resolve();
   restore
     .catch((error) => {
       logger.error("app", "limpeza no encerramento falhou", {
@@ -1215,7 +1216,7 @@ function startWindowsRouteWatchdog() {
 // fechado (por exemplo, se o updater removeu o exe entre scan e spawn).
 async function startDiscordAndConfirm(installs: DiscordInstall[], operation: string): Promise<boolean> {
   for (const install of installs) startDiscord(install);
-  if (!IS_WINDOWS || installs.length === 0) return true;
+  if ((!IS_WINDOWS && !isMac) || installs.length === 0) return true;
   const started = await waitUntilDiscordRunning();
   if (!started) {
     logger.error("discord", "reinicio.timeout", { operation, timeout_ms: 10_000 });
@@ -1231,6 +1232,96 @@ async function waitForWindowsRouteSettle(generation: number, operation: string):
   });
   await waitForTunnelStartupSettle();
   assertWindowsRouteGeneration(generation);
+}
+
+// ------------------------------------------------------------------ macOS: túnel por destino
+// Sem primitiva por processo no macOS, o helper golive-tunnel roteia pela utun
+// somente os destinos do Discord (ver electron/macos-tunnel.ts). O estado abaixo
+// só cobre as transições; "ativo" continua sendo túnel + Discord rodando.
+type MacRouteState = "inactive" | "preparing" | "active" | "recovery_required";
+let macRouteState: MacRouteState = "inactive";
+
+function macTunnelHelperPath(): string {
+  let appPath = "";
+  try { appPath = app.getAppPath(); } catch {}
+  const found = findMacHelper(MAC_TUNNEL_HELPER, {
+    resourcesPath: process.resourcesPath,
+    appPath,
+    execPath: process.execPath,
+    cwd: process.cwd(),
+    moduleDir: __dirname,
+    arch: process.arch,
+  });
+  if (!found) throw new Error("O componente golive-tunnel não foi encontrado nesta instalação. Baixe o GoLiveBypass novamente.");
+  return found;
+}
+
+function macTunnelActive(): boolean {
+  return macTunnelRouteInterfaceSync() !== null;
+}
+
+async function applyMacProfile(operation: string, profile = protonCanonicalConfig()): Promise<void> {
+  const status = await configureMacTunnel(fs.readFileSync(profile, "utf8"));
+  logger.info("macos", "tunel.configurado", { operation, iface: status.interfaceName ?? "?", rotas: status.routes, pid: status.pid ?? 0 });
+}
+
+async function macRestoreNetwork(operation: string, force = false): Promise<StopMacTunnelResult> {
+  const result = await stopMacTunnel({ force });
+  const log = result.ok ? logger.info : logger.error;
+  log("macos", "tunel.encerrado", { operation, ok: result.ok, residual: result.residual.join(", "), erro: result.error || "" });
+  return result;
+}
+
+/**
+ * O prompt de administrador vem antes de fechar o Discord: cancelar a senha
+ * não pode deixar o usuário sem o cliente. Depois, o fluxo espelha o Windows:
+ * fecha o Discord, aplica o perfil e reabre para o gateway nascer no túnel.
+ */
+async function macActivateRoute(installs: DiscordInstall[], operation: string): Promise<void> {
+  await ensureMacTunnelHelper({ helperPath: macTunnelHelperPath() });
+  await killDiscord();
+  await applyMacProfile(operation);
+  // Handshake é diagnóstico: o Discord abre mesmo sem ele, como no Windows.
+  void waitForMacTunnelHandshake(15_000).then((ok) => {
+    logger.info("macos", "tunel.handshake", { operation, ok, mode: "diagnostic-only" });
+  });
+  if (!(await startDiscordAndConfirm(installs, operation))) {
+    throw new Error("O Discord não iniciou após preparar o túnel.");
+  }
+}
+
+async function ativarTunelMac(installs: DiscordInstall[]): Promise<void> {
+  const wasActive = macTunnelActive();
+  macRouteState = "preparing";
+  refreshWindowStatus();
+  try {
+    await withWireSockLifecycle("ativacao-mac", () => macActivateRoute(installs, "ativacao"));
+    macRouteState = "active";
+  } catch (cause) {
+    if (cause instanceof MacTunnelAuthorizationCancelled) {
+      macRouteState = wasActive ? "active" : "inactive";
+      refreshWindowStatus();
+      throw new Error("Ativação cancelada: o macOS precisa da senha de administrador para criar o túnel do Discord.");
+    }
+    const detail = String((cause as Error)?.message ?? cause);
+    let closeError = "";
+    try {
+      await killDiscord();
+    } catch (closeFailure) {
+      closeError = String((closeFailure as Error)?.message ?? closeFailure);
+    }
+    const result = await withWireSockLifecycle("ativacao-mac.rollback", () => macRestoreNetwork("ativacao.rollback"))
+      .catch((error): StopMacTunnelResult => ({ ok: false, residual: [], error: String((error as Error)?.message ?? error) }));
+    macRouteState = result.ok ? "inactive" : "recovery_required";
+    if (result.ok && !closeError) await startDiscordAndConfirm(installs, "ativacao.rollback");
+    refreshWindowStatus();
+    logger.error("macos", "ativacao.falhou", { erro: detail, rollback: result.ok ? "ok" : result.residual.join(", ") || result.error || "?" });
+    throw new Error(
+      result.ok
+        ? `A ativação falhou (${detail}). O túnel foi removido e o Discord voltou à rede normal.`
+        : `A ativação falhou (${detail}) e não consegui remover o túnel (${result.residual.join(", ") || result.error || "estado desconhecido"}). Use "Restaurar internet".`,
+    );
+  }
 }
 
 // ------------------------------------------------------------------ fila serial: ativar/desativar
@@ -1278,7 +1369,6 @@ async function activateBypass(event: any) {
 }
 
 async function executarAtivacao(event: any) {
-  if (isMac) throw new Error("O bypass por WireGuard ainda não está disponível no macOS.");
   const installs = getDiscordInstalls({ forceRefresh: true });
   if (installs.length === 0) {
     discordscan.ativacaoSemDiscord("nenhum install encontrado na varredura");
@@ -1314,6 +1404,17 @@ async function executarAtivacao(event: any) {
     if (!fs.existsSync(wgConf)) {
       throw new Error("Nenhuma configuração WireGuard (.conf) foi selecionada. Por favor, importe uma configuração antes de ativar.");
     }
+  }
+
+  if (isMac) {
+    await ativarTunelMac(installs);
+    writeSessionMarker(installs);
+    updateSharedSettings({ autoInject: false });
+    assinaturaUltimaAtivacao = assinatura;
+    iniciarWgStatsWatchdog(wgStatsProvider);
+    startProtonFailoverMonitor();
+    persistBypassEnabled(true);
+    return;
   }
 
   const windowsWasActive = IS_WINDOWS && getStatus({ forceRefresh: true }) === "ACTIVE";
@@ -1489,7 +1590,27 @@ async function deactivateAll() {
     });
     return;
   }
-  if (isMac) return;
+  if (isMac) {
+    await withWireSockLifecycle("desativacao-mac", async () => {
+      if (macTunnelActive() || (await getMacTunnelStatus()).running) {
+        macRouteState = "preparing";
+        await killDiscord();
+        const result = await macRestoreNetwork("desativacao");
+        if (!result.ok) {
+          macRouteState = "recovery_required";
+          throw new Error(`Não consegui encerrar o túnel do Discord (${result.residual.join(", ") || result.error || "estado desconhecido"}). Use "Restaurar internet".`);
+        }
+        macRouteState = "inactive";
+        const restarted = await startDiscordAndConfirm(installs, "desativacao");
+        clearSessionMarker();
+        if (!restarted) {
+          throw new Error("A rede foi restaurada, mas o Discord não iniciou. Abra o Discord novamente.");
+        }
+      }
+      clearSessionMarker();
+      macRouteState = "inactive";
+    });
+  }
 }
 
 function getStatus(options: WindowsDiscoveryReadOptions = { allowStale: true }): string {
@@ -1498,7 +1619,13 @@ function getStatus(options: WindowsDiscoveryReadOptions = { allowStale: true }):
   // admin para instalar/iniciar o servico, mas o processo direto sobe e o tunel funciona): a
   // ativacao completava de verdade (Discord envelopado, WireSock rodando), mas a UI nunca via
   // isso e ficava presa mostrando "Ativar" -- exatamente o relato do beta tester.
-  if (isMac) return "UNSUPPORTED";
+  if (isMac) {
+    const installs = getDiscordInstalls(options);
+    if (installs.length === 0) return "NOT_FOUND";
+    if (macRouteState === "preparing") return "CONNECTING";
+    if (macRouteState === "recovery_required") return "RECOVERY_REQUIRED";
+    return macTunnelActive() && discordIsRunning() ? "ACTIVE" : "INACTIVE";
+  }
   if (IS_WINDOWS) {
     const installs = getDiscordInstalls(options);
     if (installs.length === 0) return "NOT_FOUND";
@@ -1603,6 +1730,7 @@ function startLinuxHealthWatchdog() {
 }
 
 function wgStatsProvider(): Promise<WgTunnelStats> | WgTunnelStats {
+  if (isMac) return getMacTunnelStats();
   return IS_LINUX ? linuxWgStats() : getWgStats();
 }
 
@@ -1957,6 +2085,9 @@ async function applyProtonRouteResult(
         throw new Error(`${linuxPreflightMessage(preflight)}${preflight.installCommand ? ` Execute: ${preflight.installCommand}` : ""}`);
       }
       await linuxActivate(() => {});
+    } else if (isMac) {
+      await macActivateRoute(getDiscordInstalls({ forceRefresh: true }), "selecionar-rota-manual");
+      macRouteState = "active";
     }
     return saved;
   } catch (error) {
@@ -1993,6 +2124,9 @@ async function applyProtonRouteResult(
       } else if (IS_LINUX) {
         await linuxDeactivate(() => {});
         await linuxActivate(() => {});
+      } else if (isMac) {
+        await macActivateRoute(getDiscordInstalls({ forceRefresh: true }), "selecionar-rota-manual.rollback");
+        macRouteState = "active";
       }
     } catch (rollbackError) {
       if (IS_WINDOWS) windowsRouteState = "recovery_required";
@@ -2017,9 +2151,16 @@ async function applyProtonFailoverCandidate(
     stopWindowsRouteWatchdog();
   } else if (IS_LINUX) {
     stopLinuxHealthWatchdog();
+  } else if (isMac) {
+    if (!macTunnelActive() || !discordIsRunning()) return false;
   }
   pararWgStatsWatchdog();
   const switchProfile = async (profile: string): Promise<boolean> => {
+    if (isMac) {
+      // O helper troca o peer na mesma utun; as rotas do Discord não piscam.
+      await applyMacProfile("failover", profile);
+      return waitForMacTunnelHandshake(FAILOVER_ROUTE_TIMEOUT_MS);
+    }
     if (IS_WINDOWS) {
       assertWindowsRouteGeneration(windowsGeneration);
       await switchWireSockService(settingsDir(), profile, windowsAllowedAppPaths(installs));
@@ -2181,6 +2322,15 @@ async function collectProtonFailoverSample(generation: number): Promise<void> {
       wireSock,
       trafficIncreasing,
     };
+  } else if (isMac) {
+    const tunnelActive = macTunnelActive();
+    const stats = await getMacTunnelStats();
+    sample = {
+      discordRunning: discordIsRunning(),
+      tunnelActive,
+      stats,
+      statsFailureEvidence: !tunnelActive || /sem peer|ECONNREFUSED|ENOENT/i.test(stats.error || ""),
+    };
   } else {
     return;
   }
@@ -2216,7 +2366,7 @@ function stopProtonFailoverMonitor(): void {
 }
 
 function startProtonFailoverMonitor(): void {
-  if (!IS_WINDOWS && !IS_LINUX) return;
+  if (!IS_WINDOWS && !IS_LINUX && !isMac) return;
   stopProtonFailoverMonitor();
   const generation = protonFailoverGeneration;
   void (async () => {
@@ -2226,7 +2376,11 @@ function startProtonFailoverMonitor(): void {
     if (!username) return;
     const plan = await resolveProtonPlan(username);
     if (generation !== protonFailoverGeneration || plan.status !== "free" || quitting) return;
-    const active = IS_LINUX ? await linuxStatus() === "ACTIVE" : windowsRouteState === "active" && windowsRouteStarted && isWireSockActive() && discordIsRunning();
+    const active = IS_LINUX
+      ? await linuxStatus() === "ACTIVE"
+      : isMac
+        ? macTunnelActive() && discordIsRunning()
+        : windowsRouteState === "active" && windowsRouteStarted && isWireSockActive() && discordIsRunning();
     if (!active || generation !== protonFailoverGeneration) return;
     protonFailoverTracker = new FailoverHealthTracker();
     protonFailoverTracker.reset();
@@ -2859,7 +3013,37 @@ ipcMain.handle("deactivate", async (event) => {
   refreshTray().catch(() => {});
 });
 ipcMain.handle("restore-internet", async () => {
-  if (!IS_WINDOWS) return { ok: false, error: "Esta recuperação só está disponível no Windows." };
+  if (isMac) {
+    cancelStartupBypassRestore();
+    return withWireSockLifecycle("restaurar-internet-mac", async () => {
+      stopProtonFailoverMonitor();
+      pararWgStatsWatchdog();
+      const hadTunnel = macTunnelActive() || (await getMacTunnelStatus()).running;
+      const installs = hadTunnel ? getDiscordInstalls({ forceRefresh: true }) : [];
+      macRouteState = "preparing";
+      if (hadTunnel) {
+        try {
+          await killDiscord();
+        } catch (error) {
+          macRouteState = "recovery_required";
+          throw error;
+        }
+      }
+      // force: um helper travado só sai com outro prompt de administrador.
+      const result = await macRestoreNetwork("restaurar-internet", true);
+      macRouteState = result.ok ? "inactive" : "recovery_required";
+      if (result.ok) {
+        clearSessionMarker();
+        persistBypassEnabled(false);
+      }
+      if (hadTunnel && result.ok && !(await startDiscordAndConfirm(installs, "restaurar-internet"))) {
+        return { ok: false, residual: [], error: "A rede foi restaurada, mas o Discord não iniciou. Abra o Discord novamente." };
+      }
+      refreshTray().catch(() => {});
+      return { ok: result.ok, residual: result.residual, error: result.error };
+    });
+  }
+  if (!IS_WINDOWS) return { ok: false, error: "Esta recuperação só está disponível no Windows e no macOS." };
   cancelStartupBypassRestore();
   return withWireSockLifecycle("restaurar-internet", async () => {
     windowsRouteGeneration += 1;
@@ -3224,7 +3408,7 @@ function readLogTail(maxBytes = 48_000): string {
 }
 
 async function formatWgTunelDiagnostico(status: string): Promise<string> {
-  if (isMac || status !== "ACTIVE") return "n/a";
+  if (status !== "ACTIVE") return "n/a";
   const s = await wgStatsProvider();
   if (!s.ok) return `indisponível (${s.error ?? "?"})`;
   const handshake = s.handshakeAgoS === null ? "nunca" : `há ${s.handshakeAgoS}s`;
@@ -3403,7 +3587,7 @@ async function postBugReportToApi(
   status: string,
 ): Promise<{ ok: true; issueUrl: string; issueNumber?: number } | { ok: false; error: string }> {
   const endpoint = `${cfg.baseUrl}/v1/reports`;
-  const wgTunel = !isMac && status === "ACTIVE" ? await wgStatsProvider() : undefined;
+  const wgTunel = status === "ACTIVE" ? await wgStatsProvider() : undefined;
   const body = {
     title,
     description,
@@ -3971,7 +4155,6 @@ ipcMain.handle("cancel-proton-route-discovery", (event, requestId: string) =>
   protonOptimizations.cancel(requestId, event.sender.id));
 
 ipcMain.handle("discover-proton-routes", async (event, options?: ProtonRouteDiscoveryOptions) => {
-  if (isMac) return { success: false, error: "A descoberta de rotas Proton não está disponível no macOS." };
   if (startupRestoreInFlight) {
     return { success: false, error: "A rota de boot ainda está sendo restaurada." };
   }
@@ -4100,7 +4283,6 @@ ipcMain.handle("cancel-proton-optimization", (event, requestId: string) =>
   protonOptimizations.cancel(requestId, event.sender.id));
 
 ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizationOptions) => {
-  if (isMac) return { success: false, error: "O bypass por WireGuard ainda não está disponível no macOS." };
   if (startupRestoreInFlight) {
     // O boot oculto é a autoridade enquanto mede e ativa a rota. Uma janela
     // aberta nesse intervalo deve aguardar o resultado, não iniciar outra
@@ -4206,6 +4388,13 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
             refreshWindowStatus();
           } else if (IS_LINUX && status === "ACTIVE") {
             await linuxDeactivate(() => {});
+          } else if (isMac && status === "ACTIVE") {
+            // Pausa (sem peer) em vez de encerrar: a utun fica, o Discord não
+            // vaza pela rede normal e a retomada não pede a senha de novo.
+            stopProtonFailoverMonitor();
+            pararWgStatsWatchdog();
+            await killDiscord();
+            await pauseMacTunnel();
           }
         } catch (error) {
           return { success: false, error: `Não foi possível preparar a medição: ${String((error as Error)?.message ?? error)}` };
@@ -4299,6 +4488,12 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
                 throw new Error(tailErroScript(refreshed.stderr, 4) || "falha ao atualizar a rota WireGuard");
               }
             }
+          } else if (isMac) {
+            // Já dentro da fila "troca-rota-proton": chamar a fila de novo travaria.
+            await macActivateRoute(getDiscordInstalls({ forceRefresh: true }), "troca-rota-proton");
+            macRouteState = "active";
+            iniciarWgStatsWatchdog(wgStatsProvider);
+            startProtonFailoverMonitor();
           }
         } catch (err) {
           if (IS_WINDOWS) {
@@ -4356,7 +4551,7 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
     statusBypass = IS_LINUX ? await linuxStatus() : getStatus();
   } catch {}
   // Snapshot do tunel WireGuard no momento do report.
-  const wgTunel = !isMac && statusBypass === "ACTIVE" ? await wgStatsProvider() : undefined;
+  const wgTunel = statusBypass === "ACTIVE" ? await wgStatsProvider() : undefined;
   return submitBugReport(
     { title: String(p.title ?? ""), description: String(p.description ?? ""), includeLogs: !!p.includeLogs },
     { statusBypass, installsFlavours: ultimosFlavoursLinux, graphics: ultimosGraficosLinux, wgTunel },
@@ -4369,7 +4564,6 @@ type ProtonManualSelectionOptions = {
 };
 
 ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelectionOptions) => {
-  if (isMac) return { success: false, error: "O bypass por WireGuard ainda não está disponível no macOS." };
   const ownerId = event.sender.id;
   const measurementId = typeof options?.measurementId === "string" ? options.measurementId.trim() : "";
   const server = typeof options?.server === "string" ? options.server.trim() : "";

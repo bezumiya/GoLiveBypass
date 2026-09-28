@@ -59,10 +59,39 @@ function helperName(platform: ProtonRuntimePlatform): string {
   return platform === "win32" ? "proton-confgen.exe" : "proton-confgen";
 }
 
-function runtimeKey(context: ProtonRuntimeContext): "win32-x64" | "linux-x64" | null {
+type ProtonRuntimeKey = "win32-x64" | "linux-x64" | "darwin-x64" | "darwin-arm64";
+
+function runtimeKey(context: ProtonRuntimeContext): ProtonRuntimeKey | null {
   if (context.platform === "win32" && context.arch === "x64") return "win32-x64";
   if (context.platform === "linux" && context.arch === "x64") return "linux-x64";
+  if (context.platform === "darwin" && (context.arch === "x64" || context.arch === "arm64")) return `darwin-${context.arch}`;
   return null;
+}
+
+/** Diretório do build por arquitetura no macOS: `darwin-x64` ou `darwin-arm64`. */
+export function macHelperArchDir(arch: string = process.arch): string {
+  return `darwin-${arch === "arm64" ? "arm64" : "x64"}`;
+}
+
+/**
+ * No macOS os helpers ficam numa subpasta por arquitetura. O binário Linux
+ * usa o mesmo nome `proton-confgen` na raiz de build/, então o Mac nunca pode
+ * cair nos caminhos genéricos: executaria um ELF.
+ */
+export function macHelperCandidates(name: string, context: ProtonRuntimeContext): string[] {
+  const archDir = macHelperArchDir(context.arch);
+  const candidates: string[] = [];
+  for (const directory of [
+    context.resourcesPath && path.join(context.resourcesPath, "extra", "proton-confgen", archDir),
+    context.appPath && path.join(context.appPath, "..", "tools", "proton-confgen", "build", archDir),
+    context.cwd && path.resolve(context.cwd, "..", "tools", "proton-confgen", "build", archDir),
+    context.moduleDir && path.resolve(context.moduleDir, "..", "..", "tools", "proton-confgen", "build", archDir),
+    context.cwd && path.resolve(context.cwd, "tools", "proton-confgen", "build", archDir),
+  ]) {
+    if (!directory) continue;
+    pushUnique(candidates, path.join(directory, name));
+  }
+  return candidates;
 }
 
 function validatedVersion(version: string): string {
@@ -83,6 +112,7 @@ function validatedHash(hash: string): string {
 }
 
 export function protonConfgenCandidates(context: ProtonRuntimeContext): string[] {
+  if ((context.platform ?? process.platform) === "darwin") return macHelperCandidates("proton-confgen", context);
   const exe = helperName(context.platform ?? process.platform);
   const candidates: string[] = [];
   const resources = context.resourcesPath;
@@ -325,7 +355,8 @@ async function ensureProtonConfgenOnce(options: EnsureProtonConfgenOptions): Pro
   // an incomplete extraction or a bad portable copy removed extraResources.
   // It is only trusted after the strict schema validation above.
   const manifest = localManifest || await fetchReleaseManifest(version);
-  const entry = manifest?.assets[key];
+  // O macOS ainda não publica asset de reparo: usa só o helper do pacote.
+  const entry = key === "win32-x64" || key === "linux-x64" ? manifest?.assets[key] : undefined;
   if (manifest && manifest.version !== version) {
     throw new Error("O manifesto do runtime Proton pertence a outra versão da GUI.");
   }
