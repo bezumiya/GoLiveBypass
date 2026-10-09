@@ -1,1 +1,5 @@
 dist-build/
+dist/
+node_modules/
+# Gerados por scripts/build-proton.mjs a partir de tools/proton-confgen
+resources/extra/proton-confgen/

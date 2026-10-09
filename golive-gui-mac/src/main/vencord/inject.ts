@@ -37,16 +37,24 @@ export function vencordSettingsPath(home: string): string {
   return path.join(home, 'Library', 'Application Support', 'Vencord', 'settings', 'settings.json');
 }
 
-/** Liga o FakeNitro preservando o resto das configurações do Vencord. */
-export function enableFakeNitro(home: string): void {
+/**
+ * Liga o FakeNitro só se o usuário nunca escolheu nada para ele: um
+ * `enabled` já gravado (ligado ou desligado) é preferência dele e fica.
+ * Devolve se o arquivo foi alterado.
+ */
+export function enableFakeNitroIfUnset(home: string): boolean {
   const p = vencordSettingsPath(home);
   let settings: any = {};
-  try { settings = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* novo ou corrompido */ }
-  if (typeof settings !== 'object' || settings === null) settings = {};
+  if (fs.existsSync(p)) {
+    try { settings = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return false; /* ilegível: não reescreve */ }
+  }
+  if (typeof settings !== 'object' || settings === null) return false;
+  if (typeof settings.plugins?.FakeNitro?.enabled === 'boolean') return false;
   settings.plugins ??= {};
   settings.plugins.FakeNitro = { ...(settings.plugins.FakeNitro ?? {}), enabled: true };
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(settings, null, 4));
+  return true;
 }
 
 async function ensureCli(cacheDir: string, log: (m: string) => void): Promise<string> {
@@ -65,13 +73,19 @@ async function ensureCli(cacheDir: string, log: (m: string) => void): Promise<st
   return cli;
 }
 
-/** Injeta o Vencord (se ainda não estiver) e garante o FakeNitro ligado. */
+const fakeNitroMsg = (changed: boolean) =>
+  changed ? 'FakeNitro ligado.' : 'FakeNitro mantido como você deixou no Vencord.';
+
+/**
+ * Injeta o Vencord (se ainda não estiver) e liga o FakeNitro se o usuário
+ * nunca mexeu nele. Só é chamado com o opt-in ligado; nada é escrito antes
+ * de a permissão estar confirmada.
+ */
 export async function injectVencord(opts: {
   home: string; discordApp: string; cacheDir: string; log: (m: string) => void;
 }): Promise<void> {
-  enableFakeNitro(opts.home);
   if (isVencordInjected(opts.discordApp)) {
-    opts.log('Vencord já injetado; FakeNitro ligado.');
+    opts.log(`Vencord já injetado. ${fakeNitroMsg(enableFakeNitroIfUnset(opts.home))}`);
     return;
   }
   if (!canModifyApp(opts.discordApp)) throw new AppManagementDenied('sem permissão de Gerenciamento de Apps');
@@ -89,5 +103,5 @@ export async function injectVencord(opts: {
     if (/operation not permitted/i.test(out)) throw new AppManagementDenied(out.trim().slice(-400));
     throw new Error(`instalador terminou sem injetar: ${out.trim().slice(-300)}`);
   }
-  opts.log('Vencord injetado com FakeNitro ligado.');
+  opts.log(`Vencord injetado. ${fakeNitroMsg(enableFakeNitroIfUnset(opts.home))}`);
 }

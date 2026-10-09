@@ -12,6 +12,11 @@ describe('rewriteForSplitTunnel', () => {
     expect(text).not.toMatch(/0\.0\.0\.0\/0|::\/0|DNS|PostUp/);
   });
 
+  it('põe PersistentKeepalive quando o conf não tem', () => {
+    const text = rewriteForSplitTunnel(parseWgConfig('[Interface]\nPrivateKey = a\n[Peer]\nPublicKey = b\nEndpoint = 1.2.3.4:51820'));
+    expect(text).toContain('PersistentKeepalive = 25');
+  });
+
   it('normaliza a capitalização das chaves', () => {
     const text = rewriteForSplitTunnel(parseWgConfig(
       '[interface]\nprivatekey = a\naddress=10.0.0.2/32\n[peer]\npublickey = b\nendpoint=1.2.3.4:51820\npersistentkeepalive = 25',

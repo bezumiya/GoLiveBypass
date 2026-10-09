@@ -19,6 +19,8 @@ export type PrivilegedError =
 export interface AppSettings {
   lastTunnelState?: TunnelState;
   protonUser?: string;
+  /** Opt-in explícito: instalar o Vencord e ligar o FakeNitro ao ativar. */
+  vencordOptIn?: boolean;
 }
 
 export interface UpdateInfo {

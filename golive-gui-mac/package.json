@@ -1,14 +1,18 @@
 {
   "name": "golivebypass-mac",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
-  "description": "Reativa o Go Live do Discord no macOS (Apple Silicon) via WireGuard full-device.",
+  "description": "Reativa o Go Live do Discord no macOS (Apple Silicon e Intel) com túnel WireGuard só para o Discord.",
   "main": "dist/main/main.js",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:ts": "tsc -p tsconfig.json && cp src/renderer/index.html dist/renderer/index.html && cp src/renderer/styles.css dist/renderer/styles.css",
-    "dist:mac": "npm run build:ts && electron-builder --mac --universal"
+    "build:proton": "node scripts/build-proton.mjs",
+    "build:icons": "swift scripts/make-icons.swift",
+    "build:mac": "npm run build:proton && npm run build:ts && electron-builder --mac --universal --publish never",
+    "dist:mac": "npm run build:mac",
+    "release:mac": "node scripts/release-mac.mjs"
   },
   "devDependencies": {
     "electron": "^33.0.0",

@@ -9,11 +9,14 @@ extraResources:
     to: bin
   - from: resources/extra
     to: extra
+  - from: resources/tray
+    to: tray
 asarUnpack:
   - "**/bin/**"
   - "**/extra/**"
 mac:
   category: public.app-category.utilities
+  icon: build/icon.icns
   target:
     - target: dmg
       arch: universal
@@ -26,4 +29,5 @@ mac:
 afterPack: scripts/adhoc-sign.js
 dmg:
   writeUpdateInfo: false
+  icon: build/icon.icns
   artifactName: GoLiveBypass-macos-${version}-${arch}.${ext}

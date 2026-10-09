@@ -9,12 +9,27 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$DEST"
 
+# Versões fixadas: as mesmas dos binários commitados (conferidos por resources/bin/SHA256SUMS)
+WIREGUARD_GO_VERSION=0.0.20250522
+WIREGUARD_TOOLS_VERSION=1.0.20260223
+
 command -v brew >/dev/null 2>&1 || { echo "Homebrew é necessário." >&2; exit 1; }
+for pin in "wireguard-go $WIREGUARD_GO_VERSION" "wireguard-tools $WIREGUARD_TOOLS_VERSION"; do
+  set -- $pin
+  have=$(brew info --json=v2 "$1" | python3 -c 'import json,sys;print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])')
+  [ "$have" = "$2" ] || { echo "O Homebrew oferece $1 $have, mas o app fixa $2. Atualize a versão fixada neste script de propósito." >&2; exit 1; }
+done
 command -v lipo >/dev/null 2>&1 || { echo "lipo (Xcode Command Line Tools) é necessário." >&2; exit 1; }
 
 # Codinome do macOS -> tag de bottle (ex.: sequoia, sonoma, ventura).
-CODENAME=$(brew config 2>/dev/null | awk -F': ' '/^macOS/ {print $2}' | tr '[:upper:]' '[:lower:]' | sed -E 's/.*\b(sequoia|sonoma|ventura|monterey)\b.*/\1/')
-[ -n "$CODENAME" ] || { echo "Não deduzi o codinome do macOS para o bottle. Ajuste CODENAME no script." >&2; exit 1; }
+CODENAME=${CODENAME:-}
+if [ -z "$CODENAME" ]; then
+  # brew config só traz o número (ex.: "26.7.1-x86_64"); o codinome vem da versão principal
+  case "$(sw_vers -productVersion | cut -d. -f1)" in
+    12) CODENAME=monterey ;; 13) CODENAME=ventura ;; 14) CODENAME=sonoma ;; 15) CODENAME=sequoia ;; 26) CODENAME=tahoe ;;
+  esac
+fi
+[ -n "$CODENAME" ] || { echo "Não sei o codinome deste macOS para escolher o bottle. Rode com CODENAME=<bottle> (ex.: CODENAME=sonoma)." >&2; exit 1; }
 echo "Bottles alvo: ${CODENAME} (x86_64) e arm64_${CODENAME}"
 
 # Extrai bin/<name> de um bottle de uma formula para um arquivo de saída.
@@ -46,4 +61,5 @@ WGQ=$(find "$WORK/wireguard-tools-${CODENAME}" -type f -path "*/bin/wg-quick" | 
 [ -n "$WGQ" ] || { echo "Não achei wg-quick." >&2; exit 1; }
 cp "$WGQ" "$DEST/wg-quick"; chmod +x "$DEST/wg-quick"
 
-echo "Binários universais em $DEST"
+(cd "$DEST" && shasum -a 256 wg wg-quick wireguard-go > SHA256SUMS)
+echo "Binários universais em $DEST (SHA256SUMS atualizado)"

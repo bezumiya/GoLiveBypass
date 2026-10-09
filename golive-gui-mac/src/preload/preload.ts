@@ -12,10 +12,12 @@ contextBridge.exposeInMainWorld('golive', {
   vencordPermission:   () => ipcRenderer.invoke('golive', 'vencord:permission'),
   vencordOpenSettings: () => ipcRenderer.invoke('golive', 'vencord:openSettings'),
   vencordRetry:        () => ipcRenderer.invoke('golive', 'vencord:retry'),
+  vencordGetOptIn:     () => ipcRenderer.invoke('golive', 'vencord:getOptIn'),
+  vencordSetOptIn:     (enabled: boolean) => ipcRenderer.invoke('golive', 'vencord:setOptIn', { enabled }),
   protonAccount:  () => ipcRenderer.invoke('golive', 'proton:account'),
   protonLogout:   () => ipcRenderer.invoke('golive', 'proton:logout'),
   checkUpdate:    () => ipcRenderer.invoke('golive', 'app:checkUpdate'),
-  downloadUpdate: (url: string) => ipcRenderer.invoke('golive', 'app:downloadUpdate', { url }),
+  downloadUpdate: (version: string) => ipcRenderer.invoke('golive', 'app:downloadUpdate', { version }),
 
   onVencordPermission: (cb: (p: { granted: boolean }) => void) => ipcRenderer.on('vencord:permission', (_e, p) => cb(p)),
   onTunnelState: (cb: (p: { state: string }) => void) => ipcRenderer.on('tunnel:state', (_e, p) => cb(p)),

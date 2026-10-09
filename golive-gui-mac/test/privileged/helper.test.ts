@@ -65,3 +65,15 @@ describe('helperScript', () => {
     expect(out).toContain('Endpoint = 1.2.3.4:51820');
   });
 });
+
+import { hasV6Rejects } from '../../src/main/privileged/helper';
+
+describe('hasV6Rejects', () => {
+  it('acha as rejeições IPv6 do helper no netstat', () => {
+    expect(hasV6Rejects([
+      'Destination                             Gateway                                 Flags         Netif Expire',
+      '2606:4700::/32                          ::1                                     UGRSc                 lo0',
+    ].join('\n'))).toBe(true);
+    expect(hasV6Rejects('2606:4700::/32  fe80::1%en0  UGSc  en0\ndefault  fe80::1%en0  UGcg  en0')).toBe(false);
+  });
+});

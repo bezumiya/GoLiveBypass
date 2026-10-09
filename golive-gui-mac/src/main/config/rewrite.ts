@@ -32,9 +32,17 @@ function normalize(lines: string[]): string[] {
   return out;
 }
 
+/**
+ * Sem keepalive o handshake só sai com tráfego para os ranges do Discord, e o
+ * helper desiste em 15 s se o Discord estiver fechado.
+ */
+export const DEFAULT_KEEPALIVE = 25;
+
 export function rewriteForSplitTunnel(c: WgConfig): string {
+  const peer = normalize(c.peerLines);
+  if (!peer.some(l => l.startsWith('PersistentKeepalive ='))) peer.push(`PersistentKeepalive = ${DEFAULT_KEEPALIVE}`);
   return [
     '[Interface]', ...normalize(c.interfaceLines), '',
-    '[Peer]', ...normalize(c.peerLines), `AllowedIPs = ${DISCORD_ALLOWED_IPS}`, '',
+    '[Peer]', ...peer, `AllowedIPs = ${DISCORD_ALLOWED_IPS}`, '',
   ].join('\n');
 }

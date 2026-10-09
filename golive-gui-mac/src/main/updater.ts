@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as child_process from 'child_process';
+import * as crypto from 'crypto';
 import { app } from 'electron';
 
 const DEFAULT_REPO = 'bezumiya/GoLiveBypass';
@@ -21,15 +22,18 @@ function releasesUrl(): string {
   if (process.env.GOLIVE_UPDATE_FEED) return process.env.GOLIVE_UPDATE_FEED;
   let pkg: string | null = null;
   try { pkg = fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'); } catch {}
-  return `https://api.github.com/repos/${updateRepo(pkg)}/releases?per_page=30`;
+  return `https://api.github.com/repos/${updateRepo(pkg)}/releases?per_page=100`;
 }
 
 export interface UpdateInfo {
   available: boolean;
   latestVersion?: string;
   downloadUrl?: string;
+  sha256?: string;
   currentVersion: string;
 }
+
+export interface PendingUpdate { downloadUrl: string; sha256: string }
 
 const isLocal = (u: string) => /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u);
 
@@ -83,12 +87,42 @@ function semverGt(a: string, b: string): boolean {
 
 // Só o DMG deste app; o GoLiveBypass.dmg das releases upstream é outro produto
 const ASSET_RE = /^GoLiveBypass-macos-.+-(arm64|x64|universal)\.dmg$/;
+// Releases macOS usam a tag macos-vX.Y.Z; vX.Y.Z fica aceito para releases de forks
+const TAG_RE = /^(?:macos-)?v?(\d+\.\d+\.\d+)$/;
+const SHA_RE = /^[0-9a-f]{64}$/;
 
-function pickAsset(assets: any[]): any | undefined {
-  const mine = (assets ?? []).filter((a: any) => ASSET_RE.test(a.name));
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  return mine.find((a: any) => a.name.endsWith(`-${arch}.dmg`))
+export function pickAsset(assets: any[], arch: string = process.arch): any | undefined {
+  const mine = (assets ?? []).filter((a: any) => ASSET_RE.test(a?.name ?? ''));
+  const want = arch === 'arm64' ? 'arm64' : 'x64';
+  return mine.find((a: any) => a.name.endsWith(`-${want}.dmg`))
       ?? mine.find((a: any) => a.name.endsWith('-universal.dmg'));
+}
+
+/** SHA-256 publicado do asset: o digest do GitHub ou o sidecar <nome>.sha256. */
+export async function expectedSha256(asset: any, assets: any[], get: (url: string) => Promise<string> = httpsGet): Promise<string | null> {
+  const digest = /^sha256:([0-9a-f]{64})$/i.exec(String(asset?.digest ?? ''));
+  if (digest) return digest[1].toLowerCase();
+  const sidecar = (assets ?? []).find((a: any) => a?.name === `${asset.name}.sha256`);
+  if (!sidecar?.browser_download_url) return null;
+  try {
+    const hex = (await get(sidecar.browser_download_url)).trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+    return SHA_RE.test(hex) ? hex : null;
+  } catch { return null; }
+}
+
+/** Maior versão estável com DMG deste app acima da atual (a ordem da API não importa). */
+export function pickRelease(releases: any[], current: string, arch: string = process.arch) {
+  let best: { version: string; asset: any; assets: any[] } | null = null;
+  for (const release of releases ?? []) {
+    if (release?.draft || release?.prerelease) continue;
+    const m = TAG_RE.exec(String(release?.tag_name ?? ''));
+    if (!m) continue;
+    const asset = pickAsset(release.assets, arch);
+    if (!asset) continue;
+    if (!semverGt(m[1], current)) continue;
+    if (!best || semverGt(m[1], best.version)) best = { version: m[1], asset, assets: release.assets };
+  }
+  return best;
 }
 
 /** Consulta GitHub Releases estáveis e retorna info de atualização */
@@ -96,21 +130,29 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
   const current = app.getVersion();
   try {
     const releases = JSON.parse(await httpsGet(releasesUrl())) as any[];
-    for (const release of releases) {
-      if (release.draft || release.prerelease) continue;
-      const asset = pickAsset(release.assets);
-      if (!asset) continue;
-      const latest: string = String(release.tag_name ?? '').replace(/^v/, '');
-      if (!/^\d+\.\d+\.\d+$/.test(latest) || !semverGt(latest, current)) break;
-      return { available: true, latestVersion: latest, downloadUrl: asset.browser_download_url, currentVersion: current };
-    }
+    const best = pickRelease(releases, current);
+    if (!best) return { available: false, currentVersion: current };
+    // Sem hash publicado não há como conferir o download: a atualização não é oferecida
+    const sha256 = await expectedSha256(best.asset, best.assets);
+    if (!sha256) return { available: false, currentVersion: current };
+    return {
+      available: true, latestVersion: best.version, downloadUrl: best.asset.browser_download_url,
+      sha256, currentVersion: current,
+    };
   } catch {}
   return { available: false, currentVersion: current };
 }
 
-/** Baixa a nova versão e abre o Finder para instalar */
+export function fileSha256(p: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    fs.createReadStream(p).on('data', d => h.update(d)).on('end', () => resolve(h.digest('hex'))).on('error', reject);
+  });
+}
+
+/** Baixa a nova versão, confere o SHA-256 e só então abre o DMG */
 export async function downloadAndInstall(
-  downloadUrl: string,
+  update: PendingUpdate,
   onProgress: (msg: string) => void,
 ): Promise<{ ok: boolean; error?: string }> {
   const tmpDir = path.join(app.getPath('temp'), 'golivebypass-update');
@@ -118,8 +160,14 @@ export async function downloadAndInstall(
   const dmgPath = path.join(tmpDir, 'GoLiveBypass-update.dmg');
 
   try {
+    if (!SHA_RE.test(update.sha256)) throw new Error('SHA-256 publicado inválido');
     onProgress('Baixando atualização…');
-    await downloadFile(downloadUrl, dmgPath);
+    await downloadFile(update.downloadUrl, dmgPath);
+    onProgress('Conferindo SHA-256…');
+    if (await fileSha256(dmgPath) !== update.sha256) {
+      fs.rmSync(dmgPath, { force: true });
+      throw new Error('o arquivo baixado não confere com o SHA-256 publicado');
+    }
     onProgress('Abrindo instalador…');
     child_process.spawn('open', [dmgPath], { detached: true, stdio: 'ignore' }).unref();
     return { ok: true };

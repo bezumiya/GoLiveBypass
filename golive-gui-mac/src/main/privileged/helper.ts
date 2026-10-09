@@ -127,6 +127,24 @@ esac
 `;
 }
 
+/** Rotas de rejeição IPv6 do helper ainda no sistema (sobram se o app morrer com o túnel ativo). */
+export function hasV6Rejects(netstatInet6: string): boolean {
+  return netstatInet6.split(/\r?\n/).some(l => {
+    const [dest, , flags] = l.trim().split(/\s+/);
+    return DISCORD_REJECT_V6.includes(dest) && /R/.test(flags ?? '');
+  });
+}
+
+/**
+ * Sem túnel ativo, remove rejeições IPv6 que sobraram de um crash. Só pelo
+ * sudo sem senha: na abertura do app não cabe um pedido de senha.
+ */
+export async function cleanupStaleV6Rejects(binDir: string): Promise<boolean> {
+  const routes = await execCmd('/usr/sbin/netstat', ['-rn', '-f', 'inet6']);
+  if (!hasV6Rejects(routes.stdout) || !helperReady(binDir)) return false;
+  return (await execCmd('/usr/bin/sudo', ['-n', HELPER_PATH, 'down'])).code === 0;
+}
+
 /** Vale para qualquer administrador; o helper acha o conf de cada um pelo SUDO_USER. */
 export function sudoersContent(): string {
   return (

@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 
 const sh = (cmd: string, args: string[]) =>
-  new Promise<void>(res => spawn(cmd, args).on('close', () => res()));
+  new Promise<void>(res => spawn(cmd, args, { stdio: 'ignore' }).on('error', () => res()).on('close', () => res()));
 
 export async function restartDiscord(): Promise<void> {
   await sh('osascript', ['-e', 'tell application "Discord" to quit']).catch(() => {});

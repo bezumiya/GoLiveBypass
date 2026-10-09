@@ -1,0 +1,86 @@
+name: release-macos
+
+# Release do cliente macOS (golive-gui-mac/). Separada do build-gui.yml de propósito:
+# a release macOS tem tag macos-vX.Y.Z, só o DMG + .sha256 e NUNCA vira
+# /releases/latest — o scripts/release-mac.mjs cria com make_latest=false, confere
+# o conteúdo do DMG antes e falha (devolvendo a latest anterior) se algo mudar depois.
+on:
+  workflow_dispatch:
+    inputs:
+      versao:
+        description: 'Versão do golive-gui-mac/package.json (ex.: 0.6.0); a tag será macos-v<versão>'
+        required: true
+        type: string
+      ref:
+        description: 'Commit/branch a buildar'
+        required: false
+        type: string
+        default: main
+      acao:
+        description: 'rascunho = build e draft para conferir; publicar-rascunho = publica o draft já conferido (sem rebuild); publicar = build e publica direto. Nunca publique o draft pelo botão do GitHub: ele marca latest por padrão.'
+        required: true
+        type: choice
+        options: [rascunho, publicar-rascunho, publicar]
+        default: rascunho
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: golive-gui-mac
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          # Histórico completo: o manifesto do proton-confgen registra o último commit da fonte
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - name: Versão do input igual à do package.json
+        env:
+          VERSAO: ${{ inputs.versao }}
+        run: test "$(node -p 'require("./package.json").version')" = "$VERSAO"
+      - name: Publicar draft já conferido
+        if: ${{ inputs.acao == 'publicar-rascunho' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: node scripts/release-mac.mjs --repo "$REPO" --publish-draft
+      - if: ${{ inputs.acao != 'publicar-rascunho' }}
+        run: npm ci
+      - if: ${{ inputs.acao != 'publicar-rascunho' }}
+        run: npm run typecheck
+      - if: ${{ inputs.acao != 'publicar-rascunho' }}
+        run: npm test
+      - if: ${{ inputs.acao != 'publicar-rascunho' }}
+        run: npm run build:mac
+      - name: Notas a partir do CHANGELOG
+        if: ${{ inputs.acao != 'publicar-rascunho' }}
+        env:
+          VERSAO: ${{ inputs.versao }}
+        run: |
+          awk -v v="$VERSAO" '
+            $0 ~ "^## \\[macos-" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' ../CHANGELOG.md > "$RUNNER_TEMP/notas.md"
+          test -s "$RUNNER_TEMP/notas.md" || { echo "CHANGELOG sem a seção ## [macos-$VERSAO]" >&2; exit 1; }
+      - name: Publicar com guarda de latest
+        if: ${{ inputs.acao != 'publicar-rascunho' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ACAO: ${{ inputs.acao }}
+        run: |
+          extra=""
+          [ "$ACAO" = "rascunho" ] && extra="--draft"
+          npm run release:mac -- --repo "$REPO" --notes-file "$RUNNER_TEMP/notas.md" $extra

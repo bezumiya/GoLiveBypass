@@ -2,24 +2,45 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { enableFakeNitro, vencordSettingsPath, isVencordInjected } from '../src/main/vencord/inject';
+import { enableFakeNitroIfUnset, vencordSettingsPath, isVencordInjected } from '../src/main/vencord/inject';
 
-describe('enableFakeNitro', () => {
-  it('liga o plugin preservando outras configurações', () => {
+describe('enableFakeNitroIfUnset', () => {
+  const homeWith = (settings?: object) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'glb-v-'));
-    const p = vencordSettingsPath(home);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ themeLinks: ['x'], plugins: { FakeNitro: { enabled: false, transformEmojis: true }, Other: { enabled: true } } }));
-    enableFakeNitro(home);
-    const s = JSON.parse(fs.readFileSync(p, 'utf8'));
-    expect(s.plugins.FakeNitro).toEqual({ enabled: true, transformEmojis: true });
+    if (settings) {
+      const p = vencordSettingsPath(home);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify(settings));
+    }
+    return home;
+  };
+  const read = (home: string) => JSON.parse(fs.readFileSync(vencordSettingsPath(home), 'utf8'));
+
+  it('nunca religa um FakeNitro que o usuário desligou', () => {
+    const home = homeWith({ plugins: { FakeNitro: { enabled: false, transformEmojis: true } } });
+    expect(enableFakeNitroIfUnset(home)).toBe(false);
+    expect(read(home).plugins.FakeNitro).toEqual({ enabled: false, transformEmojis: true });
+  });
+  it('liga quando nunca foi escolhido, preservando o resto', () => {
+    const home = homeWith({ themeLinks: ['x'], plugins: { Other: { enabled: true } } });
+    expect(enableFakeNitroIfUnset(home)).toBe(true);
+    const s = read(home);
+    expect(s.plugins.FakeNitro.enabled).toBe(true);
     expect(s.plugins.Other).toEqual({ enabled: true });
     expect(s.themeLinks).toEqual(['x']);
   });
   it('cria o arquivo se não existir', () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'glb-v-'));
-    enableFakeNitro(home);
-    expect(JSON.parse(fs.readFileSync(vencordSettingsPath(home), 'utf8')).plugins.FakeNitro.enabled).toBe(true);
+    const home = homeWith();
+    expect(enableFakeNitroIfUnset(home)).toBe(true);
+    expect(read(home).plugins.FakeNitro.enabled).toBe(true);
+  });
+  it('não reescreve um settings.json ilegível', () => {
+    const home = homeWith();
+    const p = vencordSettingsPath(home);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '{quebrado');
+    expect(enableFakeNitroIfUnset(home)).toBe(false);
+    expect(fs.readFileSync(p, 'utf8')).toBe('{quebrado');
   });
 });
 
@@ -54,5 +75,22 @@ describe('canModifyApp', () => {
     const { app, res } = makeApp();
     fs.chmodSync(res, 0o555);
     try { expect(canModifyApp(app)).toBe(false); } finally { fs.chmodSync(res, 0o755); }
+  });
+});
+
+import { injectVencord, AppManagementDenied } from '../src/main/vencord/inject';
+
+describe('injectVencord', () => {
+  it.skipIf(process.getuid?.() === 0)('sem permissão, não grava nada no settings do Vencord', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'glb-v-'));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), 'glb-d-'));
+    const res = path.join(app, 'Contents', 'Resources');
+    fs.mkdirSync(res, { recursive: true });
+    fs.chmodSync(res, 0o555);
+    try {
+      await expect(injectVencord({ home, discordApp: app, cacheDir: path.join(home, 'c'), log: () => {} }))
+        .rejects.toBeInstanceOf(AppManagementDenied);
+      expect(fs.existsSync(vencordSettingsPath(home))).toBe(false);
+    } finally { fs.chmodSync(res, 0o755); }
   });
 });

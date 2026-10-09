@@ -1,0 +1,48 @@
+name: macos-tests
+
+# Testes e typecheck do cliente macOS (golive-gui-mac/) em PRs e pushes que o tocam.
+on:
+  pull_request:
+    paths:
+      - 'golive-gui-mac/**'
+      - 'tools/proton-confgen/**'
+      - '.github/workflows/macos-tests.yml'
+      - '.github/workflows/release-macos.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'golive-gui-mac/**'
+      - 'tools/proton-confgen/**'
+      - '.github/workflows/macos-tests.yml'
+      - '.github/workflows/release-macos.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: golive-gui-mac
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # O proton-confgen compila da fonte e sai byte a byte igual em duas compilações
+      - name: proton-confgen reproduzível
+        run: |
+          npm run build:proton
+          first=$(node -p 'require("./resources/extra/proton-confgen/proton-confgen-manifest.json").universal.sha256')
+          npm run build:proton
+          second=$(node -p 'require("./resources/extra/proton-confgen/proton-confgen-manifest.json").universal.sha256')
+          test "$first" = "$second"
+          test "$(shasum -a 256 resources/extra/proton-confgen/proton-confgen | cut -c1-64)" = "$second"

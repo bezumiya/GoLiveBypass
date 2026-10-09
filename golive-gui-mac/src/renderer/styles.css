@@ -253,6 +253,17 @@ body[data-state="busy"]     .state-label { color: var(--accent); }
 .pill-btn.ghost:hover:not(:disabled) { background: rgba(91,106,245,0.10); }
 .pill-btn.mini { font-size: 11px; padding: 4px 10px; }
 
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.toggle-row input { accent-color: var(--accent); margin: 0; }
+
 /* ── Hints ────────────────────────────────────────────────────────── */
 .hint {
   font-size: 11px;
