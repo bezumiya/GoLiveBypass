@@ -6,6 +6,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **Plugin Vencord/Equicord:** o lock de atualização não fecha novamente um descritor já liberado, evitando fechar arquivos ou conexões que reutilizem esse número. A regressão cobre reutilização real do descritor, locks aninhados e preservação de outro owner.
+- **Relançamento Linux do plugin:** o helper separa nome e valor antes de chamar `setenv`, corrigindo `ambiente explícito inválido`; o ambiente permitido preserva `XAUTHORITY` para X11/XWayland. O helper embutido foi atualizado. A correção é exclusiva do plugin; GUI e standalone usam caminhos de ativação distintos. Recepção de transmissão validada em Fedora KDE/Wayland com Discord em XWayland e VPN isolada. Windows não foi testado ao vivo.
+
 ### Adicionado
 
 - **Cliente macOS (`golive-gui-mac/`)** (#338, contribuição de @GabrielRanna): app Electron standalone que reativa o Go Live pondo só o tráfego do Discord num túnel WireGuard — split por IP nos ranges Cloudflare do Discord (com rejeição IPv6 para cair no IPv4 tunelado), helper root instalado em `/Library/PrivilegedHelperTools` com sudoers limitado a `up`/`down` e sanitização do conf, geração de perfil Proton via `proton-confgen` com escolha MX/US por ping, conta Proton reutilizável, DMG universal x86_64+arm64, tray, auto-reconexão e auto-updater por assets `GoLiveBypass-macos-<versão>-<arch>.dmg`. Testado em Macs M1/M2/M3 e Intel.

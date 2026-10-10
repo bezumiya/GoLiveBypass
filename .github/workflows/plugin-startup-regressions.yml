@@ -1,0 +1,32 @@
+name: plugin-startup-regressions
+
+on:
+  pull_request:
+    paths:
+      - 'goLiveBypass/**'
+      - 'tests/test-plugin-update-lock.mjs'
+      - 'tests/test-plugin-netns-environment.mjs'
+      - 'tests/test-plugin-autostart-loop.mjs'
+      - 'tests/test-plugin-update-archive.mjs'
+      - '.github/workflows/plugin-startup-regressions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Testar lock, ambiente do helper e compatibilidade do plugin
+        run: >-
+          node --test
+          tests/test-plugin-update-lock.mjs
+          tests/test-plugin-netns-environment.mjs
+          tests/test-plugin-autostart-loop.mjs
+          tests/test-plugin-update-archive.mjs
