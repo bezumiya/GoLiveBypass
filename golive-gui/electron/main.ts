@@ -19,6 +19,7 @@ import { execFile, execFileSync, execSync, spawn } from "child_process";
 import { runScript } from "./linux-helper";
 import {
   applyPendingUpdate,
+  checkWindowsUpdate,
   isQuittingForUpdate,
   isUpdateReady,
   setupUpdater,
@@ -28,7 +29,7 @@ import * as logger from "./logger";
 import * as discordscan from "./discordscan";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
-import { ensureWireSockInstalled, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, type WireSockConnectionStatus } from "./wiresock";
+import { ensureWireSockInstalled, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, type WireSockConnectionStatus } from "./wiresock";
 import { classifyWgReadiness, getWgStats, getWgStatsAsync, iniciarWgStatsWatchdog, pararWgStatsWatchdog, type WgTunnelStats } from "./wgstats";
 import { classifyFailoverHealth, FailoverHealthTracker, FAILOVER_ROUTE_TIMEOUT_MS, FAILOVER_SAMPLE_INTERVAL_MS, routeCandidateUsable, routePoolDirectory, readRoutePoolManifest, makeRoutePoolManifest, routePoolMatches, ROUTE_POOL_RESERVE_COUNT, ROUTE_POOL_TOTAL, safeRoutePoolPath, writeRoutePoolManifest, type ProtonRouteMetadata, type ProtonRoutePoolManifest } from "./route-failover";
 import { validateWgConfContent } from "./wg-validator";
@@ -38,7 +39,7 @@ import { restoreBypassOnStartup, type StartupOptimizationResult } from "./startu
 import { findWindowsDiscordInstall } from "./windows-discord-install";
 import { assembleWindowsDiscoverySnapshotFromRaw, collectWindowsDiscoveryPowerShell, collectWindowsDiscoveryPowerShellAsync, collectWindowsDiscoverySnapshot, createWindowsDiscoveryCache, failedWindowsDiscoveryRawFor, rootsForEnvironment, toPublicWindowsDiscoveryInstall, type WindowsDiscoveryEnvironment, type WindowsDiscoveryRaw, type WindowsDiscoverySnapshot, type WindowsDiscoverySnapshotCollectors } from "./windows-discord-discovery";
 import { shouldAskRoutePreference } from "./route-preference-prompt";
-import { waitForProcessRunning, waitForProcessStopped, type ProcessProbeState } from "./wait-condition";
+import { runningImageNames, waitForProcessRunning, waitForProcessStopped, whenProcessStops, type ProcessProbeState } from "./wait-condition";
 import { TUNNEL_STARTUP_SETTLE_MS, waitForTunnelStartupSettle } from "./tunnel-startup";
 import { linuxPreflightRepairable, parseLinuxPreflight, linuxPreflightMessage, type LinuxPreflight } from "./linux-preflight";
 import { createProcSeams } from "./linux-proc-seams";
@@ -358,6 +359,8 @@ const MAC_HELPER_PROCESSES = [
 ];
 
 let mainWindow: BrowserWindow | null = null;
+let tamanhoManual = false;
+let tamanhoPedidoPeloApp: { w: number; h: number; em: number } | null = null;
 let logWindow: BrowserWindow | null = null;
 let suppressLogClosedNotify = false;
 let tray: Tray | null = null;
@@ -409,7 +412,9 @@ function createWindow() {
     // quando o warning do bypass ativo aparece/some, e a janela cresce/encolhe para nao
     // cortar nada (antes o aviso ficava cortado com a altura fixa de 560).
     height: 560,
-    resizable: false,
+    resizable: true,
+    minWidth: 340,
+    minHeight: 420,
     icon: loadAsset('icon.png'),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -435,6 +440,20 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
+  });
+
+  // Enquanto a pessoa nao mexer no tamanho, a altura segue o conteudo. Um resize cujo
+  // tamanho nao e o que o proprio app pediu (arrastar a borda, maximizar) vale como manual:
+  // dali em diante o app para de forcar a altura e o conteudo rola por dentro.
+  tamanhoManual = false;
+  tamanhoPedidoPeloApp = null;
+  mainWindow.on("resize", () => {
+    if (!mainWindow || mainWindow.isDestroyed() || tamanhoManual) return;
+    const [w, h] = mainWindow.getContentSize();
+    const doApp = tamanhoPedidoPeloApp !== null && (Date.now() - tamanhoPedidoPeloApp.em < 400 ||
+      (Math.abs(w - tamanhoPedidoPeloApp.w) <= 2 && Math.abs(h - tamanhoPedidoPeloApp.h) <= 2));
+    // O resize inicial da criacao tambem passa por aqui, antes de existir pedido do app.
+    if (!doApp && tamanhoPedidoPeloApp !== null) tamanhoManual = true;
   });
 
   mainWindow.on("close", (event) => {
@@ -515,7 +534,7 @@ function openLogWindow() {
       : { titleBarOverlay: TITLEBAR[theme] }),
   });
 
-  logWindow.setTitle("GoLiveBypass — Logs");
+  logWindow.setTitle("GoLiveBypass: Logs");
   logWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -619,10 +638,10 @@ async function refreshTray() {
           },
         }]
       : [];
-    tray.setToolTip(`GoLiveBypass v${app.getVersion()} — ${label}`);
+    tray.setToolTip(`GoLiveBypass v${app.getVersion()} · ${label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: `GoLiveBypass v${app.getVersion()} — ${label}`, enabled: false },
+        { label: `GoLiveBypass v${app.getVersion()} · ${label}`, enabled: false },
         { type: "separator" },
         { label: "Abrir", click: showWindow },
         {
@@ -666,9 +685,9 @@ async function toggleFromTray() {
   try {
     // Atualiza o menu com "trabalhando" para dar feedback imediato do clique.
     if (tray) {
-      tray.setToolTip('GoLiveBypass — trabalhando...');
+      tray.setToolTip('GoLiveBypass · trabalhando...');
       tray.setContextMenu(Menu.buildFromTemplate([
-        { label: 'GoLiveBypass — trabalhando...', enabled: false },
+        { label: 'GoLiveBypass · trabalhando...', enabled: false },
       ]));
     }
 
@@ -684,7 +703,7 @@ async function toggleFromTray() {
       });
     } else if ((await getStatusAsync()) === "ACTIVE") {
       cancelStartupBypassRestore();
-      await deactivateAll();
+      await deactivateAll({ manterDiscordAberto: true });
       persistBypassEnabled(false);
     } else {
       await activateBypass(null, "");
@@ -779,6 +798,10 @@ if (!gotLock) {
     // (Windows/macOS), inclusive se uma beta anterior deixou autoRevive=false.
     updateSharedSettings({ routeMode: "wireguard" });
     logger.info("recuperacao", "sistema WireGuard ativo; configuracao legada removida", {});
+    // A janela sobe antes da revalidacao residual abaixo: ela fecha/reabre o Discord e prova a
+    // rota (dezenas de segundos), e antes disso o app ficava sem janela nenhuma.
+    // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
+    if (!launchedHidden()) createWindow();
     // Um crash pode deixar serviço, filtro WFP, Discord e marcador vivos. O
     // estado verificado é apenas de memória e nunca é herdado: refazemos a
     // ativação inteira (fecha, restaura, mede baseline, prova e reabre).
@@ -812,8 +835,6 @@ if (!gotLock) {
       } catch {}
     }
 
-    // No login (start com --hidden / wasOpenedAtLogin) sobe so a bandeja; a janela aparece no clique.
-    if (!launchedHidden()) createWindow();
     // Autostart: se a entrada de Run existe, garante que aponta para o exe ATUAL.
     // O valor congela o caminho de quando o toggle foi ativado; portable renomeado/
     // movido = boot falha em silencio com o checkbox marcado. Reescrever a cada
@@ -1047,20 +1068,19 @@ async function discordProcessStateAsync(): Promise<ProcessProbeState> {
     return probeFailed ? "unknown" : "stopped";
   }
 
-  for (const flavour of ALL_APPS) {
-    try {
-      const out = await execFileTextAsync("tasklist", ["/FI", `IMAGENAME eq ${flavour}.exe`, "/NH"]);
-      if (out.toLowerCase().includes(`${flavour}.exe`.toLowerCase())) {
-        discordscan.runningTasklist(flavour, true);
-        return "running";
-      }
-      discordscan.runningTasklist(flavour, false);
-    } catch (error) {
-      probeFailed = true;
-      discordscan.runningTasklist(flavour, false, (error as Error)?.message);
-    }
+  // Um tasklist so para todas as variantes (antes era um por variante, ~600ms no total).
+  let out: string;
+  try {
+    out = await execFileTextAsync("tasklist", ["/FO", "CSV", "/NH"]);
+  } catch (error) {
+    discordscan.runningTasklist(ALL_APPS.join(","), false, (error as Error)?.message);
+    return "unknown";
   }
-  return probeFailed ? "unknown" : "stopped";
+  const running = runningImageNames(out);
+  const flavour = ALL_APPS.find((f) => running.has(`${f}.exe`.toLowerCase()));
+  if (!flavour) return "stopped";
+  discordscan.runningTasklist(flavour, true);
+  return "running";
 }
 
 async function discordIsRunningAsync(): Promise<boolean> {
@@ -1234,50 +1254,75 @@ function logRouteProbe(stage: "direct" | "tunnel", attempt: number, result: Rout
   });
 }
 
-// Route observations are diagnostic only. Failure, geolocation disagreement,
-// unavailable helpers and cleanup errors must never control Discord lifecycle.
-async function diagnoseWindowsRoute(generation: number) {
-  let scope: ReturnType<typeof prepareDiscordScopeProbes> | undefined;
-  try {
-    scope = prepareDiscordScopeProbes(await getDiscordInstallsAsync({ allowStale: true }), proton.findProtonConfgenExe());
-    for (const probe of scope.probes) {
-      if (generation !== windowsRouteGeneration || !windowsRouteStarted || quitting) return;
-      await observeRouteDiagnostic(
-        () => proton.runRouteProbeFrom(probe.probePath, 12_000),
-        (result) => {
-          logRouteProbe("tunnel", 0, result, probe.flavours.join("+"));
-          logger.info("wiresock", "route.diagnostic", { ...decideRouteProof(null, result), mode: "log-only", target: probe.flavours.join("+") });
-        },
-        (error) => logger.warn("wiresock", "route.diagnostic.error", { mode: "log-only", erro: error }),
-        () => generation === windowsRouteGeneration && windowsRouteStarted && !quitting,
-      );
-    }
-  } catch (error) {
-    logger.warn("wiresock", "route.diagnostic.setup", { mode: "log-only", erro: String((error as Error)?.message ?? error).slice(0, 300) });
-  } finally {
-    await scope?.cleanup().catch((error) => logger.warn("wiresock", "route.diagnostic.cleanup", { erro: String((error as Error)?.message ?? error).slice(0, 300) }));
-  }
-}
-
 function stopWindowsRouteWatchdog() {
   if (windowsRouteWatchdogTimer) clearInterval(windowsRouteWatchdogTimer);
   windowsRouteWatchdogTimer = null;
   windowsRouteWatchdogInFlight = false;
+  pararMonitorTrafego();
+}
+
+// Card de trafego da janela + log do modo desenvolvedor: contadores do adaptador do tunel
+// a cada 2s e o ping ate o servidor da VPN. So amostra com alguma janela visivel.
+let monitorTrafegoTimer: ReturnType<typeof setInterval> | null = null;
+
+function pararMonitorTrafego() {
+  if (monitorTrafegoTimer) clearInterval(monitorTrafegoTimer);
+  monitorTrafegoTimer = null;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("tunnel-stats", null);
+}
+
+function hostDoServidorVpn(): string | null {
+  try {
+    const conf = fs.readFileSync(path.join(settingsDir(), "wireguard.conf"), "utf8");
+    return /^\s*Endpoint\s*=\s*\[?([^\]\s]+?)\]?:\d+\s*$/m.exec(conf)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function iniciarMonitorTrafego() {
+  pararMonitorTrafego();
+  const host = hostDoServidorVpn();
+  let anterior: { leitura: WireSockAdapterTraffic; em: number } | null = null;
+  let upAnterior: number | null = null;
+  let ocupado = false;
+  monitorTrafegoTimer = setInterval(() => {
+    const janelaVisivel = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible();
+    const devMode = logWindow && !logWindow.isDestroyed();
+    if (ocupado || (!janelaVisivel && !devMode)) return;
+    ocupado = true;
+    void Promise.all([getWireSockAdapterTrafficNetshAsync(), host ? pingHostAsync(host) : Promise.resolve(null)])
+      .then(([leitura, pingMs]) => {
+        if (!monitorTrafegoTimer) return;
+        if (!leitura) {
+          // Sem interface virtual do WireSock nao ha contadores; o ping ainda vale.
+          anterior = null;
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("tunnel-stats", { downMbps: null, upMbps: null, receivedBytes: null, sentBytes: null, pingMs });
+          if (devMode) logger.info("trafego", "discord", { ping_ms: pingMs ?? "sem resposta", contadores: "indisponiveis" });
+          return;
+        }
+        const agora = Date.now();
+        if (anterior) {
+          const s = trafficSample(anterior.leitura, leitura, agora - anterior.em, upAnterior);
+          upAnterior = s.upMbps;
+          const stats = { downMbps: s.downMbps, upMbps: s.upMbps, receivedBytes: leitura.receivedBytes, sentBytes: leitura.sentBytes, pingMs };
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("tunnel-stats", stats);
+          const campos = { down_mbps: s.downMbps.toFixed(2), up_mbps: s.upMbps.toFixed(2), ping_ms: pingMs ?? "sem resposta" };
+          if (s.queda) logger.warn("trafego", "queda.upload", campos);
+          else if (devMode) logger.info("trafego", "discord", campos);
+        }
+        anterior = { leitura, em: agora };
+      })
+      .finally(() => { ocupado = false; });
+  }, 2_000);
 }
 
 function startWindowsRouteWatchdog() {
   if (!IS_WINDOWS) return;
   stopWindowsRouteWatchdog();
-  const generation = windowsRouteGeneration;
-  const observe = () => {
-    if (windowsRouteWatchdogInFlight || !windowsRouteStarted || quitting || generation !== windowsRouteGeneration) return;
-    windowsRouteWatchdogInFlight = true;
-    void diagnoseWindowsRoute(generation).finally(() => {
-      if (generation === windowsRouteGeneration) windowsRouteWatchdogInFlight = false;
-    });
-  };
-  windowsRouteWatchdogTimer = setInterval(observe, 60_000);
-  observe();
+  // A sonda de rota de 60s saiu: copiava um .exe com nome aleatorio para a pasta do
+  // Discord a cada minuto (o Windows bloqueia e o Defender acusa) e so gravava log.
+  iniciarMonitorTrafego();
 }
 
 // Nas transicoes que restauram a rede, nao basta pedir o spawn: sem esse ack a
@@ -1335,6 +1380,7 @@ function assinaturaAtivacao(proxyAddress: string): string {
 }
 
 async function activateBypass(event: any) {
+  pararDesativacaoAdiada();
   if (ativacaoCorrente !== null) {
     logger.info("ativacao", "ja ha uma ativacao em andamento; aguardando a mesma conclusao");
     return ativacaoCorrente;
@@ -1520,7 +1566,35 @@ async function executarAtivacao(event: any) {
   persistBypassEnabled(true);
 }
 
-async function deactivateAll() {
+// Desativacao adiada: o Discord que ja esta aberto segue no tunel ate fechar; so entao o
+// WireSock desce. A proxima abertura do Discord ja sai pela rede normal.
+let cancelarDesativacaoAdiada: (() => void) | null = null;
+
+function pararDesativacaoAdiada() {
+  cancelarDesativacaoAdiada?.();
+  cancelarDesativacaoAdiada = null;
+}
+
+function agendarDesativacaoAdiada() {
+  pararDesativacaoAdiada();
+  const generation = windowsRouteGeneration;
+  logger.info("wiresock", "desativacao.adiada", { motivo: "discord aberto segue no tunel ate fechar" });
+  cancelarDesativacaoAdiada = whenProcessStops(discordProcessStateAsync, () => {
+    cancelarDesativacaoAdiada = null;
+    if (generation !== windowsRouteGeneration || quitting) return;
+    void withWireSockLifecycle("desativacao-adiada", async () => {
+      if (generation !== windowsRouteGeneration) return;
+      const recovery = await recoverWireSockNetwork();
+      logger.info("wiresock", "desativacao.adiada.concluida", { ok: recovery.ok, residual: recovery.residual });
+      if (!recovery.ok) windowsRouteState = "recovery_required";
+      refreshWindowStatus();
+      void refreshTray();
+    }).catch((error) => logger.error("wiresock", "desativacao.adiada.falhou", { erro: String((error as Error)?.message ?? error) }));
+  });
+}
+
+async function deactivateAll(options: { manterDiscordAberto?: boolean } = {}) {
+  pararDesativacaoAdiada();
   stopProtonFailoverMonitor();
   pararWgStatsWatchdog();
   stopWindowsRouteWatchdog();
@@ -1541,6 +1615,12 @@ async function deactivateAll() {
     await withWireSockLifecycle("desativacao", async () => {
       // Rele a condicao ja dentro da fila: uma troca de rota pode ter entrado
       // pouco antes desta desativacao e nao pode sobreviver a ela.
+      if ((hadWireSock || (await isWireSockActiveAsync())) && options.manterDiscordAberto && (await discordIsRunningAsync())) {
+        clearSessionMarker();
+        windowsRouteState = "inactive";
+        agendarDesativacaoAdiada();
+        return;
+      }
       if (hadWireSock || (await isWireSockActiveAsync())) {
         await killDiscord();
         const recovery = await recoverWireSockNetwork();
@@ -2961,10 +3041,31 @@ ipcMain.handle("deactivate", async (event) => {
   if (IS_LINUX) {
     await withWireSockLifecycle("desativar-linux", () => linuxDeactivate(() => {}));
   } else {
-    await deactivateAll();
+    await deactivateAll({ manterDiscordAberto: true });
   }
   persistBypassEnabled(false);
   refreshTray().catch(() => {});
+});
+// Reiniciar = refazer a ativacao inteira (fecha o Discord, sobe o tunel de novo, reabre),
+// o mesmo caminho da revalidacao de sessao residual no boot.
+ipcMain.handle("restart-bypass", async () => {
+  if (!IS_WINDOWS) return { ok: false, error: "Por enquanto só no Windows." };
+  cancelStartupBypassRestore();
+  assinaturaUltimaAtivacao = "";
+  try {
+    await activateBypass(null);
+    persistBypassEnabled(true);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: String((error as Error)?.message ?? error) };
+  } finally {
+    refreshTray().catch(() => {});
+  }
+});
+ipcMain.handle("check-updates", async () => {
+  if (!IS_WINDOWS) return { ok: false, error: "Por enquanto só no Windows." };
+  await checkWindowsUpdate(() => mainWindow, () => true, () => readUpdateChannel(), { force: true, reason: "manual" });
+  return { ok: true, updateReady: isUpdateReady() };
 });
 ipcMain.handle("restore-internet", async () => {
   if (!IS_WINDOWS) return { ok: false, error: "Esta recuperação só está disponível no Windows." };
@@ -3339,7 +3440,7 @@ function maskSecrets(text: string): string {
 function readLogTail(maxBytes = 48_000): string {
   const file = logFilePath();
   try {
-    if (!fs.existsSync(file)) return "(ainda nao ha golivebypass.log — ative o bypass uma vez)";
+    if (!fs.existsSync(file)) return "(ainda nao ha golivebypass.log, ative o bypass uma vez)";
     const size = fs.statSync(file).size;
     const start = Math.max(0, size - maxBytes);
     const fd = fs.openSync(file, "r");
@@ -3452,7 +3553,7 @@ function startLogWatch() {
       logWatchOffset = size;
     } else {
       logWatchOffset = 0;
-      pushLogChunk("(aguardando golivebypass.log — aparece quando o Discord roda com o bypass)\n");
+      pushLogChunk("(aguardando golivebypass.log, aparece quando o Discord roda com o bypass)\n");
     }
   } catch (error) {
     pushLogChunk(
@@ -3640,7 +3741,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
     const maxBody = 5500;
     const bodyForUrl =
       fullBody.length > maxBody
-        ? `${fullBody.slice(0, maxBody)}\n\n…(truncado — cole o diagnóstico do clipboard)\n\n_API falhou: ${posted.error}_`
+        ? `${fullBody.slice(0, maxBody)}\n\n…(truncado: cole o diagnóstico do clipboard)\n\n_API falhou: ${posted.error}_`
         : `${fullBody}\n\n_API falhou: ${posted.error}_`;
     const params = new URLSearchParams({
       title,
@@ -3663,7 +3764,7 @@ ipcMain.handle("open-bug-report", async (_event, payload: unknown) => {
   const maxBody = 5500;
   const bodyForUrl =
     fullBody.length > maxBody
-      ? `${fullBody.slice(0, maxBody)}\n\n…(truncado — cole o diagnóstico completo do clipboard)`
+      ? `${fullBody.slice(0, maxBody)}\n\n…(truncado: cole o diagnóstico completo do clipboard)`
       : fullBody;
 
   const params = new URLSearchParams({
@@ -3691,8 +3792,6 @@ ipcMain.handle("open-log-folder", async () => {
 });
 
 ipcMain.handle("set-dev-log-window", (_event, open: unknown) => {
-  // Janela de logs e ferramenta de desenvolvimento: so existe em npm run dev.
-  if (open === true && app.isPackaged) return false;
   if (open === true) {
     openLogWindow();
     return true;
@@ -4618,9 +4717,11 @@ ipcMain.handle("select-proton-route", async (event, options?: ProtonManualSelect
 ipcMain.on("resize-window", (_event, height: unknown) => {
   const h = Math.round(Number(height));
   if (!mainWindow || mainWindow.isDestroyed() || !Number.isFinite(h) || h <= 0) return;
-  const [, contentH] = mainWindow.getContentSize();
+  if (tamanhoManual || mainWindow.isMaximized()) return;
+  const [contentW, contentH] = mainWindow.getContentSize();
   if (Math.abs(contentH - h) < 2) return;
-  mainWindow.setContentSize(MAIN_WINDOW_WIDTH, h);
+  tamanhoPedidoPeloApp = { w: contentW, h, em: Date.now() };
+  mainWindow.setContentSize(contentW, h);
 });
 
 // O renderer avisa quando o tema muda para o overlay da barra de titulo

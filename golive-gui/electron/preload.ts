@@ -5,6 +5,8 @@ import type { ProtonOptimizationProgress } from './proton';
   activate: () => ipcRenderer.invoke('activate'),
   deactivate: () => ipcRenderer.invoke('deactivate'),
   restoreInternet: () => ipcRenderer.invoke('restore-internet'),
+  restartBypass: () => ipcRenderer.invoke('restart-bypass'),
+  checkUpdates: () => ipcRenderer.invoke('check-updates'),
   getStatus: () => ipcRenderer.invoke('get-status'),
   getLinuxPreflight: () => ipcRenderer.invoke('get-linux-preflight'),
   listLinuxRunningApps: () => ipcRenderer.invoke('list-linux-running-apps'),
@@ -39,6 +41,8 @@ import type { ProtonOptimizationProgress } from './proton';
   onRefreshStartup: (callback: () => void) => ipcRenderer.on('refresh-startup', callback),
   onRefreshAutoUpdate: (callback: () => void) => ipcRenderer.on('refresh-auto-update', callback),
   onRefreshStatus: (callback: () => void) => ipcRenderer.on('refresh-status', callback),
+  onTunnelStats: (callback: (stats: { downMbps: number | null; upMbps: number | null; receivedBytes: number | null; sentBytes: number | null; pingMs: number | null } | null) => void) =>
+    ipcRenderer.on('tunnel-stats', (_event, stats) => callback(stats)),
   resizeWindow: (height: number) => ipcRenderer.send('resize-window', height),
   setTheme: (theme: string) => ipcRenderer.send('set-theme', theme),
   reportBug: (payload: { title: string; description: string; includeLogs: boolean }) => ipcRenderer.invoke('report-bug', payload),

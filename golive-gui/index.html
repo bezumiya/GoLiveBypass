@@ -99,18 +99,67 @@
           </svg>
         </button>
 
+        <button
+          class="icon-btn guide-btn corner corner--tr2"
+          id="guideBtn"
+          type="button"
+          aria-label="Como funciona"
+          aria-haspopup="dialog"
+          data-tip="Como funciona"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5v-15Z" />
+            <path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19" />
+            <path d="M9 7.5h6M9 11h4" />
+          </svg>
+        </button>
+
+        <button
+          class="icon-btn corner corner--tr3"
+          id="checkUpdatesBtn"
+          type="button"
+          aria-label="Checar atualizações"
+          data-tip="Checar updates"
+          hidden
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 11a8 8 0 0 0-14.5-4.6L4 8" />
+            <path d="M4 4v4h4" />
+            <path d="M4 13a8 8 0 0 0 14.5 4.6L20 16" />
+            <path d="M20 20v-4h-4" />
+          </svg>
+        </button>
+
         <div class="control-layout">
           <section class="bypass-column" aria-label="Controle do bypass">
             <div class="bypass-heading">
               <span class="bypass-kicker">Ação principal</span>
             </div>
-            <p class="bypass-description">Libere o Go Live no Discord usando a rota escolhida ao lado.</p>
 
             <div class="status-card" id="statusCard" hidden>
               <span class="status-indicator" id="statusIndicator"></span>
               <span id="statusText">Verificando...</span>
-              <span class="status-tag" id="statusTag">—</span>
+              <span class="status-tag" id="statusTag">-</span>
               <code id="linuxPreflightCommand" class="linux-preflight-command" hidden></code>
+            </div>
+
+            <div class="traffic-card" id="trafficCard" hidden aria-label="Tráfego do Discord no túnel">
+              <div class="traffic-cell traffic-cell--wide">
+                <span class="traffic-label">Velocidade atual</span>
+                <span class="traffic-value"><span aria-hidden="true">↑</span> <b id="trafficUp">0.0</b> <small>Mbps</small> <span class="traffic-sep" aria-hidden="true">·</span> <span aria-hidden="true">↓</span> <b id="trafficDown">0.0</b> <small>Mbps</small></span>
+              </div>
+              <div class="traffic-cell">
+                <span class="traffic-label">Upload</span>
+                <b class="traffic-value" id="trafficSent">0 MB</b>
+              </div>
+              <div class="traffic-cell">
+                <span class="traffic-label">Download</span>
+                <b class="traffic-value" id="trafficReceived">0 MB</b>
+              </div>
+              <div class="traffic-cell">
+                <span class="traffic-label">Ping</span>
+                <b class="traffic-value" id="trafficPing">-</b>
+              </div>
             </div>
 
             <button id="manualTargetButton" class="manual-target-btn" type="button" hidden>
@@ -147,14 +196,10 @@
           <div class="spinner" id="btnSpinner" aria-hidden="true"></div>
             </button>
 
-            <label class="switch-row">
-              <input type="checkbox" id="startupToggle" />
-              <span class="switch-track" aria-hidden="true">
-                <span class="switch-thumb"></span>
-              </span>
-              <span id="startupLabel">Iniciar com o Windows</span>
-            </label>
-            <p class="bypass-note"><span aria-hidden="true">●</span> Só o Discord usa o túnel.</p>
+            <div class="quick-actions">
+              <button id="restartBypassBtn" class="restore-network-btn" type="button" hidden>Reiniciar bypass</button>
+
+            </div>
             <button id="restoreInternetBtn" class="restore-network-btn" type="button" hidden>Restaurar internet</button>
           </section>
 
@@ -191,7 +236,6 @@
               <p class="proton-auto-hint">
                 <span class="proton-panel-title">Rota automática</span>
                 <span class="proton-recommended">Recomendado</span>
-                <span class="proton-panel-copy">Buscamos candidatos nas regiões disponíveis. Em Otimizar rota, medimos download e upload pelo túnel para priorizar velocidade.</span>
               </p>
 
               <div class="proton-form-fields">
@@ -386,26 +430,8 @@
         </dialog>
 
 
-        <label class="switch-row" id="devModeRow">
-          <input type="checkbox" id="devModeToggle" />
-          <span class="switch-track" aria-hidden="true">
-            <span class="switch-thumb"></span>
-          </span>
-          <span>Modo desenvolvedor</span>
-        </label>
-        <small id="devModeHint" class="dev-mode-hint" hidden
-          >Janela de logs aberta ao lado</small
-        >
 
         <footer class="footer">
-          <p class="disclaimer">
-            O Discord abre quando o túnel é iniciado. A troca automática de rota mantém o Discord aberto; uma otimização manual pode reiniciá-lo durante a medição.
-            <span id="closeHint"
-              >Fechar a janela esconde o app na bandeja, junto do rel&oacute;gio
-              &mdash; para reverter tudo, saia pelo &iacute;cone de
-              l&aacute;.</span
-            >
-          </p>
           <p class="credits">
             Projeto open source, feito por
             <a
@@ -483,6 +509,37 @@
               </div>
               <p id="protonRoutePreferenceFeedback" class="settings-route-preference__feedback" role="status" aria-live="polite" hidden></p>
 
+              <label class="settings-switch" id="startupRow">
+                <span class="settings-switch__icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3v8" />
+                    <path d="M7.5 6.2a7 7 0 1 0 9 0" />
+                  </svg>
+                </span>
+                <span class="settings-switch__copy">
+                  <span id="startupLabel" class="settings-switch__title">Iniciar com o Windows</span>
+                  <span class="settings-switch__hint">Abre só na bandeja, sem janela</span>
+                </span>
+                <input type="checkbox" id="startupToggle" />
+                <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+              </label>
+
+              <label class="settings-switch" id="devModeRow">
+                <span class="settings-switch__icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m8 9-3 3 3 3" />
+                    <path d="m16 9 3 3-3 3" />
+                    <path d="m13.5 6-3 12" />
+                  </svg>
+                </span>
+                <span class="settings-switch__copy">
+                  <span class="settings-switch__title">Modo desenvolvedor</span>
+                  <span class="settings-switch__hint">Janela de logs e tráfego do túnel</span>
+                </span>
+                <input type="checkbox" id="devModeToggle" />
+                <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+              </label>
+
               <label class="settings-switch" id="autoUpdateRow">
                 <span class="settings-switch__icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -547,11 +604,80 @@
           </div>
         </div>
 
+        <div id="guideDialog" class="settings-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+          <div class="settings-dialog__backdrop" id="guideBackdrop"></div>
+          <div class="settings-dialog__panel guide-panel" role="document">
+            <div class="settings-dialog__header">
+              <div>
+                <span class="settings-dialog__eyebrow">Passo a passo</span>
+                <h2 id="guideTitle" class="settings-dialog__title">Como funciona</h2>
+              </div>
+              <button id="guideClose" class="settings-dialog__close" type="button" aria-label="Fechar como funciona">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <p class="guide-intro">
+              O Discord bloqueia o Go Live e a câmera pelo IP de quem está no Brasil. O GoLiveBypass faz só o
+              Discord sair por um servidor de outro país, e o resto do seu computador continua igual.
+            </p>
+
+            <ol class="guide-steps">
+              <li>
+                <strong>Escolha a conexão</strong>
+                <span>Entre com sua conta Proton (a grátis já serve) ou importe um arquivo WireGuard <code>.conf</code> seu.
+                O app cria o perfil de conexão sozinho.</span>
+              </li>
+              <li>
+                <strong>Escolha a rota</strong>
+                <span>Na rota automática o app testa servidores e fica com o mais rápido. Em <em>Otimizar rota</em> ele
+                mede download e upload de verdade pelo túnel, o que importa pra stream. Se o bypass estiver ativo, o
+                Discord fecha durante essa medição e reabre depois.</span>
+              </li>
+              <li>
+                <strong>Clique em Ativar</strong>
+                <span>O app fecha o Discord, liga o túnel só para ele, confere se a rota responde e abre o Discord de
+                novo, já dentro do túnel.</span>
+              </li>
+              <li>
+                <strong>Só o Discord usa o túnel</strong>
+                <span>Navegador, jogos e outros apps continuam na sua internet normal, sem perder velocidade. No
+                Windows isso é feito pelo WireSock; no Linux, o Discord roda numa rede separada.</span>
+              </li>
+              <li>
+                <strong>Enquanto estiver ativo</strong>
+                <span>Se a rota Proton grátis cair, a troca automática muda de servidor sem fechar o Discord. Dá pra
+                desligar isso nas configurações.</span>
+              </li>
+              <li>
+                <strong>Clique em Desativar</strong>
+                <span>O Discord que já está aberto continua no túnel até você fechar ele. Quando ele fecha, o app
+                desliga o túnel e restaura a rede. Da próxima vez, o Discord abre pela internet normal.</span>
+              </li>
+              <li>
+                <strong>Fechar ou sair</strong>
+                <span id="closeHint">Fechar a janela só esconde o app na bandeja, perto do relógio. Para desligar tudo
+                na hora, use Sair no ícone de lá.</span>
+              </li>
+            </ol>
+
+            <div class="guide-tips">
+              <span class="settings-group__label">Se algo der errado</span>
+              <p>Stream travando costuma ser servidor grátis lotado. Tente <em>Otimizar rota</em> ou use um
+              <code>.conf</code> próprio, que não é dividido com ninguém.</p>
+              <p>Se a internet parar depois de usar o app, aparece o botão <em>Restaurar internet</em> na tela
+              principal.</p>
+            </div>
+          </div>
+        </div>
+
         <div id="bugDialog" class="bug-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="bugDialogTitle">
           <div class="bug-dialog__backdrop" id="bugBackdrop"></div>
           <div class="bug-dialog__panel" role="document">
             <h2 id="bugDialogTitle" class="bug-dialog__title">Reportar bug</h2>
-            <p class="bug-dialog__hint">Descreva o problema. Logs da sessão são incluídos automaticamente — sua proxy é removida antes de enviar.</p>
+            <p class="bug-dialog__hint">Descreva o problema. Logs da sessão são incluídos automaticamente. Sua proxy é removida antes de enviar.</p>
             <div id="bugForm">
               <label class="bug-field">
                 <span>Resumo *</span>

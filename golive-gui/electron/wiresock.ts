@@ -629,8 +629,63 @@ export function getWireSockAdapterTraffic(): WireSockAdapterTraffic | null {
   }
 }
 
+// `netsh interface ipv4 show subinterfaces`: MTU, estado, bytes in, bytes out, nome. O
+// cabecalho vem traduzido, mas as colunas sao fixas; o nome pode ter espacos.
+export function parseNetshInterfaceBytes(output: string, adapter: string): WireSockAdapterTraffic | null {
+  for (const line of output.split(/\r?\n/)) {
+    const m = /^\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (m && m[3] === adapter) return { adapter, receivedBytes: Number(m[1]), sentBytes: Number(m[2]) };
+  }
+  return null;
+}
+
+// Leitura leve (~90ms, contra ~400ms do PowerShell) para amostrar de poucos em poucos segundos.
+export async function getWireSockAdapterTrafficNetshAsync(adapter = "ProTUN"): Promise<WireSockAdapterTraffic | null> {
+  if (process.platform !== "win32") return null;
+  try {
+    return parseNetshInterfaceBytes(await execFileText("netsh", ["interface", "ipv4", "show", "subinterfaces"]), adapter);
+  } catch {
+    return null;
+  }
+}
+
+// Taxa entre duas leituras. "queda" = upload despencou para menos de 20% da amostra anterior
+// estando acima de 1 Mbps: e a assinatura de uma stream congelando.
+export function trafficSample(
+  previous: WireSockAdapterTraffic,
+  current: WireSockAdapterTraffic,
+  elapsedMs: number,
+  previousUpMbps: number | null,
+): { downMbps: number; upMbps: number; queda: boolean } {
+  const mbps = (bytes: number) => (bytes > 0 && elapsedMs > 0 ? (bytes * 8) / (elapsedMs * 1000) : 0);
+  const downMbps = mbps(current.receivedBytes - previous.receivedBytes);
+  const upMbps = mbps(current.sentBytes - previous.sentBytes);
+  const queda = previousUpMbps !== null && previousUpMbps > 1 && upMbps < previousUpMbps * 0.2;
+  return { downMbps, upMbps, queda };
+}
+
+// Tempo de resposta do servidor da VPN (ping.exe localizado: so o "=NNms"/"<1ms" importa).
+export function parsePingMs(output: string): number | null {
+  const m = /[=<]\s*(\d+)\s*ms/i.exec(output);
+  return m ? Number(m[1]) : null;
+}
+
+export async function pingHostAsync(host: string): Promise<number | null> {
+  if (process.platform !== "win32" || !/^[\w.:-]+$/.test(host)) return null;
+  try {
+    return parsePingMs(await execFileText("ping", ["-n", "1", "-w", "1500", host], 3000));
+  } catch {
+    return null;
+  }
+}
+
 export async function getWireSockAdapterTrafficAsync(): Promise<WireSockAdapterTraffic | null> {
   if (process.platform !== "win32") return null;
+  // netsh (~90ms) no lugar de um PowerShell inteiro (~600ms) por leitura: a prontidao le a cada
+  // segundo e o failover a cada 3s. O PowerShell fica so de reserva se o netsh nao rodar.
+  try {
+    return parseNetshInterfaceBytes(await execFileText("netsh", ["interface", "ipv4", "show", "subinterfaces"]), "ProTUN");
+  } catch { /* cai no PowerShell */ }
   try {
     const script = "$a = Get-NetAdapterStatistics -Name 'ProTUN' -ErrorAction Stop; [PSCustomObject]@{adapter='ProTUN';receivedBytes=[int64]$a.ReceivedBytes;sentBytes=[int64]$a.SentBytes} | ConvertTo-Json -Compress";
     const output = (await execFileText("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script])).trim();
