@@ -11,6 +11,7 @@ import {
   handleRootPaths,
   handleShortcutRoots,
   makeWindowsDiscoveryCandidate,
+  manualWindowsDiscoveryCandidate,
   mergeWindowsDiscoveryCandidates,
   normalizeWindowsDiscoveryPath,
   parseWindowsDiscoveryCommand,
@@ -685,5 +686,57 @@ describe("discovery Windows puro", () => {
     cache.read({ forceRefresh: true });
     expect(collectCalls).toBe(1);
     expect(seenEnv).not.toHaveProperty("LOCALAPPDATA");
+  });
+});
+
+describe("seleção manual do Discord", () => {
+  it("monta o candidato manual a partir do executável escolhido em pasta app-*", () => {
+    const exe = "D:\\Jogos\\Discord\\app-1.0.9200\\Discord.exe";
+    const result = manualWindowsDiscoveryCandidate(exe, fakeFs([exe]));
+    expect(result).toEqual({
+      source: "manual",
+      flavour: "Discord",
+      appDir: "D:\\Jogos\\Discord\\app-1.0.9200",
+      resources: "D:\\Jogos\\Discord\\app-1.0.9200\\resources",
+      exePath: exe,
+      detectedBy: "manual",
+    });
+  });
+
+  it("aceita clientes alternativos com resources ao lado e caminho com espaços", () => {
+    const exe = "D:\\Meus Apps\\Vesktop\\Vesktop.exe";
+    const resources = "D:\\Meus Apps\\Vesktop\\resources";
+    const result = manualWindowsDiscoveryCandidate(exe, fakeFs([exe], [resources]));
+    expect(result?.flavour).toBe("Vesktop");
+    expect(result?.exePath).toBe(exe);
+  });
+
+  it("rejeita executável que não é de um cliente conhecido", () => {
+    const exe = "D:\\Tools\\app-1\\notepad.exe";
+    expect(manualWindowsDiscoveryCandidate(exe, fakeFs([exe]))).toBeNull();
+    const helper = "D:\\Discord\\app-1\\DiscordHelper.exe";
+    expect(manualWindowsDiscoveryCandidate(helper, fakeFs([helper]))).toBeNull();
+  });
+
+  it("rejeita Discord.exe solto, sem app-* nem resources", () => {
+    const exe = "D:\\Downloads\\Discord.exe";
+    expect(manualWindowsDiscoveryCandidate(exe, fakeFs([exe]))).toBeNull();
+  });
+
+  it("rejeita arquivo inexistente, caminho relativo e UNC", () => {
+    expect(manualWindowsDiscoveryCandidate("D:\\Discord\\app-1\\Discord.exe", fakeFs([]))).toBeNull();
+    expect(manualWindowsDiscoveryCandidate("Discord.exe", fakeFs([]))).toBeNull();
+    const unc = "\\\\server\\share\\app-1\\Discord.exe";
+    expect(manualWindowsDiscoveryCandidate(unc, fakeFs([unc]))).toBeNull();
+  });
+
+  it("a escolha manual prevalece sobre o mesmo executável achado pela varredura", () => {
+    const exe = "D:\\Discord\\app-1\\Discord.exe";
+    const fs = fakeFs([exe]);
+    const scanned = makeWindowsDiscoveryCandidate("shortcut", "Discord", exe, fs)!;
+    const manual = manualWindowsDiscoveryCandidate(exe, fs)!;
+    const merged = mergeWindowsDiscoveryCandidates([scanned, manual]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].source).toBe("manual");
   });
 });

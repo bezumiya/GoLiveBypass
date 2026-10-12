@@ -36,7 +36,7 @@ import * as proton from "./proton";
 import { ProtonOptimizationCoordinator } from "./proton-optimization";
 import { restoreBypassOnStartup, type StartupOptimizationResult } from "./startup-restore";
 import { findWindowsDiscordInstall } from "./windows-discord-install";
-import { collectWindowsDiscoveryPowerShell, collectWindowsDiscoverySnapshot, createWindowsDiscoveryCache, rootsForEnvironment, toPublicWindowsDiscoveryInstall, type WindowsDiscoveryEnvironment, type WindowsDiscoverySnapshotCollectors } from "./windows-discord-discovery";
+import { collectWindowsDiscoveryPowerShell, collectWindowsDiscoverySnapshot, createWindowsDiscoveryCache, manualWindowsDiscoveryCandidate, mergeWindowsDiscoveryCandidates, rootsForEnvironment, toPublicWindowsDiscoveryInstall, type WindowsDiscoveryCandidate, type WindowsDiscoveryEnvironment, type WindowsDiscoverySnapshotCollectors } from "./windows-discord-discovery";
 import { waitForProcessRunning, waitForProcessStopped, type ProcessProbeState } from "./wait-condition";
 import { TUNNEL_STARTUP_SETTLE_MS, waitForTunnelStartupSettle } from "./tunnel-startup";
 import { linuxPreflightRepairable, parseLinuxPreflight, linuxPreflightMessage, type LinuxPreflight } from "./linux-preflight";
@@ -899,16 +899,38 @@ function logWindowsDiscoveryRoots(env: WindowsDiscoveryEnvironment): void {
 }
 
 
+// Executavel escolhido pelo usuario quando a varredura nao achou o Discord. Fica no
+// settings.json e e revalidado a cada leitura: se o arquivo sumiu ou deixou de passar nas
+// regras do candidato, simplesmente nao entra (sem erro e sem apagar a preferencia).
+const MANUAL_DISCORD_EXE_KEY = "discordManualExePath";
+let manualDiscordInvalidLogged = false;
+
+function readManualDiscordCandidate(): WindowsDiscoveryCandidate | null {
+  const saved = readSharedSettings()[MANUAL_DISCORD_EXE_KEY];
+  if (typeof saved !== "string" || !saved) return null;
+  const candidate = manualWindowsDiscoveryCandidate(saved, windowsDiscoveryCollectors);
+  if (!candidate && !manualDiscordInvalidLogged) {
+    manualDiscordInvalidLogged = true;
+    logger.warn("discord", "manual.invalido", { caminho: discordscan.sanitizeDiscoveryPath(saved) });
+  }
+  if (candidate) manualDiscordInvalidLogged = false;
+  return candidate;
+}
+
 function getWinDiscordInstalls(options: WindowsDiscoveryReadOptions = {}): DiscordInstall[] {
   const env = readWindowsDiscoveryEnvironment();
   discordscan.scanInicio("win32", env.LOCALAPPDATA);
   logWindowsDiscoveryRoots(env);
   const snapshot = withNoAsar(() => windowsDiscoveryCache.read(options));
   logWindowsDiscoveryHealth(snapshot.sourceFailure);
-  for (const candidate of snapshot.installs) {
+  const manual = readManualDiscordCandidate();
+  const candidates = manual
+    ? mergeWindowsDiscoveryCandidates([...snapshot.installs, manual])
+    : snapshot.installs;
+  for (const candidate of candidates) {
     discordscan.scanCandidato(candidate.flavour, candidate.detectedBy);
   }
-  const installs = snapshot.installs.map(toPublicWindowsDiscoveryInstall).map((install) => ({
+  const installs = candidates.map(toPublicWindowsDiscoveryInstall).map((install) => ({
     flavour: install.flavour,
     resources: install.resources,
     exePath: install.exePath,
@@ -3612,6 +3634,36 @@ ipcMain.handle("import-wg-conf", async () => {
   });
   if (res.canceled || res.filePaths.length === 0) return null;
   return importWgConfFromPath(res.filePaths[0]);
+});
+
+ipcMain.handle("select-discord-manual", async () => {
+  if (!IS_WINDOWS) {
+    return { success: false, error: "A seleção manual do Discord está disponível apenas no Windows." };
+  }
+  const win = BrowserWindow.getFocusedWindow();
+  const res = await dialog.showOpenDialog(win || (undefined as any), {
+    title: "Selecionar o executável do Discord",
+    filters: [{ name: "Executável do Discord (*.exe)", extensions: ["exe"] }],
+    properties: ["openFile"],
+  });
+  if (res.canceled || res.filePaths.length === 0) return null;
+  const candidate = manualWindowsDiscoveryCandidate(res.filePaths[0], windowsDiscoveryCollectors);
+  if (!candidate) {
+    logger.warn("discord", "manual.rejeitado", { caminho: discordscan.sanitizeDiscoveryPath(res.filePaths[0]) });
+    return {
+      success: false,
+      error: "Esse arquivo não parece ser o Discord. Escolha o Discord.exe (ou Vesktop.exe, Equibop.exe, Legcord.exe) dentro da pasta de instalação, que tem a pasta resources.",
+    };
+  }
+  if (!updateSharedSettings({ [MANUAL_DISCORD_EXE_KEY]: candidate.exePath })) {
+    return { success: false, error: "Não foi possível salvar a escolha. Tente novamente." };
+  }
+  windowsDiscoveryCache.invalidate();
+  logger.info("discord", "manual.selecionado", {
+    flavour: candidate.flavour,
+    caminho: discordscan.sanitizeDiscoveryPath(candidate.exePath),
+  });
+  return { success: true, flavour: candidate.flavour };
 });
 
 ipcMain.handle("import-wg-conf-file", async (_event, filePath: unknown) => {

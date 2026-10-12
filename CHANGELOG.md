@@ -19,6 +19,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 - **Cliente macOS (`golive-gui-mac/`)** (#338, contribuição de @GabrielRanna): app Electron standalone que reativa o Go Live pondo só o tráfego do Discord num túnel WireGuard — split por IP nos ranges Cloudflare do Discord (com rejeição IPv6 para cair no IPv4 tunelado), helper root instalado em `/Library/PrivilegedHelperTools` com sudoers limitado a `up`/`down` e sanitização do conf, geração de perfil Proton via `proton-confgen` com escolha MX/US por ping, conta Proton reutilizável, DMG universal x86_64+arm64, tray, auto-reconexão e auto-updater por assets `GoLiveBypass-macos-<versão>-<arch>.dmg`. Testado em Macs M1/M2/M3 e Intel.
 
+- **GUI Windows:** quando a varredura não encontra o Discord, o card de status oferece "Selecionar o Discord manualmente". O usuário aponta o `.exe` (Discord, PTB, Canary, Vesktop, Equibop ou Legcord) e a escolha fica no `settings.json` (`discordManualExePath`). O arquivo passa pelas mesmas regras de um processo detectado (nome exato do cliente, arquivo regular, pasta `app-*` ou `resources` ao lado) e é revalidado a cada leitura; se sumir, deixa de valer sem erro. Os logs usam o caminho sanitizado. Linux (detecção própria) e macOS não mudam.
+
 ### Pendências do cliente macOS
 
 - O split é por IP, não por processo: outros sites servidos pelos ranges da Cloudflare também passam pelo túnel.

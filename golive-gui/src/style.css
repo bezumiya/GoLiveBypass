@@ -425,6 +425,20 @@ html[data-theme='dark'] .report-btn {
     border-color var(--t-med) var(--ease);
 }
 
+.discord-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: -4px;
+}
+
+.discord-manual__feedback {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--err-ink);
+}
+
 .status-indicator {
   flex-shrink: 0;
   width: 8px;

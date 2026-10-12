@@ -91,6 +91,7 @@ declare global {
       onRefreshStatus: (callback: () => void) => void;
       resizeWindow: (height: number) => void;
       importWgConf: () => Promise<{ success: boolean; fileName?: string; path?: string; error?: string } | null>;
+      selectDiscordManual: () => Promise<{ success: boolean; flavour?: string; error?: string } | null>;
       importWgConfFile: (filePath: string) => Promise<{ success: boolean; fileName?: string; path?: string; error?: string } | null>;
       getWgConfName: () => Promise<string>;
       testWgConf: () => Promise<{
@@ -248,6 +249,9 @@ const statusText = document.getElementById('statusText')!;
 const statusTag = document.getElementById('statusTag')!;
 const statusCard = document.getElementById('statusCard')!;
 const linuxPreflightCommand = document.getElementById('linuxPreflightCommand') as HTMLElement | null;
+const discordManual = document.getElementById('discordManual') as HTMLElement | null;
+const discordManualBtn = document.getElementById('discordManualBtn') as HTMLButtonElement | null;
+const discordManualFeedback = document.getElementById('discordManualFeedback') as HTMLElement | null;
 const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const btnText = document.getElementById('btnText')!;
 const restoreInternetBtn = document.getElementById('restoreInternetBtn') as HTMLButtonElement | null;
@@ -329,6 +333,41 @@ function fitWindowToContent() {
   });
 }
 
+// Quando a varredura nao acha o Discord (Windows), o usuario aponta o executavel. Linux e
+// macOS nao entram: o Linux tem deteccao propria e o macOS nao ativa o bypass.
+function setDiscordManualVisible(visible: boolean): void {
+  if (!discordManual) return;
+  const show = visible && !isLinux && !isMac;
+  const changed = discordManual.hidden === show;
+  discordManual.hidden = !show;
+  if (!show && discordManualFeedback) {
+    discordManualFeedback.hidden = true;
+    discordManualFeedback.textContent = '';
+  }
+  if (changed) fitWindowToContent();
+}
+
+discordManualBtn?.addEventListener('click', async () => {
+  if (!discordManualBtn || !discordManualFeedback) return;
+  discordManualBtn.disabled = true;
+  discordManualFeedback.hidden = true;
+  try {
+    const res = await window.api.selectDiscordManual();
+    if (res && !res.success) {
+      discordManualFeedback.textContent = res.error || 'Não foi possível usar esse arquivo.';
+      discordManualFeedback.hidden = false;
+      fitWindowToContent();
+    }
+    if (res?.success) await updateStatus();
+  } catch {
+    discordManualFeedback.textContent = 'Não foi possível abrir o seletor de arquivo.';
+    discordManualFeedback.hidden = false;
+    fitWindowToContent();
+  } finally {
+    discordManualBtn.disabled = false;
+  }
+});
+
 async function updateStatus() {
   try {
     if (isLinux) linuxPreflight = await window.api.getLinuxPreflight();
@@ -338,6 +377,7 @@ async function updateStatus() {
     statusIndicator.className = 'status-indicator';
     statusTag.className = 'status-tag';
     toggleBtn.classList.remove('loading', 'deactivate');
+    setDiscordManualVisible(status === 'NOT_FOUND');
 
     if (status === 'ACTIVE') {
       statusText.innerText = 'GoLiveBypass está Ativo';

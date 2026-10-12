@@ -19,7 +19,7 @@ export const WINDOWS_DISCOVERY_FLAVOURS: readonly WindowsDiscoveryFlavour[] = [
   "Legcord",
 ];
 
-export type DiscoverySource = "root" | "process" | "registry" | "shortcut";
+export type DiscoverySource = "root" | "process" | "registry" | "shortcut" | "manual";
 export type DiscoveryBlockStatus = "ok" | "empty" | "partial" | "error";
 export type WindowsDiscoveryRegistryKind = "app-paths" | "uninstall" | "url-handler";
 export type WindowsDiscoveryRegistryHive = "hkcu" | "hklm" | "wow6432";
@@ -881,6 +881,18 @@ export function handleShortcutRoots(
   return candidates;
 }
 
+// Executavel escolhido pelo usuario quando a varredura nao achou o Discord. Passa pelas
+// mesmas regras do candidato de processo: nome exato de um flavour conhecido, arquivo
+// regular, e pasta app-* ou com resources ao lado (um Discord.exe solto nao serve).
+export function manualWindowsDiscoveryCandidate(
+  selected: string,
+  fsSeam: WindowsDiscoveryFileSystem,
+): WindowsDiscoveryCandidate | null {
+  const flavour = flavourFromExecutableName(selected);
+  if (!flavour) return null;
+  return makeWindowsDiscoveryCandidate("manual", flavour, selected, fsSeam, true);
+}
+
 export function handleRootPaths(
   roots: readonly string[],
   deps: WindowsDiscoveryRegistryHandlerDeps,
@@ -907,6 +919,7 @@ const SOURCE_PRIORITY: Record<DiscoverySource, number> = {
   registry: 2,
   root: 3,
   process: 4,
+  manual: 5,
 };
 
 export function mergeWindowsDiscoveryCandidates(

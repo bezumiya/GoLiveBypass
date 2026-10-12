@@ -152,7 +152,7 @@ export function ativacaoSemDiscord(motivo: string) {
 // errorCode e cada candidato reporta flavour/detected_by. Nenhum registro aceita
 // caminho cru, CommandLine, argumentos, stdout ou PID: origem e detected_by sao
 // categorias fechadas, entao um path nunca entra no log por este caminho.
-export type DiscoveryScanSource = "root" | "process" | "registry" | "shortcut";
+export type DiscoveryScanSource = "root" | "process" | "registry" | "shortcut" | "manual";
 export type DiscoveryScanStatus = "ok" | "empty" | "partial" | "error";
 
 export interface DiscoveryScanFonteExtras {

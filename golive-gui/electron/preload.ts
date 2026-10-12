@@ -16,6 +16,7 @@ import type { ProtonOptimizationProgress } from './proton';
   getUpdateChannel: () => ipcRenderer.invoke('get-update-channel'),
   setUpdateChannel: (canal: string) => ipcRenderer.invoke('set-update-channel', canal),
   importWgConf: () => ipcRenderer.invoke('import-wg-conf'),
+  selectDiscordManual: () => ipcRenderer.invoke('select-discord-manual'),
   importWgConfFile: (filePath: string) => ipcRenderer.invoke('import-wg-conf-file', filePath),
   getWgConfName: () => ipcRenderer.invoke('get-wg-conf-name'),
   testWgConf: () => ipcRenderer.invoke('test-wg-conf'),
