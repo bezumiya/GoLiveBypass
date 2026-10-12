@@ -94,7 +94,7 @@ function launchesThisApp(data: string): boolean {
 function listOwnRunEntries(): RunEntry[] {
   let output: string;
   try {
-    output = execFileSync("reg.exe", ["query", RUN_KEY], { encoding: "utf8" });
+    output = execFileSync("reg.exe", ["query", RUN_KEY], { encoding: "utf8", windowsHide: true });
   } catch {
     // Chave Run ilegivel (sessao sem perfil, politica de grupo): nao ha
     // entrada comprovada, e quem chama decide o que fazer com a lista vazia.
@@ -118,7 +118,7 @@ function deleteRunValue(name: string): void {
       RUN_KEY,
       "/v", name,
       "/f",
-    ], { stdio: "ignore" });
+    ], { stdio: "ignore", windowsHide: true });
   } catch {
     // Ignorar quando a entrada nao existe: o `reg delete` falha com nivel
     // de erro 1 quando o valor nao esta presente, e o caller nao distingue
@@ -158,7 +158,7 @@ export function setStartup(enabled: boolean): StartupResult {
           "/t", "REG_SZ",
           "/d", value,
           "/f",
-        ], { stdio: "ignore" });
+        ], { stdio: "ignore", windowsHide: true });
       } catch (error) {
         // Sem HKCU: usuario sem perfil movel, ou sessao sem permissao (raro
         // mas pode acontecer em kiosk). Silencioso -- a UI nao foi projetada

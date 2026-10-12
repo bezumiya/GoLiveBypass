@@ -129,6 +129,7 @@ export function getWgStatsWindows(): WgTunnelStats {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8",
       timeout: 4000,
+      windowsHide: true,
     });
     return parseWgDump(dump);
   } catch (err) {

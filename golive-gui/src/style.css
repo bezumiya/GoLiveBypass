@@ -292,6 +292,17 @@ html[data-theme='dark'] .page-ambient::before {
   left: 14px;
 }
 
+/* "Como funciona" fica do lado da engrenagem */
+.corner--tr2 {
+  top: 14px;
+  left: 58px;
+}
+
+.corner--tr2.icon-btn::after {
+  top: calc(100% + 8px);
+  left: 0;
+}
+
 .corner--bl {
   bottom: 15px;
   left: 14px;
@@ -3322,4 +3333,243 @@ html[data-theme='dark'] .settings-switch input:checked + .switch-track .switch-t
 .manual-target-dialog__feedback {
   font-size: 12.5px;
   color: var(--muted);
+
+/* Painel "Como funciona": reaproveita o .settings-dialog */
+.guide-panel {
+  max-width: 400px;
+  gap: 14px;
+}
+.guide-intro,
+.guide-tips p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.guide-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: guide;
+}
+.guide-steps li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 30px;
+  counter-increment: guide;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.guide-steps li::before {
+  content: counter(guide);
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+.guide-steps strong {
+  color: var(--ink-strong);
+  font-size: 13px;
+}
+.guide-panel code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.guide-tips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* Card de trafego do tunel (aparece com o bypass ativo) */
+.traffic-card {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+  animation: rise 360ms var(--ease) both;
+}
+.traffic-card[hidden] { display: none; }
+.traffic-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.traffic-cell--wide {
+  grid-column: 1 / -1;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.traffic-label {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.traffic-value {
+  color: var(--ink-strong);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.traffic-value small,
+.traffic-sep {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.traffic-cell--wide .traffic-value b {
+  font-size: 16px;
+}
+.traffic-tick {
+  animation: traffic-tick 420ms var(--ease);
+}
+.traffic-card--slow #trafficPing {
+  color: var(--warn-ink);
+}
+@keyframes traffic-tick {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .traffic-card,
+  .traffic-tick { animation: none; }
+}
+
+/* ------------------------------------------------------------
+   Movimento suave: o que antes aparecia ou trocava seco
+   ------------------------------------------------------------ */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok-ink) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok-ink) 0%, transparent); }
+}
+
+/* Fundo dos dialogos escurece aos poucos, junto com o pop-in do painel */
+.settings-dialog__backdrop,
+.bug-dialog__backdrop,
+.proton-2fa-dialog__backdrop {
+  animation: fade-in 220ms var(--ease);
+}
+
+/* Trocar entre Proton e .conf desliza o painel novo */
+.vpn-panel:not([hidden]) {
+  animation: slide-in 260ms var(--ease);
+}
+
+/* Avisos e botoes que surgem no meio do uso */
+.proton-feedback:not([hidden]),
+.vpn-test-feedback:not([hidden]),
+.vpn-drop-feedback:not([hidden]),
+.restore-network-btn:not([hidden]),
+.linux-preflight-command:not([hidden]) {
+  animation: slide-in 240ms var(--ease);
+}
+
+/* Ponto verde "respira" com o bypass ativo */
+.status-indicator.active {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+/* Troca de estado (Pronto, Ativo, Conectando) sem pulo */
+.status-tag,
+#statusText {
+  transition: color var(--t-med) var(--ease), background var(--t-med) var(--ease), opacity var(--t-med) var(--ease);
+}
+
+/* Botoes respondem ao toque */
+.toggle-btn:not(:disabled):active,
+.proton-btn:not(:disabled):active,
+.vpn-mode-tab:active {
+  transform: scale(0.97);
+}
+.vpn-mode-tab,
+.proton-btn {
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-dialog__backdrop,
+  .bug-dialog__backdrop,
+  .proton-2fa-dialog__backdrop,
+  .vpn-panel:not([hidden]),
+  .proton-feedback:not([hidden]),
+  .vpn-test-feedback:not([hidden]),
+  .vpn-drop-feedback:not([hidden]),
+  .restore-network-btn:not([hidden]),
+  .linux-preflight-command:not([hidden]),
+  .status-indicator.active { animation: none; }
+  .toggle-btn:not(:disabled):active,
+  .proton-btn:not(:disabled):active,
+  .vpn-mode-tab:active { transform: none; }
+}
+
+/* Acoes rapidas abaixo do botao principal */
+.quick-actions {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+.quick-actions:not(:has(:not([hidden]))) {
+  display: none;
+}
+
+/* "Checar updates" fica do lado do "Como funciona" */
+.corner--tr3 {
+  top: 14px;
+  left: 102px;
+}
+.corner--tr3.icon-btn::after {
+  top: calc(100% + 8px);
+  left: 0;
+}
+.corner--tr3[hidden] { display: none; }
+.icon-btn.is-busy svg {
+  animation: spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn.is-busy svg { animation: none; }
+}
+
+/* Janela redimensionavel: estreita, as duas colunas viram uma pilha vertical */
+@media (max-width: 560px) {
+  .control-layout {
+    grid-template-columns: 1fr;
+  }
+  .bypass-description {
+    min-height: 0;
+  }
 }

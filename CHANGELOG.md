@@ -6,6 +6,33 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Windows: varredura do Discord 35x mais rápida, menos processos em segundo plano e melhorias na janela
+
+**Desempenho (medido no Windows 11, WireSock 3.4.8, Electron 43.4.1):**
+
+- **Varredura de instalações do Discord: 35,5 s → 0,98 s** (mediana de 5 execuções; saída idêntica à anterior, mesmos 6 processos e mesmas 2 entradas de registro). O script lia até 384 chaves de `Uninstall` pelo provider do PowerShell (`Get-ItemProperty`/`Get-Item`) e importava o módulo CIM. Agora usa `RegistryKey` (.NET) e `[wmisearcher]`, com o mesmo JSON (`schema = 1`) e os mesmos limites (64 processos, 128 chaves, sentinelas). Como o app desistia em 3 s, **toda varredura falhava** e caía no caminho alternativo (só as raízes), então o Discord de `app-x.y.z` registrado no registro nunca era visto. O runner assíncrono passa de 3 s para 8 s de limite (não trava a janela).
+- **"O Discord está aberto?": 6 `tasklist` por checagem → 1** (`/FO CSV`, parser com casamento exato do nome de imagem, sem casar por substring). ≈610 ms → ≈380 ms por checagem.
+- **Leitura de tráfego do `ProTUN`: PowerShell → `netsh`** (≈600 ms → ≈90 ms por leitura). A prontidão do túnel lia a cada 1 s e o monitor de failover a cada 3 s, e a chamada de PowerShell falhava sempre em instalações sem o adaptador. O PowerShell fica só de reserva se o `netsh` não rodar.
+- **Sonda periódica de rota (60 s) removida.** Ela copiava um `.exe` com nome aleatório (`.golive-route-probe-*.exe`) para a pasta do Discord a cada minuto, só para gravar log (`mode: log-only`). Com Controle de Aplicativo/Smart App Control ativos o Windows bloqueava a cópia e a Segurança do Windows exibia "Parte deste aplicativo foi bloqueado" repetidamente.
+- `reg.exe` (autostart) e `wg show` passam a rodar com `windowsHide`, sem abrir janela de console.
+- A janela principal abre **antes** da revalidação de sessão residual do boot (que fecha/reabre o Discord e leva dezenas de segundos).
+
+**Funcionalidades:**
+
+- **Desativar não fecha mais o Discord.** O Discord que já está aberto segue no túnel até ser fechado; nesse momento o app derruba o túnel e restaura a rede sozinho (vigia a cada 5 s, cancelada se o usuário reativar). "Sair" do app continua limpando tudo na hora.
+- **Reiniciar bypass** (botão sob a ação principal, só com o bypass ativo): refaz a ativação inteira sem desativar e ativar à mão. **Checar updates** (ícone ao lado de "Como funciona"), com o resultado no tooltip.
+- **Card de tráfego** com o bypass ativo: ping até o servidor da VPN (medido com `ping`) e, quando o adaptador `ProTUN` existe, velocidade atual, upload e download. No log do modo desenvolvedor, uma queda brusca de upload vira o aviso `queda.upload`.
+- **Modo desenvolvedor** disponível também no app empacotado (Configurações), com a janela de logs. **Iniciar com o Windows** foi para as Configurações.
+- **Janela redimensionável**: colunas empilham na vertical em largura estreita e o conteúdo rola por dentro. Depois que o usuário redimensiona, o app para de forçar a altura.
+- Painel **"Como funciona"** (ícone ao lado de Configurações) com o passo a passo, e os textos explicativos soltos saíram da tela principal. Travessões removidos dos textos da interface.
+- Animações suaves (fundo dos diálogos, troca de painéis, avisos, ponto de status), todas desligadas com `prefers-reduced-motion`.
+
+**Limitações conhecidas:** sem o adaptador `ProTUN` (WireSock sem `-lac`) o card mostra upload/download como `-` e só o ping. O contador de bytes do WireSock (`wgb_get_tunnel_state`) só pode ser lido de dentro do processo `wiresock-client.exe`. Testamos `-lac` e revertemos: ele cria uma rota padrão na interface virtual. O tamanho da janela não é lembrado entre aberturas.
+
+**Testado e descartado:** direcionar só o gateway do Discord pelo túnel (`AllowedIPs = 162.159.128.0/20`) para a call e a stream saírem direto. Com a opção ligada, as streams ficaram pretas. Não faz parte desta mudança.
+
+Cobertura: `traffic-log.test.ts`, `qualidade-de-vida.test.ts`, `wait-condition.test.ts` (parser do `tasklist` e vigia do Discord), `windows-discord-discovery.test.ts` (limites e ausência dos cmdlets lentos) e ajustes em `ativacao-guard.test.ts`.
+
 ## [2.0.10-beta-7] - 2026-10-12
 
 ### Linux: fallback de alvo manual quando a varredura não reconhece a instalação

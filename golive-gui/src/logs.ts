@@ -109,7 +109,7 @@ reportBugBtn.addEventListener('click', async () => {
     const r = await api.openBugReport({
       status: currentStatus,
       note: bugNoteInput.value,
-      title: `[GUI] ${currentStatus} — relato`,
+      title: `[GUI] ${currentStatus}: relato`,
     });
     if (r.via === 'api') {
       devHint.textContent = r.issueNumber

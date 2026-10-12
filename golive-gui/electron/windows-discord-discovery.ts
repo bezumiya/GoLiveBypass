@@ -192,9 +192,10 @@ export function shortcutRootsForEnvironment(env: WindowsDiscoveryEnvironment): s
 }
 export const WINDOWS_DISCOVERY_POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $flavours = @('Discord','DiscordPTB','DiscordCanary','Vesktop','Equibop','Legcord','Serein')
 $schemes = @('discord','discordptb','discordcanary','vesktop','equibop','legcord','serein')
-$processFilter = "Name = 'Discord.exe' OR Name = 'DiscordPTB.exe' OR Name = 'DiscordCanary.exe' OR Name = 'Vesktop.exe' OR Name = 'Equibop.exe' OR Name = 'Legcord.exe' OR Name = 'Serein.exe'"
+$processQuery = "SELECT Name, ProcessId, ExecutablePath FROM Win32_Process WHERE Name = 'Discord.exe' OR Name = 'DiscordPTB.exe' OR Name = 'DiscordCanary.exe' OR Name = 'Vesktop.exe' OR Name = 'Equibop.exe' OR Name = 'Legcord.exe' OR Name = 'Serein.exe'"
 
 # The 65th matching process is a sentinel: emit at most 64 rows but report truncation.
 $processRows = @()
@@ -202,12 +203,13 @@ $processStatus = 'ok'
 $processError = $null
 $processTruncated = $false
 try {
-  $processMatches = @(Get-CimInstance Win32_Process -Filter $processFilter -ErrorAction Stop | ForEach-Object {
+  # [wmisearcher] (System.Management) evita importar o modulo CimCmdlets, que sozinho custa centenas de ms.
+  $processMatches = @(([wmisearcher]$processQuery).Get() | ForEach-Object {
     $processPath = $null
-    if ($_.ExecutablePath) { $processPath = [string]$_.ExecutablePath }
+    if ($_['ExecutablePath']) { $processPath = [string]$_['ExecutablePath'] }
     [pscustomobject]@{
-      name = [string]$_.Name
-      pid = [int]$_.ProcessId
+      name = [string]$_['Name']
+      pid = [int]$_['ProcessId']
       path = $processPath
     }
   } | Select-Object -First 65)
@@ -226,20 +228,24 @@ $processBlock = [ordered]@{
 }
 if ($processError) { $processBlock['errorCode'] = $processError }
 
+# Registro via .NET: o provider do PowerShell custa dezenas de ms por chave e a varredura
+# le ate 384 chaves de Uninstall. RegistryKey le a mesma chave em microssegundos.
 $registryRows = @()
 $registryErrors = 0
 $registryTruncated = $false
+$hives = @{ hkcu = [Microsoft.Win32.Registry]::CurrentUser; hklm = [Microsoft.Win32.Registry]::LocalMachine; wow6432 = [Microsoft.Win32.Registry]::LocalMachine }
+$wow = 'Software\WOW6432Node\'
 $appPathSpecs = @(
-  @{hive='hkcu'; root='HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths'},
-  @{hive='hklm'; root='HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths'},
-  @{hive='wow6432'; root='HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths'}
+  @{hive='hkcu'; root='Software\Microsoft\Windows\CurrentVersion\App Paths'},
+  @{hive='hklm'; root='Software\Microsoft\Windows\CurrentVersion\App Paths'},
+  @{hive='wow6432'; root=($wow + 'Microsoft\Windows\CurrentVersion\App Paths')}
 )
 foreach ($spec in $appPathSpecs) {
   foreach ($flavour in $flavours) {
     try {
-      $key = Join-Path $spec.root ($flavour + '.exe')
-      if (Test-Path -LiteralPath $key) {
-        $value = [string]((Get-Item -LiteralPath $key -ErrorAction Stop).GetValue(''))
+      $key = $hives[$spec.hive].OpenSubKey($spec.root + '\' + $flavour + '.exe')
+      if ($key) {
+        try { $value = [string]$key.GetValue('') } finally { $key.Close() }
         $registryRows += [pscustomobject]@{
           hive = $spec.hive
           kind = 'app-paths'
@@ -252,16 +258,16 @@ foreach ($spec in $appPathSpecs) {
 }
 
 $urlSpecs = @(
-  @{hive='hkcu'; root='HKCU:\Software\Classes'},
-  @{hive='hklm'; root='HKLM:\Software\Classes'},
-  @{hive='wow6432'; root='HKLM:\Software\WOW6432Node\Classes'}
+  @{hive='hkcu'; root='Software\Classes'},
+  @{hive='hklm'; root='Software\Classes'},
+  @{hive='wow6432'; root=($wow + 'Classes')}
 )
 for ($index = 0; $index -lt $schemes.Count; $index++) {
   foreach ($spec in $urlSpecs) {
     try {
-      $key = Join-Path (Join-Path (Join-Path (Join-Path $spec.root $schemes[$index]) 'shell') 'open') 'command'
-      if (Test-Path -LiteralPath $key) {
-        $value = [string]((Get-Item -LiteralPath $key -ErrorAction Stop).GetValue(''))
+      $key = $hives[$spec.hive].OpenSubKey($spec.root + '\' + $schemes[$index] + '\shell\open\command')
+      if ($key) {
+        try { $value = [string]$key.GetValue('') } finally { $key.Close() }
         $registryRows += [pscustomobject]@{
           hive = $spec.hive
           kind = 'url-handler'
@@ -274,41 +280,48 @@ for ($index = 0; $index -lt $schemes.Count; $index++) {
 }
 
 $uninstallSpecs = @(
-  @{hive='hkcu'; root='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'},
-  @{hive='hklm'; root='HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'},
-  @{hive='wow6432'; root='HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'}
+  @{hive='hkcu'; root='Software\Microsoft\Windows\CurrentVersion\Uninstall'},
+  @{hive='hklm'; root='Software\Microsoft\Windows\CurrentVersion\Uninstall'},
+  @{hive='wow6432'; root=($wow + 'Microsoft\Windows\CurrentVersion\Uninstall')}
 )
 foreach ($spec in $uninstallSpecs) {
   try {
-    # A 129th item is read only as a sentinel so the processed set stays bounded at 128.
-    $subkeys = @(Get-ChildItem -LiteralPath $spec.root -ErrorAction Stop | Select-Object -First 129)
-    if ($subkeys.Count -gt 128) { $registryTruncated = $true }
-    foreach ($key in @($subkeys | Select-Object -First 128)) {
-      try {
-        $properties = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
-        $displayName = [string]$properties.DisplayName
-        if (!$displayName -or $displayName -notmatch '(?i)(Discord|Vesktop|Equibop|Legcord|Serein)') { continue }
-        $defaultValue = [string]((Get-Item -LiteralPath $key.PSPath -ErrorAction Stop).GetValue(''))
-        $displayIcon = [string]$properties.DisplayIcon
-        $installLocation = [string]$properties.InstallLocation
-        $hint = $null
-        if ($displayName -match '(?i)Discord\s*Canary') { $hint = 'DiscordCanary' }
-        elseif ($displayName -match '(?i)Discord\s*PTB') { $hint = 'DiscordPTB' }
-        elseif ($displayName -match '(?i)Discord') { $hint = 'Discord' }
-        elseif ($displayName -match '(?i)Vesktop') { $hint = 'Vesktop' }
-        elseif ($displayName -match '(?i)Equibop') { $hint = 'Equibop' }
-        elseif ($displayName -match '(?i)Legcord') { $hint = 'Legcord' }
-        elseif ($displayName -match '(?i)Serein') { $hint = 'Serein' }
-        $registryRows += [pscustomobject]@{
-          hive = $spec.hive
-          kind = 'uninstall'
-          value = $defaultValue
-          flavourHint = $hint
-          displayIcon = $displayIcon
-          installLocation = $installLocation
-        }
-      } catch { $registryErrors++ }
-    }
+    $parent = $hives[$spec.hive].OpenSubKey($spec.root)
+    if (!$parent) { throw 'UNINSTALL_ROOT_MISSING' }
+    try {
+      # A 129th item is read only as a sentinel so the processed set stays bounded at 128.
+      $names = @($parent.GetSubKeyNames() | Select-Object -First 129)
+      if ($names.Count -gt 128) { $registryTruncated = $true }
+      foreach ($name in @($names | Select-Object -First 128)) {
+        try {
+          $sub = $parent.OpenSubKey($name)
+          if (!$sub) { continue }
+          try {
+            $displayName = [string]$sub.GetValue('DisplayName')
+            if (!$displayName -or $displayName -notmatch '(?i)(Discord|Vesktop|Equibop|Legcord|Serein)') { continue }
+            $defaultValue = [string]$sub.GetValue('')
+            $displayIcon = [string]$sub.GetValue('DisplayIcon')
+            $installLocation = [string]$sub.GetValue('InstallLocation')
+          } finally { $sub.Close() }
+          $hint = $null
+          if ($displayName -match '(?i)Discord\s*Canary') { $hint = 'DiscordCanary' }
+          elseif ($displayName -match '(?i)Discord\s*PTB') { $hint = 'DiscordPTB' }
+          elseif ($displayName -match '(?i)Discord') { $hint = 'Discord' }
+          elseif ($displayName -match '(?i)Vesktop') { $hint = 'Vesktop' }
+          elseif ($displayName -match '(?i)Equibop') { $hint = 'Equibop' }
+          elseif ($displayName -match '(?i)Legcord') { $hint = 'Legcord' }
+          elseif ($displayName -match '(?i)Serein') { $hint = 'Serein' }
+          $registryRows += [pscustomobject]@{
+            hive = $spec.hive
+            kind = 'uninstall'
+            value = $defaultValue
+            flavourHint = $hint
+            displayIcon = $displayIcon
+            installLocation = $installLocation
+          }
+        } catch { $registryErrors++ }
+      }
+    } finally { $parent.Close() }
   } catch { $registryErrors++ }
 }
 
@@ -402,7 +415,8 @@ function defaultWindowsDiscoveryPowerShellRunnerAsync(
     execFile(file, [...args], {
       encoding: "utf8",
       windowsHide: true,
-      timeout: 3_000,
+      // Assincrono: nao trava a janela. Folga para maquina carregada (a varredura leva ~1s).
+      timeout: 8_000,
     }, (error, stdout) => {
       if (error) reject(error);
       else resolve(String(stdout ?? ""));

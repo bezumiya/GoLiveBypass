@@ -402,11 +402,14 @@ describe("discovery Windows puro", () => {
     expect(invocation?.args).not.toContain("-Command");
     const encoded = invocation?.args[3] ?? "";
     expect(Buffer.from(encoded, "base64").toString("utf16le")).toBe(buildWindowsDiscoveryPowerShell());
-    expect(buildWindowsDiscoveryPowerShell()).toContain("Get-CimInstance Win32_Process");
+    expect(buildWindowsDiscoveryPowerShell()).toContain("FROM Win32_Process WHERE Name = 'Discord.exe'");
     expect(buildWindowsDiscoveryPowerShell()).toContain("Select-Object -First 65");
     expect(buildWindowsDiscoveryPowerShell()).toContain("$processStatus = 'partial'");
     expect(buildWindowsDiscoveryPowerShell()).toContain("Select-Object -First 129");
-    expect(buildWindowsDiscoveryPowerShell()).toContain("HKLM:\\Software\\WOW6432Node\\Classes");
+    expect(buildWindowsDiscoveryPowerShell()).toContain("$wow + 'Classes'");
+    // O registro vai por RegistryKey (.NET): o provider do PowerShell levava ~35s nesta varredura.
+    expect(buildWindowsDiscoveryPowerShell()).toContain("[Microsoft.Win32.Registry]::LocalMachine");
+    expect(buildWindowsDiscoveryPowerShell()).not.toMatch(/Get-ItemProperty|Get-ChildItem|Get-CimInstance|Test-Path/);
   });
 
   it("coleta o mesmo JSON pelo runner assincrono, com os mesmos erros mapeados", async () => {
