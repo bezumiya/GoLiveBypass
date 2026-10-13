@@ -104,7 +104,9 @@ describe("guarda de ativacao duplicada", () => {
     expect(src).toContain("cancelarDesativacaoAdiada = whenProcessStops(discordProcessStateAsync,");
     expect(src).toMatch(/async function activateBypass\(event: any\) \{\r?\n  pararDesativacaoAdiada\(\);/);
     // O Sair do app limpa na hora: sem a GUI viva, ninguem derrubaria o tunel depois.
-    expect(src).toContain('withWireSockLifecycle("encerrar-windows", () => deactivateAll())');
+    // Chamado direto, sem embrulhar na fila: o deactivateAll ja se serializa e a fila nao e reentrante.
+    expect(src).toContain("? deactivateAll()");
+    expect(src).not.toContain('withWireSockLifecycle("encerrar-windows"');
     expect(src.split("deactivateAll({ manterDiscordAberto: true })").length - 1).toBe(2);
   });
 

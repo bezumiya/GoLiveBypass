@@ -80,3 +80,16 @@ export function whenProcessStops(
     stop();
   };
 }
+
+// Espera `tarefa` por no maximo `ms`. true = terminou no prazo; false = estourou o prazo (a tarefa
+// continua rodando, mas o chamador segue). Usado no "Sair": a limpeza nunca pode prender o app
+// para sempre, mesmo que algum passo dela trave.
+export function aguardarAte(tarefa: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    tarefa.then(
+      () => { clearTimeout(timer); resolve(true); },
+      () => { clearTimeout(timer); resolve(true); },
+    );
+  });
+}

@@ -6,6 +6,13 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Windows: "Sair" com o bypass ativo travava para sempre
+
+- **O "Sair" não fechava o app, não restaurava a rede e deixava o `wiresock-client` rodando (existe desde o 2.0.9).** O encerramento embrulhava o `deactivateAll()` na fila serial de operações (`withWireSockLifecycle("encerrar-windows", ...)`), e o `deactivateAll()` enfileira a si mesmo de novo na mesma fila (`"desativacao"`). A fila não é reentrante: a operação de dentro espera a de fora terminar, e a de fora espera a de dentro. O app nunca chegava a `app.quit()`. Quem forçava o fechamento ficava com um túnel órfão, o que na ativação seguinte exigia a inspeção elevada e podia falhar com `spawn EPERM`. O sintoma no log é `inicio de operacao serializada | operation=encerrar-windows` sem o `fim` correspondente.
+- Agora o "Sair" chama o `deactivateAll()` direto (ele já se serializa por dentro) e a limpeza ganhou um prazo de 90 s (`QUIT_CLEANUP_TIMEOUT_MS`): se algum passo travar, por exemplo um pedido de administrador sem resposta, o app encerra mesmo assim em vez de ficar preso.
+- Reproduzido com uma cópia fiel da fila, que trava, e conferido na tag `v2.0.9`, na beta-5 e na beta-7. Cobertura: `wait-condition.test.ts` (prazo da limpeza e a fila não reentrante), `qualidade-de-vida.test.ts` e `ativacao-guard.test.ts` (o "Sair" sem a fila e com prazo).
+- **Fora do escopo:** só o caminho Windows do "Sair" foi alterado. O Linux continua embrulhando o `linuxDeactivate` na fila (`encerrar-linux`), e lendo o código ele **não** tem o deadlock: `linuxDeactivate` só chama `runScript(["--uninstall"])`, sem se enfileirar. Linux e macOS não foram testados em execução.
+
 ### Windows: varredura do Discord 35x mais rápida, menos processos em segundo plano e melhorias na janela
 
 **Desempenho (medido no Windows 11, WireSock 3.4.8, Electron 43.4.1):**
