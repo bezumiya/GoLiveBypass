@@ -39,7 +39,7 @@ import { restoreBypassOnStartup, type StartupOptimizationResult } from "./startu
 import { findWindowsDiscordInstall } from "./windows-discord-install";
 import { assembleWindowsDiscoverySnapshotFromRaw, collectWindowsDiscoveryPowerShell, collectWindowsDiscoveryPowerShellAsync, collectWindowsDiscoverySnapshot, createWindowsDiscoveryCache, failedWindowsDiscoveryRawFor, rootsForEnvironment, toPublicWindowsDiscoveryInstall, type WindowsDiscoveryEnvironment, type WindowsDiscoveryRaw, type WindowsDiscoverySnapshot, type WindowsDiscoverySnapshotCollectors } from "./windows-discord-discovery";
 import { shouldAskRoutePreference } from "./route-preference-prompt";
-import { runningImageNames, waitForProcessRunning, waitForProcessStopped, whenProcessStops, type ProcessProbeState } from "./wait-condition";
+import { aguardarAte, runningImageNames, waitForProcessRunning, waitForProcessStopped, whenProcessStops, type ProcessProbeState } from "./wait-condition";
 import { TUNNEL_STARTUP_SETTLE_MS, waitForTunnelStartupSettle } from "./tunnel-startup";
 import { linuxPreflightRepairable, parseLinuxPreflight, linuxPreflightMessage, type LinuxPreflight } from "./linux-preflight";
 import { createProcSeams } from "./linux-proc-seams";
@@ -59,6 +59,8 @@ const isMac = process.platform === "darwin";
 const IS_LINUX = process.platform === "linux";
 const IS_WINDOWS = process.platform === "win32";
 const MAIN_WINDOW_WIDTH = 720;
+// Limite da limpeza no Sair (inclui o pedido de administrador do Windows): depois disso o app fecha.
+const QUIT_CLEANUP_TIMEOUT_MS = 90_000;
 
 // Parar, resetar o lock e instalar outro perfil mexe no mesmo servico/driver
 // global. Uma fila unica impede que clique, bandeja e troca Proton criem duas
@@ -889,13 +891,21 @@ app.on("before-quit", (event) => {
   const restore = IS_LINUX
     ? withWireSockLifecycle("encerrar-linux", () => linuxDeactivate(() => {}))
     : IS_WINDOWS
-      ? withWireSockLifecycle("encerrar-windows", () => deactivateAll())
+      // Sem withWireSockLifecycle aqui: o deactivateAll ja se serializa por dentro. A fila e serial
+      // e nao reentrante, entao embrulhar a chamada trava o Sair para sempre (a tarefa de fora
+      // espera a de dentro, que espera a de fora) e deixa o WireSock rodando.
+      ? deactivateAll()
       : Promise.resolve();
-  restore
-    .catch((error) => {
-      logger.error("app", "limpeza no encerramento falhou", {
-        erro: String((error as Error)?.message ?? error),
-      });
+  const limpeza = restore.catch((error) => {
+    logger.error("app", "limpeza no encerramento falhou", {
+      erro: String((error as Error)?.message ?? error),
+    });
+  });
+  // Rede de seguranca: se algum passo da limpeza travar (por exemplo, um pedido de administrador
+  // sem resposta), o app encerra assim mesmo depois do prazo em vez de ficar preso.
+  void aguardarAte(limpeza, QUIT_CLEANUP_TIMEOUT_MS)
+    .then((terminou) => {
+      if (!terminou) logger.error("app", "limpeza no encerramento passou do prazo; encerrando mesmo assim", { prazo_ms: QUIT_CLEANUP_TIMEOUT_MS });
     })
     .finally(() => app.quit());
 });

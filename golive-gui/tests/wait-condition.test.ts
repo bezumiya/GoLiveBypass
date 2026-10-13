@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runningImageNames, waitForCondition, waitForProcessRunning, waitForProcessStopped, whenProcessStops } from "../electron/wait-condition";
+import { aguardarAte, runningImageNames, waitForCondition, waitForProcessRunning, waitForProcessStopped, whenProcessStops } from "../electron/wait-condition";
 
 describe("espera de lifecycle", () => {
   it("retorna assim que o recurso encerra", async () => {
@@ -99,5 +99,36 @@ describe("espera de lifecycle", () => {
     cancel();
     await ticks[0]();
     expect(fired).toBe(0);
+  });
+
+  it("aguardarAte devolve true se a tarefa termina no prazo e false se ela trava", async () => {
+    expect(await aguardarAte(Promise.resolve("ok"), 200)).toBe(true);
+    // Tarefa que nunca termina (como a limpeza do Sair travada): o prazo vence e o app segue.
+    const t0 = Date.now();
+    expect(await aguardarAte(new Promise<void>(() => {}), 60)).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it("aguardarAte trata a tarefa que falha como terminada (o chamador ja registra o erro)", async () => {
+    expect(await aguardarAte(Promise.reject(new Error("falhou")).catch(() => undefined), 200)).toBe(true);
+  });
+
+  it("uma fila serial nao e reentrante: chamar a fila de dentro de uma tarefa dela mesma trava (a causa do Sair preso)", async () => {
+    // Copia fiel de withWireSockLifecycle (electron/main.ts). Documenta por que o Sair nao pode enfileirar o deactivateAll.
+    const novaFila = () => {
+      let fila: Promise<void> = Promise.resolve();
+      const comFila = <T>(tarefa: () => Promise<T>): Promise<T> => {
+        const run = fila.then(() => tarefa());
+        fila = run.then(() => undefined, () => undefined);
+        return run;
+      };
+      return { comFila, deactivateAll: () => comFila(async () => "restaurou a rede") };
+    };
+    // Antes: o Sair embrulhava o deactivateAll na fila, e ele se enfileira por dentro: trava.
+    const antes = novaFila();
+    expect(await aguardarAte(antes.comFila(() => antes.deactivateAll()), 100)).toBe(false);
+    // Agora: o Sair chama direto e a propria fila serializa (fila nova: a de cima ficou presa).
+    const agora = novaFila();
+    expect(await aguardarAte(agora.deactivateAll(), 100)).toBe(true);
   });
 });

@@ -60,3 +60,21 @@ describe("sondas e varreduras", () => {
     expect(renderer).not.toContain("import.meta.env.DEV");
   });
 });
+
+describe("Sair com o bypass ativo nao trava", () => {
+  const quit = main.slice(main.indexOf('app.on("before-quit"'), main.indexOf('app.on("window-all-closed"'));
+
+  it("no Windows o Sair chama o deactivateAll direto, sem embrulhar na fila (que nao e reentrante)", () => {
+    expect(quit).toContain("? deactivateAll()");
+    expect(quit).not.toContain('withWireSockLifecycle("encerrar-windows"');
+    // O deactivateAll se serializa sozinho: se deixasse de fazer isso, o Sair perderia a serializacao.
+    const fn = main.slice(main.indexOf("async function deactivateAll("), main.indexOf("// O status do Windows e sempre lido"));
+    expect(fn).toContain('withWireSockLifecycle("desativacao"');
+  });
+
+  it("a limpeza tem prazo: se travar, o app encerra assim mesmo", () => {
+    expect(main).toContain("const QUIT_CLEANUP_TIMEOUT_MS = 90_000;");
+    expect(quit).toContain("aguardarAte(limpeza, QUIT_CLEANUP_TIMEOUT_MS)");
+    expect(quit).toMatch(/\.finally\(\(\) => app\.quit\(\)\)/);
+  });
+});
