@@ -2,9 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { definirLeitorFragmentos, metaFragmentos, reiniciarFragmentos } from "../electron/fragmentos-ip";
 import * as logger from "../electron/logger";
 import { registrarLogWireSock } from "../electron/wiresock-log";
 import { classifyWgReadiness, iniciarWgStatsWatchdog, parseWgDump, pararWgStatsWatchdog, WG_STATS_INTERVAL_MS } from "../electron/wgstats";
+
+// O vigia tambem le os fragmentos IP (fragmentos-ip.ts). Nos testes o netstat de verdade nunca
+// roda: no Windows a suite ficaria esperando por ele com o relogio falso.
+beforeEach(() => definirLeitorFragmentos(async () => null));
+afterEach(() => {
+  definirLeitorFragmentos(null);
+  reiniciarFragmentos();
+});
 
 // `wg show <iface> dump` real (campos tab-separated, ver electron/wgstats.ts).
 const linhaInterface = "PRIVKEYBASE64\tPUBKEYBASE64\t51820\t0";
@@ -180,6 +189,45 @@ describe("watchdog WireGuard", () => {
       const recent = logger.getRecent();
       expect(recent).toContain("rx_total_kb=1 ");
       expect(recent).not.toMatch(/taxa_kbps=-/);
+    } finally {
+      pararWgStatsWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it("le os fragmentos IP ao ligar e a cada leitura, e recomeca a contagem num tunel novo", async () => {
+    vi.useFakeTimers();
+    let v4 = 100;
+    definirLeitorFragmentos(async () => ({ v4Fragmentos: (v4 += 7), v4Falhas: 0, v6Fragmentos: null }));
+    const provider = vi.fn(() => Promise.resolve({ ok: true, handshakeAgoS: 1, rxBytes: 10, txBytes: 10, endpoint: "peer" }));
+    try {
+      iniciarWgStatsWatchdog(provider);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 2);
+      expect(metaFragmentos(Date.now(), true)).toMatchObject({
+        fragmentos_ip: "ok",
+        fragmentos_serie: "7,7",
+        fragmentos_v4_desde_tunel: "14",
+      });
+
+      pararWgStatsWatchdog();
+      iniciarWgStatsWatchdog(provider);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS);
+      expect(metaFragmentos(Date.now(), true)).toMatchObject({ fragmentos_serie: "7", fragmentos_v4_desde_tunel: "7" });
+    } finally {
+      pararWgStatsWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it("le os fragmentos IP mesmo quando a leitura do tunel falha", async () => {
+    vi.useFakeTimers();
+    let v4 = 0;
+    definirLeitorFragmentos(async () => ({ v4Fragmentos: (v4 += 5), v4Falhas: 0, v6Fragmentos: null }));
+    const provider = vi.fn(() => Promise.reject(new Error("setns temporariamente indisponível")));
+    try {
+      iniciarWgStatsWatchdog(provider);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS);
+      expect(metaFragmentos(Date.now(), true)).toMatchObject({ fragmentos_ip: "ok", fragmentos_serie: "5" });
     } finally {
       pararWgStatsWatchdog();
       vi.useRealTimers();
