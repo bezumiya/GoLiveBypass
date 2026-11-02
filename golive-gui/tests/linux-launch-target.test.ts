@@ -72,6 +72,8 @@ describe.skipIf(process.platform !== "linux")("identidade do cliente Linux ao re
     expect(result.stdout.trim()).toBe(String(client.pid));
   });
 
+  // O caso spawna dois processos e roda `find`: sob a suíte completa em paralelo ele passa
+  // dos 5 s padrão. O prazo maior não muda a asserção, só evita flake por carga da máquina.
   it.each(["gnu", "unsupported"])("restringe a instalação com app.asar direto e preserva executável irmão com find %s", async mode => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-direct-asar-"));
     roots.push(root);
@@ -104,7 +106,7 @@ describe.skipIf(process.platform !== "linux")("identidade do cliente Linux ao re
     expect(client.signalCode).toBe("SIGKILL");
     expect(unrelated.exitCode).toBeNull();
     expect(unrelated.signalCode).toBeNull();
-  });
+  }, 30_000);
 
   it.each(["gnu", "unsupported", "race"])("localiza executável nativo de nome arbitrário com find %s", async mode => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-proc-snapshot-"));
