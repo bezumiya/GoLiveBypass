@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import * as logger from "./logger";
 import { descreverQuicDoDiscord } from "./discord-args";
+import { metaFragmentos } from "./fragmentos-ip";
 import { caminhoLogWireSock, ipv6NoPerfil, metaDoLogWireSock } from "./wiresock-log";
 import * as logsDir from "./logsDir";
 import type { WgTunnelStats } from "./wgstats";
@@ -216,6 +217,9 @@ export function montarMeta(statusBypass: string, wgTunel?: WgTunnelStats): Recor
     ...(process.platform === "win32" ? { wiresock_perfil_ipv6: ipv6NoPerfil(lerPerfilWireSock()) } : {}),
     // Em que condicao o Discord foi aberto: "desativado_experimental" = com --disable-quic.
     ...(process.platform === "win32" ? { discord_quic: descreverQuicDoDiscord(lerSettingsDoApp()) } : {}),
+    // A rota estava fragmentando pacotes na hora do problema? Contadores de remontagem IP do
+    // Windows lidos pelo vigia do tunel (ver fragmentos-ip.ts): so numeros, sem veredito.
+    ...metaFragmentos(Date.now(), process.platform === "win32"),
     uptime_s: String(Math.round(process.uptime())),
     installs: String(installsDaSessao(settingsDir(app.getPath("home"))).length),
     // Diagnostico da deteccao do Discord — sem caminhos completos do usuario.

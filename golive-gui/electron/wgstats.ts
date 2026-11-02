@@ -16,6 +16,7 @@
 // roteamento, timeout curto).
 
 import { execFile, execSync } from "child_process";
+import { amostrarERegistrarFragmentos, reiniciarFragmentos } from "./fragmentos-ip";
 import * as logger from "./logger";
 import { avaliarSaudeWireSock, caminhoLogWireSock, lerResumoLogWireSock } from "./wiresock-log";
 
@@ -219,6 +220,9 @@ export function iniciarWgStatsWatchdog(provider: WgStatsProvider = getWgStats) {
   ultimaAmostraMs = null;
   ultimaSaudeInfoMs = Number.NEGATIVE_INFINITY;
   ultimoIndisponivelMs = Number.NEGATIVE_INFINITY;
+  // Fragmentos IP (so Windows, ver fragmentos-ip.ts): a contagem "desde o tunel" parte daqui.
+  reiniciarFragmentos();
+  void amostrarERegistrarFragmentos();
   timer = setInterval(() => {
     // O provider Linux pode envolver um processo elevado e, em uma máquina
     // congestionada, durar mais que o intervalo. Nunca sobreponha leituras:
@@ -273,6 +277,8 @@ export function iniciarWgStatsWatchdog(provider: WgStatsProvider = getWgStats) {
           logger.warn("wg", "stats.erro", { erro: String((error as Error)?.message ?? error) });
         }
       })
+      // Outra fonte, entao vale mesmo quando a leitura do tunel falhou. Nunca rejeita.
+      .then(() => (generation === watchdogGeneration && timer !== null ? amostrarERegistrarFragmentos() : undefined))
       .finally(() => {
         if (generation === watchdogGeneration) watchdogInFlight = false;
       });
