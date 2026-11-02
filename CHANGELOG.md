@@ -44,6 +44,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 - **GUI e plugin no Windows: um `.conf` importado não pode mais pôr o computador inteiro na VPN.** O WireSock só lê a regra `#@ws:AllowedApps` dentro da seção `[Peer]`; em `[Interface]` ela é ignorada e o túnel vale para todos os programas. A GUI e o plugin substituíam no mesmo lugar uma regra que já viesse no arquivo e, sem ela, acrescentavam a regra no fim. Um perfil importado com `AllowedApps` em `[Interface]`, ou com `[Peer]` antes de `[Interface]` (ordem que o WireGuard aceita), terminava com a regra em `[Interface]`: o isolamento por aplicativo sumia sem aviso e todo o tráfego do PC passava a sair pela VPN. Agora qualquer `AllowedApps` do arquivo é descartado e a regra é escrita uma vez, no fim da primeira seção `[Peer]`. Conferido no WireSock 3.4.8.1 com um perfil que começa por `[Peer]`: com a configuração gerada pelo código antigo até um `curl` fora da regra entrou no túnel; com a nova, só o executável listado.
 
+- **Plugin: reiniciar o Discord pelo painel não derruba mais o cliente novo com "A JavaScript error occurred in the main process".** O relançamento Linux (netns via `pkexec` e Flatpak) entregava ao processo novo o `stderr` ligado a um pipe do processo atual. Assim que o atual saía (`app.exit`), o pipe quebrava e o primeiro aviso do Discord novo virava `EPIPE` não tratado — relato #367 (Arch/Hyprland). O `stderr` do relançamento agora vai para um arquivo temporário, lido para o diagnóstico de falha e removido depois da confirmação (o cliente mantém o descritor, já sem nome). A GUI já abria o Discord sem pipe (`startDiscord`); o caminho do plugin ficou igual.
+
 ## [2.0.13] - 2026-10-19
 
 ### Alterado

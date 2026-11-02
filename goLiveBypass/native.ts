@@ -6,7 +6,7 @@
 
 import { AsyncLocalStorage } from "async_hooks";
 import { RendererSettings } from "@main/settings";
-import { execFile, execFileSync, spawn } from "child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent, type OpenDialogOptions } from "electron";
 import {
@@ -477,6 +477,36 @@ function runLogOperation<T>(prefix: string, operation: () => Promise<T> | T): Pr
     });
 }
 
+/**
+ * O cliente reiniciado não pode herdar um pipe nosso. Depois da confirmação deste
+ * relançamento o processo atual sai (`app.exit`), o pipe quebra, e qualquer aviso do
+ * processo principal do cliente novo vira EPIPE fatal ("A JavaScript error occurred in
+ * the main process" — relato real). O stderr vai para um arquivo temporário: ele guarda
+ * o diagnóstico do relaunch até a confirmação e depois é removido; o cliente continua
+ * com o descritor, já sem nome, então nada cresce no disco.
+ */
+function spawnRelaunchDetached(command: string, args: string[], env?: NodeJS.ProcessEnv) {
+    const diagnosticsPath = join(VPN_DATA_DIR, `.relaunch-stderr-${randomUUID()}.log`);
+    const diagnosticsFd = openSync(diagnosticsPath, "a", 0o600);
+    let child: ChildProcess;
+    try {
+        child = spawn(command, args, {
+            detached: true,
+            stdio: ["ignore", "ignore", diagnosticsFd],
+            env,
+        });
+    } finally {
+        closeSync(diagnosticsFd);
+    }
+    return {
+        child,
+        diagnostics: () => {
+            try { return readFileSync(diagnosticsPath, "utf8").slice(-1000); } catch { return ""; }
+        },
+        dispose: () => { try { rmSync(diagnosticsPath, { force: true }); } catch {} },
+    };
+}
+
 async function requestRelaunch(namespace: string | null): Promise<boolean> {
     if (process.platform !== "linux") {
         return false;
@@ -712,12 +742,8 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                 }
             }
 
-            const child = spawn(command, spawnArgs, {
-                detached: true,
-                stdio: ["ignore", "ignore", "pipe"],
-                env: childEnv,
-            });
-            let stderrData = "";
+            const relaunch = spawnRelaunchDetached(command, spawnArgs, childEnv);
+            const child = relaunch.child;
             const { promise: falhaDoRelaunch, resolve: relatarFalha } = Promise.withResolvers<Error>();
             let falhaSettled = false;
             const relatarUmaVez = (error: Error) => {
@@ -725,7 +751,6 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                 falhaSettled = true;
                 relatarFalha(error);
             };
-            child.stderr?.on("data", chunk => { stderrData = (stderrData + chunk.toString("utf8")).slice(-1000); });
             child.once("error", error => relatarUmaVez(error));
             child.once("close", (code, signal) => {
                 if (code === 0 || code === null) {
@@ -734,7 +759,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                     relatarUmaVez(new Error("O relançamento terminou antes de entrar no namespace."));
                     return;
                 }
-                const detail = `${stderrData.trim()} (código ${code}, sinal ${signal})`.trim();
+                const detail = `${relaunch.diagnostics().trim()} (código ${code}, sinal ${signal})`.trim();
                 if (/AccessDenied|Portal call failed|Permission denied/i.test(detail)) {
                     relatarUmaVez(new Error(`O cliente Flatpak não possui permissão para executar o relaunch no host. Conceda: flatpak override --user --talk-name=org.freedesktop.Flatpak ${flatpakId || "<app-id>"}`));
                     return;
@@ -748,6 +773,9 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
                 falhaDoRelaunch,
             ]);
             try { rmSync(confirmMarker, { force: true }); } catch {}
+            // O arquivo só existia para o diagnóstico do relaunch; o cliente o mantém aberto,
+            // já sem nome, então o conteúdo some quando ele fechar.
+            relaunch.dispose();
             if (resultado !== "confirmado") {
                 if (typeof resultado === "string") {
                     const guidance = linuxAuthorizationGuidance("pkexec", "pkexec");
@@ -782,22 +810,20 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
             flatpakId!,
             ...clientArgs,
         ];
-        const child = spawn(flatpakSpawn, spawnArgs, {
-            detached: true,
-            stdio: ["ignore", "pipe", "pipe"],
-        });
+        const relaunch = spawnRelaunchDetached(flatpakSpawn, spawnArgs);
+        const child = relaunch.child;
         child.unref();
-        await new Promise<void>((resolve, reject) => {
-            let settled = false;
-            child.once("error", err => { if (!settled) { settled = true; reject(err); } });
-            child.once("exit", (code, signal) => {
-                if (!settled && code !== 0 && code !== null) {
-                    settled = true;
-                    reject(new Error(`Reinício Flatpak encerrou prematuramente (código: ${code}, sinal: ${signal})`));
-                }
-            });
-            setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 200);
+        const { promise: relancado, resolve, reject } = Promise.withResolvers<void>();
+        let settled = false;
+        child.once("error", err => { if (!settled) { settled = true; reject(err); } });
+        child.once("exit", (code, signal) => {
+            if (!settled && code !== 0 && code !== null) {
+                settled = true;
+                reject(new Error(`Reinício Flatpak encerrou prematuramente (código: ${code}, sinal: ${signal})`));
+            }
         });
+        setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 200);
+        await relancado.finally(relaunch.dispose);
     } else {
         if (!existsSync(process.execPath)) {
             throw new Error(`Executável do cliente Discord ausente ou inacessível: ${process.execPath}`);
