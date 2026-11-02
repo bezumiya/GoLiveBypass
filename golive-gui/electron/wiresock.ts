@@ -741,11 +741,14 @@ const WIRESOCK_EXECUTABLE_NAMES = ["wiresock-client.exe"] as const;
  * package. This deliberately does not search the whole disk.
  */
 export function wireSockSearchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  // O caminho fixo so cobre um ambiente sem as variaveis de Program Files; quem as passa
+  // (mesmo vazias) decide as raizes.
+  const semVariaveis = !("ProgramW6432" in env || "ProgramFiles" in env || "ProgramFiles(x86)" in env);
   const programFiles = [
     env.ProgramW6432,
     env.ProgramFiles,
     env["ProgramFiles(x86)"],
-    "C:\\Program Files",
+    semVariaveis ? "C:\\Program Files" : undefined,
   ].filter((dir): dir is string => Boolean(dir));
   const roots = new Set<string>();
   for (const dir of programFiles) {

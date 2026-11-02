@@ -429,4 +429,10 @@ describe("WireSock no Windows", () => {
     expect(roots).not.toContain("C:\\Arbitrary\\attacker-bin");
     expect(roots.some((root) => root.includes("Windows\\System32"))).toBe(false);
   });
+
+  it("so usa o C:\\Program Files fixo quando o ambiente nao traz as variaveis", () => {
+    const fixo = path.join("C:\\Program Files", "WireSock Secure Connect");
+    expect(wireSockSearchRoots({})).toContain(fixo);
+    expect(wireSockSearchRoots({ ProgramFiles: "", ProgramW6432: "", "ProgramFiles(x86)": "" })).not.toContain(fixo);
+  });
 });
