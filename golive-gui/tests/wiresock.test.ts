@@ -273,6 +273,16 @@ describe("WireSock no Windows", () => {
     const fn = src.slice(src.indexOf("function windowsAllowedAppPaths"), src.indexOf("function stopWindowsRouteWatchdog"));
     expect(fn).toContain("path.dirname(path.resolve(install.exePath))");
     expect(fn).not.toContain("proton.findProtonConfgenExe()");
+    // Nome sem barra o WireSock casa por trecho do nome do processo: "Update.exe" solto
+    // poria no tunel o Update.exe de Slack/Teams, MicrosoftEdgeUpdate.exe, GoogleUpdate.exe.
+    expect(fn).toContain("windowsSquirrelUpdaterPath(path.resolve(install.exePath))");
+    expect(fn).not.toContain('apps.add("Update.exe")');
+  });
+
+  it("fallback sem caminhos descobertos nao poe atualizadores de outros apps no tunel", () => {
+    const apps = formatAllowedApps([]).split(", ");
+    expect(apps).toContain("Discord");
+    expect(apps.some((app) => !/[\\/]/.test(app) && /update/i.test(app))).toBe(false);
   });
 
   it("emite a extensao AllowedApps com o prefixo aceito pelo SDK 3.x", () => {
