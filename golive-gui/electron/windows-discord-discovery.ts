@@ -761,6 +761,13 @@ export function validateWindowsProcessExecutable(
   return fsSeam.exists(path.win32.join(path.win32.dirname(normalized), "resources")) ? normalized : null;
 }
 
+/** Update.exe (Squirrel) da instalacao: na raiz, acima de app-<versao>, ou ao lado do iniciador. */
+export function windowsSquirrelUpdaterPath(exePath: string): string {
+  const dir = path.win32.dirname(exePath);
+  const raiz = /^app-/i.test(path.win32.basename(dir)) ? path.win32.dirname(dir) : dir;
+  return path.win32.join(raiz, "Update.exe");
+}
+
 export function makeWindowsDiscoveryCandidate(
   source: DiscoverySource,
   flavour: WindowsDiscoveryFlavour,

@@ -273,6 +273,16 @@ describe("WireSock no Windows", () => {
     const fn = src.slice(src.indexOf("function windowsAllowedAppPaths"), src.indexOf("function stopWindowsRouteWatchdog"));
     expect(fn).toContain("path.dirname(path.resolve(install.exePath))");
     expect(fn).not.toContain("proton.findProtonConfgenExe()");
+    // Nome sem barra o WireSock casa por trecho do nome do processo: "Update.exe" solto
+    // poria no tunel o Update.exe de Slack/Teams, MicrosoftEdgeUpdate.exe, GoogleUpdate.exe.
+    expect(fn).toContain("windowsSquirrelUpdaterPath(path.resolve(install.exePath))");
+    expect(fn).not.toContain('apps.add("Update.exe")');
+  });
+
+  it("fallback sem caminhos descobertos nao poe atualizadores de outros apps no tunel", () => {
+    const apps = formatAllowedApps([]).split(", ");
+    expect(apps).toContain("Discord");
+    expect(apps.some((app) => !/[\\/]/.test(app) && /update/i.test(app))).toBe(false);
   });
 
   it("emite a extensao AllowedApps com o prefixo aceito pelo SDK 3.x", () => {
@@ -428,5 +438,11 @@ describe("WireSock no Windows", () => {
     expect(roots).toContain(path.join("C:\\Users\\teste\\AppData\\Local", "Microsoft", "WinGet", "Packages"));
     expect(roots).not.toContain("C:\\Arbitrary\\attacker-bin");
     expect(roots.some((root) => root.includes("Windows\\System32"))).toBe(false);
+  });
+
+  it("so usa o C:\\Program Files fixo quando o ambiente nao traz as variaveis", () => {
+    const fixo = path.join("C:\\Program Files", "WireSock Secure Connect");
+    expect(wireSockSearchRoots({})).toContain(fixo);
+    expect(wireSockSearchRoots({ ProgramFiles: "", ProgramW6432: "", "ProgramFiles(x86)": "" })).not.toContain(fixo);
   });
 });
