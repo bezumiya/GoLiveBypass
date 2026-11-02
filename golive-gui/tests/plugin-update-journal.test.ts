@@ -37,6 +37,7 @@ const checkout = path.join(raiz, "checkout");
 const pluginDir = path.join(checkout, "src", "userplugins", "goLiveBypass");
 const journalPath = path.join(dataDir, "plugin-update-pending.json");
 const DIGEST_ESPERADO = "0".repeat(64);
+const envAntes = { XDG_DATA_HOME: process.env.XDG_DATA_HOME, LOCALAPPDATA: process.env.LOCALAPPDATA, APPDATA: process.env.APPDATA };
 
 let status: typeof getPluginUpdateStatus;
 
@@ -62,7 +63,11 @@ function marcadoresQuarentenados(motivo: string): string[] {
 beforeAll(async () => {
   // Import estático não serve aqui: `VPN_DATA_DIR` e a origem do checkout são resolvidos no
   // carregamento do módulo, e o vitest iça os imports estáticos antes de qualquer setup.
+  // XDG_DATA_HOME so vale no Linux; no Windows o plugin usa LOCALAPPDATA/APPDATA, e sem
+  // apontar os dois para a raiz o teste lia e escrevia no %LOCALAPPDATA% real.
   process.env.XDG_DATA_HOME = path.join(raiz, "data");
+  process.env.LOCALAPPDATA = path.join(raiz, "data");
+  process.env.APPDATA = path.join(raiz, "data");
   delete process.env.VENCORD_SOURCE_DIR;
   delete process.env.VENCORD_SRC;
   delete process.env.EQUICORD_SRC;
@@ -70,6 +75,10 @@ beforeAll(async () => {
 
   fs.mkdirSync(pluginDir, { recursive: true });
   fs.cpSync(path.resolve(process.cwd(), "..", "goLiveBypass"), pluginDir, { recursive: true });
+  // No Windows a árvore válida exige o helper compilado, que não está nas fontes do repo.
+  const helperWindows = path.join(pluginDir, "bin", "win32-x64", "proton-confgen.exe");
+  fs.mkdirSync(path.dirname(helperWindows), { recursive: true });
+  fs.writeFileSync(helperWindows, "helper de teste");
   fs.writeFileSync(path.join(checkout, "package.json"), JSON.stringify({ name: "checkout-de-teste", private: true }));
 
   const native = await import("../../goLiveBypass/native");
@@ -78,6 +87,10 @@ beforeAll(async () => {
 
 afterAll(() => {
   delete process.env.EQUICORD_SOURCE_DIR;
+  for (const [k, v] of Object.entries(envAntes)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   fs.rmSync(raiz, { recursive: true, force: true });
 });
 
