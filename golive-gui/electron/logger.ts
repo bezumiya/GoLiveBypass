@@ -23,7 +23,9 @@ const RING_TAIL_BYTES = 128 * 1024; // teto do getRecent() (o total do report e 
 
 interface Entrada {
   linha: string;
+  corpo: string; // linha sem o carimbo [HH:MM:SS]: e o que decide se repetiu
   n: number; // repeticoes consecutivas colapsadas (rajada de erro nao come o buffer)
+  ultimaHora: string;
 }
 
 let arquivo = "";
@@ -67,13 +69,20 @@ function gravar(linha: string) {
   }
 }
 
+// Toda linha comeca com "[HH:MM:SS] " (stamp()).
+const horaDa = (linha: string) => linha.slice(1, 9);
+
 function empilhar(linha: string) {
+  // Comparar a linha inteira so colapsava repeticoes no mesmo segundo.
+  const hora = horaDa(linha);
+  const corpo = linha.slice(11);
   const ultima = ring[ring.length - 1];
-  if (ultima && ultima.linha === linha) {
+  if (ultima && ultima.corpo === corpo) {
     ultima.n += 1;
+    ultima.ultimaHora = hora;
     return;
   }
-  ring.push({ linha, n: 1 });
+  ring.push({ linha, corpo, n: 1, ultimaHora: hora });
   if (ring.length > RING_MAX) ring.shift();
 }
 
@@ -156,7 +165,8 @@ export function getRecent(): string {
   let bytes = 0;
   for (let i = ring.length - 1; i >= 0; i--) {
     const e = ring[i];
-    const texto = e.n > 1 ? `${e.linha} (x${e.n})` : e.linha;
+    const ate = e.ultimaHora !== horaDa(e.linha) ? `, ate ${e.ultimaHora}` : "";
+    const texto = e.n > 1 ? `${e.linha} (x${e.n}${ate})` : e.linha;
     const custo = Buffer.byteLength(texto, "utf8");
     const sep = escolhidas.length ? 1 : 0; // "\n" entre linhas
     // Um teste de regressao cobre este teto: nem a primeira linha pode estoura-lo.
@@ -166,6 +176,11 @@ export function getRecent(): string {
   }
   escolhidas.reverse();
   return escolhidas.join("\n");
+}
+
+// Linha do getRecent() como foi gravada no arquivo (sem o sufixo de repeticao).
+export function semRepeticao(linha: string): string {
+  return linha.replace(/ \(x\d+(?:, ate \d{2}:\d{2}:\d{2})?\)$/, "");
 }
 
 // Uso exclusivo de testes: o estado e de modulo, cada teste recomeca do zero.

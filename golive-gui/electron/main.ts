@@ -38,7 +38,7 @@ import * as proton from "./proton";
 import { ProtonOptimizationCoordinator } from "./proton-optimization";
 import { restoreBypassOnStartup, type StartupOptimizationResult } from "./startup-restore";
 import { findWindowsDiscordInstall } from "./windows-discord-install";
-import { assembleWindowsDiscoverySnapshotFromRaw, collectWindowsDiscoveryPowerShell, collectWindowsDiscoveryPowerShellAsync, collectWindowsDiscoverySnapshot, createWindowsDiscoveryCache, failedWindowsDiscoveryRawFor, rootsForEnvironment, toPublicWindowsDiscoveryInstall, type WindowsDiscoveryEnvironment, type WindowsDiscoveryRaw, type WindowsDiscoverySnapshot, type WindowsDiscoverySnapshotCollectors } from "./windows-discord-discovery";
+import { assembleWindowsDiscoverySnapshotFromRaw, collectWindowsDiscoveryPowerShell, collectWindowsDiscoveryPowerShellAsync, collectWindowsDiscoverySnapshot, createWindowsDiscoveryCache, failedWindowsDiscoveryRawFor, rootsForEnvironment, toPublicWindowsDiscoveryInstall, windowsSquirrelUpdaterPath, type WindowsDiscoveryEnvironment, type WindowsDiscoveryRaw, type WindowsDiscoverySnapshot, type WindowsDiscoverySnapshotCollectors } from "./windows-discord-discovery";
 import { shouldAskRoutePreference } from "./route-preference-prompt";
 import { argsExperimentaisDoDiscord } from "./discord-args";
 import { settlesWithin, trafficMonitorPlan, runningImageNames, waitForProcessRunning, waitForProcessStopped, whenProcessStops, type ProcessProbeState } from "./wait-condition";
@@ -1247,8 +1247,9 @@ function windowsAllowedAppPaths(installs: DiscordInstall[]): string[] {
     // contidos nele. A prova co-localizada abaixo valida exatamente esta regra.
     apps.add(path.dirname(path.resolve(install.exePath)));
     apps.add(path.basename(install.exePath));
-    apps.add(path.join(path.dirname(path.dirname(install.exePath)), "Update.exe"));
-    apps.add("Update.exe");
+    // So o Update.exe desta instalacao: nome sem barra o WireSock casa por trecho do nome
+    // do processo, e "Update.exe" solto pegava o Squirrel de outros apps e *Update.exe.
+    apps.add(windowsSquirrelUpdaterPath(path.resolve(install.exePath)));
   }
   // Controle da conta Proton usa a rede do host. Somente o probe copiado
   // para o diretorio do Discord acompanha a regra de tunel desse aplicativo.

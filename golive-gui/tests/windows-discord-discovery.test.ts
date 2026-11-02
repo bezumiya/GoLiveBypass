@@ -23,6 +23,7 @@ import {
   toPublicWindowsDiscoveryInstall,
   validateWindowsExecutable,
   validateWindowsProcessExecutable,
+  windowsSquirrelUpdaterPath,
   type WindowsDiscoveryCandidate,
   type WindowsDiscoveryEnvironment,
   type WindowsDiscoveryFileSystem,
@@ -894,5 +895,16 @@ describe("discovery Windows puro", () => {
     fail = false;
     nowMs = 8_000;
     await expect(cache.readAsync({ allowStale: true })).resolves.toMatchObject({ stale: false });
+  });
+});
+
+describe("windowsSquirrelUpdaterPath", () => {
+  it("acha o Update.exe na raiz da instalacao, acima de app-<versao> ou ao lado do iniciador", () => {
+    const raiz = "C:\\Users\\x\\AppData\\Local\\Discord";
+    expect(windowsSquirrelUpdaterPath(`${raiz}\\app-1.0.9265\\Discord.exe`)).toBe(`${raiz}\\Update.exe`);
+    // Iniciador de primeiro nivel (Local\Discord\Discord.exe): o "avo" seria Local, e
+    // Local\Update.exe nao e do Discord.
+    expect(windowsSquirrelUpdaterPath(`${raiz}\\Discord.exe`)).toBe(`${raiz}\\Update.exe`);
+    expect(windowsSquirrelUpdaterPath(`${raiz}\\APP-1.0.1\\Discord.exe`)).toBe(`${raiz}\\Update.exe`);
   });
 });

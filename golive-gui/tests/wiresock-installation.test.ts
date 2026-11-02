@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, readWireSockResult, wireSockExecError, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
+import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, readWireSockResult, sanitizeWireGuardConfig, wireSockExecError, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
 import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockNetworkRestoreScript, wireSockServiceScript } from "../electron/wiresock-service";
 
 const sourcePath = path.resolve(process.cwd(), "electron/wiresock.ts");
@@ -239,7 +239,7 @@ describe("ativação extraída do fluxo real", () => {
         elevatedPowerShellFileArgs, readWireSockResult, classifyWireSockDirectResult, detalheErro,
         esperarProcessoWireSock, mayUseServiceCompatibility, classifyWireSockActivationFailure,
         stopWireSockService, WIRESOCK_SERVICE_NAMES, isServiceRunning, limparDnsDoAdaptadorWireSock,
-        formatAllowedApps, execFileWithWindow, setTunnelSupervisor, limparSinalDoSupervisor } = ctx;
+        formatAllowedApps, sanitizeWireGuardConfig, execFileWithWindow, setTunnelSupervisor, limparSinalDoSupervisor } = ctx;
       ${bodyOf("applyWireSockProfile")}
     }`)();
   }
@@ -262,7 +262,7 @@ describe("ativação extraída do fluxo real", () => {
       ensureWireSockInstalled: async () => "C:\\WireSock\\wiresock-client.exe",
       wireSockDirectScript, wireSockServiceScript, elevatedPowerShellFileArgs,
       readWireSockResult, classifyWireSockDirectResult, detalheErro, mayUseServiceCompatibility,
-      classifyWireSockActivationFailure, formatAllowedApps,
+      classifyWireSockActivationFailure, formatAllowedApps, sanitizeWireGuardConfig,
       esperarProcessoWireSock: async () => false,
       stopWireSockService: async () => ({ stopped: true, attempts: 1, resetNetworkLock: true, dnsCleared: true, dnsFlushed: true, servicesResidual: [], processResidual: false, residual: [] }),
       WIRESOCK_SERVICE_NAMES: ["wiresock-client-service", "wiresock-pro-client-service"],

@@ -51,13 +51,15 @@ export function runScript(args: string[], onChunk?: (chunk: string) => void, ext
       return;
     }
 
-    child.stdout.on('data', (d: Buffer) => {
-      const s = d.toString();
+    // Com encoding no stream, um caractere UTF-8 dividido entre duas leituras do pipe
+    // (caminho com acento, mensagem em portugues) chega inteiro em vez de virar U+FFFD.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (s: string) => {
       stdout += s;
       onChunk?.(s);
     });
-    child.stderr.on('data', (d: Buffer) => {
-      const s = d.toString();
+    child.stderr.on('data', (s: string) => {
       stderr += s;
       onChunk?.(s);
     });
