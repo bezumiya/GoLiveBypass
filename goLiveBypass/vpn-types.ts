@@ -187,13 +187,16 @@ export function sanitizeWireGuardConfig(raw: string, allowedApps: string): strin
     if (!raw.trim()) throw new Error("A configuração WireGuard está vazia.");
     if (!allowedApps.trim()) throw new Error("AllowedApps não pode ficar vazio.");
 
-    const lines = raw.split(/\r?\n/).map(line => {
-        if (/^\s*DNS\s*=/i.test(line)) return "";
-        if (/^\s*(?:#@ws:)?AllowedApps\s*=/i.test(line)) return `#@ws:AllowedApps = ${allowedApps}`;
-        return line;
-    });
-    if (!lines.some(line => /^\s*#@ws:AllowedApps\s*=/i.test(line)))
-        lines.push(`#@ws:AllowedApps = ${allowedApps}`);
+    const lines = raw.split(/\r?\n/)
+        .filter(line => !/^\s*(?:#@ws:)?AllowedApps\s*=/i.test(line))
+        .map(line => /^\s*DNS\s*=/i.test(line) ? "" : line);
+    // O WireSock só lê AllowedApps dentro de [Peer]; em [Interface] a linha é ignorada e o
+    // túnel vale para o computador inteiro. Vai no fim da primeira seção [Peer].
+    const peer = lines.findIndex(line => /^\s*\[Peer\]\s*$/i.test(line));
+    let end = peer < 0 ? -1 : lines.findIndex((line, i) => i > peer && /^\s*\[/.test(line));
+    if (end < 0) end = lines.length;
+    while (end - 1 > peer && !lines[end - 1].trim()) end--;
+    lines.splice(end, 0, `#@ws:AllowedApps = ${allowedApps}`);
     return lines.join("\r\n");
 }
 

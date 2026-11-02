@@ -741,11 +741,14 @@ const WIRESOCK_EXECUTABLE_NAMES = ["wiresock-client.exe"] as const;
  * package. This deliberately does not search the whole disk.
  */
 export function wireSockSearchRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  // O caminho fixo so cobre um ambiente sem as variaveis de Program Files; quem as passa
+  // (mesmo vazias) decide as raizes.
+  const semVariaveis = !("ProgramW6432" in env || "ProgramFiles" in env || "ProgramFiles(x86)" in env);
   const programFiles = [
     env.ProgramW6432,
     env.ProgramFiles,
     env["ProgramFiles(x86)"],
-    "C:\\Program Files",
+    semVariaveis ? "C:\\Program Files" : undefined,
   ].filter((dir): dir is string => Boolean(dir));
   const roots = new Set<string>();
   for (const dir of programFiles) {
@@ -1102,8 +1105,27 @@ export function formatAllowedApps(paths: string[]): string {
     if (!unique.has(key)) unique.set(key, value);
   }
   const values = [...unique.values()];
-  if (values.length === 0) return "Discord, Discord.exe, Update.exe";
+  // Sem caminhos, so nomes do Discord: "Update.exe" casaria com atualizadores de outros apps.
+  if (values.length === 0) return "Discord, Discord.exe";
   return values.join(", ");
+}
+
+/** Perfil que o WireSock recebe: sem DNS e com um único AllowedApps, dentro de [Peer]. */
+export function sanitizeWireGuardConfig(raw: string, allowedApps: string): string {
+  const lines = raw.split(/\r?\n/)
+    .filter((l) => !/^\s*(?:#@ws:)?AllowedApps\s*=/i.test(l))
+    // O DNS do perfil WireGuard pode ser aplicado pelo WireSock no escopo do
+    // host. O bypass e split-tunnel: o DNS do Windows deve continuar sendo
+    // resolvido pelo adaptador do usuario, nao por 10.2.0.1.
+    .map((l) => (/^\s*DNS\s*=/i.test(l) ? "" : l));
+  // O WireSock so le AllowedApps dentro de [Peer]; em [Interface] a linha e ignorada e o
+  // tunel vale para o computador inteiro. Vai no fim da primeira secao [Peer].
+  const peer = lines.findIndex((l) => /^\s*\[Peer\]\s*$/i.test(l));
+  let end = peer < 0 ? -1 : lines.findIndex((l, i) => i > peer && /^\s*\[/.test(l));
+  if (end < 0) end = lines.length;
+  while (end - 1 > peer && !lines[end - 1].trim()) end--;
+  lines.splice(end, 0, `#@ws:AllowedApps = ${allowedApps}`);
+  return lines.join("\r\n");
 }
 
 /**
@@ -1132,25 +1154,7 @@ async function applyWireSockProfile(installDir: string, rawConf: string, allowed
   fs.mkdirSync(installDir, { recursive: true });
 
   const allowedApps = formatAllowedApps(allowedAppPaths);
-  const rawLines = fs.readFileSync(rawConf, "utf8").split(/\r?\n/);
-  let hasAllowedApps = false;
-  const newLines = rawLines.map((l) => {
-    if (/^\s*DNS\s*=/i.test(l)) {
-      // O DNS do perfil WireGuard pode ser aplicado pelo WireSock no escopo do
-      // host. O bypass e split-tunnel: o DNS do Windows deve continuar sendo
-      // resolvido pelo adaptador do usuario, nao por 10.2.0.1.
-      return "";
-    }
-    if (/^\s*(?:#@ws:)?AllowedApps\s*=/i.test(l)) {
-      hasAllowedApps = true;
-      return `#@ws:AllowedApps = ${allowedApps}`;
-    }
-    return l;
-  });
-  if (!hasAllowedApps) {
-    newLines.push(`#@ws:AllowedApps = ${allowedApps}`);
-  }
-  fs.writeFileSync(targetConf, newLines.join("\r\n"), "utf8");
+  fs.writeFileSync(targetConf, sanitizeWireGuardConfig(fs.readFileSync(rawConf, "utf8"), allowedApps), "utf8");
   const profileBytes = fs.readFileSync(targetConf);
   const profileContext = {
     config_file: path.basename(targetConf),

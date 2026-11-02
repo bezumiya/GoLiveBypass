@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -37,6 +37,28 @@ describe("logger", () => {
     const linhas = logger.getRecent().split("\n").filter(Boolean);
     expect(linhas).toHaveLength(1);
     expect(linhas[0]).toContain("(x5)");
+  });
+
+  it("dedupe: rajada que dura varios segundos tambem colapsa, com a hora da ultima", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 9, 28, 12, 0, 0));
+      logger.info("app", "contexto.util");
+      for (let i = 0; i < 120; i++) {
+        logger.error("net", "socks.falha", { motivo: "handshake" });
+        vi.advanceTimersByTime(1000);
+      }
+      logger.info("app", "depois");
+
+      const linhas = logger.getRecent().split("\n").filter(Boolean);
+      expect(linhas).toEqual([
+        "[12:00:00] [info][app] contexto.util",
+        "[12:00:00] [error][net] socks.falha | motivo=handshake (x120, ate 12:01:59)",
+        "[12:02:00] [info][app] depois",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ring buffer respeita teto de bytes mantendo o fim", () => {
