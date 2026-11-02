@@ -188,6 +188,7 @@ declare global {
         freeOnly: boolean;
         autoPing: boolean;
         autoFailover: boolean;
+        avoidFreeMexico: boolean;
         routePreference?: 'auto' | 'manual';
         /** Perfil Proton ja gerado no disco (username + wireguard.conf). */
         profileReady?: boolean;
@@ -292,6 +293,9 @@ const startupToggle = document.getElementById('startupToggle') as HTMLInputEleme
 const autoUpdateToggle = document.getElementById('autoUpdateToggle') as HTMLInputElement | null;
 const compactWindowToggle = document.getElementById('compactWindowToggle') as HTMLInputElement | null;
 const autoFailoverToggle = document.getElementById('autoFailoverToggle') as HTMLInputElement | null;
+const avoidFreeMexicoRow = document.getElementById('avoidFreeMexicoRow') as HTMLElement | null;
+const avoidFreeMexicoToggle = document.getElementById('avoidFreeMexicoToggle') as HTMLInputElement | null;
+if (avoidFreeMexicoRow) avoidFreeMexicoRow.hidden = platform !== 'win32';
 const updateChannelRow = document.getElementById('updateChannelRow') as HTMLElement | null;
 const updateChannelToggle = document.getElementById('updateChannelToggle') as HTMLInputElement | null;
 const settingsBtn = document.getElementById('settingsBtn') as HTMLButtonElement | null;
@@ -798,6 +802,7 @@ async function refreshAutoFailover() {
   try {
     const settings = await window.api.getProtonSettings();
     if (autoFailoverToggle) autoFailoverToggle.checked = settings.autoFailover !== false;
+    if (avoidFreeMexicoToggle) avoidFreeMexicoToggle.checked = settings.avoidFreeMexico !== false;
   } catch (err) {
     console.error(err);
   }
@@ -1571,6 +1576,7 @@ async function refreshProtonState(forcePlan = false) {
       ? { server: rememberedServer, pingMs: Number.isFinite(rememberedPing) && rememberedPing > 0 ? rememberedPing : undefined }
       : null;
     if (autoFailoverToggle) autoFailoverToggle.checked = s.autoFailover !== false;
+    if (avoidFreeMexicoToggle) avoidFreeMexicoToggle.checked = s.avoidFreeMexico !== false;
     if (protonCountrySelect) renderProtonMeasuredRouteOptions();
     protonProfileReady = s.profileReady === true;
 
@@ -2295,6 +2301,15 @@ autoFailoverToggle?.addEventListener('change', async () => {
     await window.api.setProtonSettings({ autoFailover: autoFailoverToggle.checked });
   } catch {
     autoFailoverToggle.checked = !autoFailoverToggle.checked;
+  }
+});
+
+avoidFreeMexicoToggle?.addEventListener('change', async () => {
+  if (!avoidFreeMexicoToggle) return;
+  try {
+    await window.api.setProtonSettings({ avoidFreeMexico: avoidFreeMexicoToggle.checked });
+  } catch {
+    avoidFreeMexicoToggle.checked = !avoidFreeMexicoToggle.checked;
   }
 });
 

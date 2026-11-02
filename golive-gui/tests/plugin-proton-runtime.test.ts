@@ -55,6 +55,7 @@ vi.mock("child_process", () => ({
 }));
 
 import {
+  automaticExcludedCountries,
   classifyProtonError,
   generateManualProtonConfig,
   generateOptimalProtonConfig,
@@ -62,6 +63,17 @@ import {
   loginProton,
   type ProtonOptimizationProgress,
 } from "../../goLiveBypass/vpn-proton";
+
+describe("países fora da escolha automática do plugin", () => {
+  it("tira as rotas gratuitas do México só no Windows e sem pedido explícito", () => {
+    expect(automaticExcludedCountries({ freeOnly: true }, "win32")).toBe("BR,MX");
+    expect(automaticExcludedCountries({ country: "US,NL", freeOnly: true }, "win32")).toBe("BR,MX");
+    expect(automaticExcludedCountries({ country: "mx", freeOnly: true }, "win32")).toBe("BR");
+    expect(automaticExcludedCountries({ freeOnly: false }, "win32")).toBe("BR");
+    expect(automaticExcludedCountries({ freeOnly: true }, "linux")).toBe("BR");
+    expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: false }, "win32")).toBe("BR");
+  });
+});
 
 const PROFILE_CONTENT = "# - Name: US#8\nEndpoint = 192.0.2.8:51820\n";
 /** Texto claro da sessão: nunca pode aparecer em resultado, erro ou log. */

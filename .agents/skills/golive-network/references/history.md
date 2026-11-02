@@ -2,6 +2,8 @@
 
 Desde a revisão de 2026-09-05 solicitada pelo usuário, a prova funcional é somente diagnóstica: não bloqueia ativação nem derruba sessões.
 
+**Atualização de 2026-10-30:** a causa do sintoma foi isolada nas rotas gratuitas do México: pacotes internos fragmentados, com checksum TCP errado depois da tradução de endereço do WireSock; veja o `CHANGELOG.md`. Um teste de upload precisa de mais de 1 min de tráfego no mesmo túnel, com pausas entre as conexões, e só conexões novas são atingidas: uma medição curta passa, e um anexo enviado logo após ligar também. `pktmon start --capture --comp all` mostra o TCP já decifrado acima do WireSock.
+
 Registro histórico migrado do AGENTS.md. Consulte primeiro o código e o CHANGELOG atuais: filtros Windows, Proton e prova de rota evoluíram desde este relato.
 
 **Limite da evidência:** o upload travado foi relatado como reproduzido; saturação do endpoint compartilhado é uma hipótese, não uma causa comprovada. Um curl isolado de 5 MB não exclui MTU, diferenças de rota, IPv6 ou problemas específicos do Discord. As afirmações causais abaixo são conclusões da época, não premissas para novos diagnósticos. Não implementar mitigação de produto apenas porque foi sugerida aqui.

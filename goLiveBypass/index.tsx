@@ -2086,6 +2086,11 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Escolher primeiro servidores Proton com menor latência.",
         default: true
+    },
+    protonAvoidFreeMexico: {
+        type: OptionType.BOOLEAN,
+        description: "Evitar rotas grátis do México na escolha automática (Windows). Nelas, imagens e arquivos param de enviar cerca de 1 minuto depois de ativar.",
+        default: true
     }
 });
 

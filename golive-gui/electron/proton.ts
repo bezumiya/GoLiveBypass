@@ -8,7 +8,7 @@ import * as logger from './logger';
 import { randomUUID } from 'crypto';
 import { StringDecoder } from 'string_decoder';
 import type { RouteProbeResult } from './route-proof';
-import type { ProtonRouteMetadata } from './route-failover';
+import { automaticExcludedCountries, type ProtonRouteMetadata } from './route-failover';
 import {
   ensureProtonConfgen as ensureProtonConfgenRuntime,
   findProtonConfgenPath,
@@ -753,6 +753,7 @@ export async function generateOptimalProtonConfig(
     countries?: string;
     freeOnly?: boolean;
     autoPing?: boolean;
+    avoidFreeMexico?: boolean;
     speedTest?: boolean;
     signal?: AbortSignal;
     onProgress?: (progress: ProtonOptimizationProgress) => void;
@@ -795,7 +796,7 @@ export async function generateOptimalProtonConfig(
     '-json',
     '-ipv6',
     '-exclude-countries',
-    'BR',
+    automaticExcludedCountries(options),
   ];
 
   if (options.autoPing !== false) {
@@ -1171,6 +1172,7 @@ export async function generateProtonRoutePool(
     countries?: string;
     freeOnly?: boolean;
     autoPing?: boolean;
+    avoidFreeMexico?: boolean;
     size: number;
     excludeServers?: string[];
     signal?: AbortSignal;
@@ -1196,7 +1198,7 @@ export async function generateProtonRoutePool(
     '-no-save',
     '-json',
     '-ipv6',
-    '-exclude-countries', 'BR',
+    '-exclude-countries', automaticExcludedCountries(options),
     '-auto-ping',
   ];
   if (options.onProgress) args.push('-progress-json');
@@ -1275,9 +1277,11 @@ function finitePositive(value: unknown): value is number {
 export function canReuseMeasuredProfile(
   installDir: string,
   previous: any,
-  filter: { username: string; country?: string; freeOnly?: boolean; autoPing?: boolean },
+  filter: { username: string; country?: string; freeOnly?: boolean; autoPing?: boolean; avoidFreeMexico?: boolean },
 ): boolean {
   if (!previous || previous.measurementVersion !== MEASUREMENT_CRITERION_VERSION) return false;
+  // Um perfil medido antes da exclusão não pode manter o usuário numa rota que ela tiraria.
+  if (automaticExcludedCountries({ countries: filter.country, freeOnly: filter.freeOnly, avoidFreeMexico: filter.avoidFreeMexico }).split(',').includes(String(previous.country ?? ''))) return false;
   if (!protonIdentityMatches(String(previous.measurementUsername || ''), filter.username)) return false;
   if (String(previous.measurementCountry || '') !== String(filter.country || '')) return false;
   if (previous.measurementFreeOnly !== (filter.freeOnly !== false) || previous.measurementAutoPing !== (filter.autoPing !== false)) return false;

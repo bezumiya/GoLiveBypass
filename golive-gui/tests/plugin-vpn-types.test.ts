@@ -39,7 +39,9 @@ describe("contratos da VPN do plugin", () => {
       protonCountry: "US,NL",
       protonFreeOnly: true,
       protonAutoPing: true,
+      protonAvoidFreeMexico: true,
     });
+    expect(normalizeVpnSettings({ protonAvoidFreeMexico: false }).protonAvoidFreeMexico).toBe(false);
   });
 
   it("mantém AllowedApps estreito e elimina DNS para o perfil WireSock", () => {

@@ -241,6 +241,7 @@ interface ProtonProfileSelection {
     country: string;
     freeOnly: boolean;
     autoPing: boolean;
+    avoidFreeMexico: boolean;
 }
 
 function normalizeCountry(value: string): string {
@@ -1067,6 +1068,7 @@ export class PluginVpnController {
                     country: normalizeCountry(options.country ?? settings.protonCountry),
                     freeOnly: options.freeOnly ?? settings.protonFreeOnly,
                     autoPing: options.autoPing ?? settings.protonAutoPing,
+                    avoidFreeMexico: settings.protonAvoidFreeMexico,
                 };
 
                 const status = this.getStatus();
@@ -1103,6 +1105,7 @@ export class PluginVpnController {
                         country: selection.country,
                         freeOnly: selection.freeOnly,
                         autoPing: selection.autoPing,
+                        avoidFreeMexico: selection.avoidFreeMexico,
                         speedTest: options.speedTest === true,
                         signal: operationController.signal,
                         onProgress: progress => options.onProgress?.({ ...progress, requestId: id }),
@@ -1839,12 +1842,13 @@ export class PluginVpnController {
             if (settings.mode === "proton") {
                 if (!settings.protonUsername) throw new Error("Faça login com sua conta Proton antes de ativar.");
                 const selection = this.protonProfileSelection(settings);
-                if (!fs.existsSync(this.profilePath) || !this.protonProfileMatches(settings.protonUsername, selection)) {
+                if (!fs.existsSync(this.profilePath) || !this.protonProfileMatches(settings.protonUsername, selection) || this.protonProfileOnExcludedRoute(selection)) {
                     const generated = await proton.generateOptimalProtonConfig(this.dataDir, {
                         username: settings.protonUsername,
                         country: selection.country,
                         freeOnly: selection.freeOnly,
                         autoPing: selection.autoPing,
+                        avoidFreeMexico: selection.avoidFreeMexico,
                         log: this.options.log,
                     });
                     if (!generated.success) throw new Error(generated.error || "Não foi possível gerar a configuração Proton.");
@@ -2998,6 +3002,7 @@ export class PluginVpnController {
             country: normalizeCountry(settings.protonCountry),
             freeOnly: settings.protonFreeOnly,
             autoPing: settings.protonAutoPing,
+            avoidFreeMexico: settings.protonAvoidFreeMexico,
         };
     }
 
@@ -3017,6 +3022,19 @@ export class PluginVpnController {
                 && value.country === selection.country
                 && value.freeOnly === selection.freeOnly
                 && value.autoPing === selection.autoPing;
+        } catch {
+            return false;
+        }
+    }
+
+    // Um perfil automático salvo antes da exclusão não pode manter o usuário numa rota excluída.
+    // A rota que ele escolheu à mão fica como está.
+    private protonProfileOnExcludedRoute(selection: ProtonProfileSelection): boolean {
+        const source = this.readActiveRoute()?.source;
+        if (source && source !== "auto") return false;
+        if (!proton.automaticExcludedCountries(selection).split(",").includes("MX")) return false;
+        try {
+            return /^# - Name:\s*MX-FREE#/m.test(fs.readFileSync(this.profilePath, "utf8"));
         } catch {
             return false;
         }

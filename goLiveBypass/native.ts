@@ -401,6 +401,7 @@ function controllerSettings(): PluginSettingsRecord {
         protonCountry: typeof stored.protonCountry === "string" ? stored.protonCountry : "",
         protonFreeOnly: stored.protonFreeOnly !== false,
         protonAutoPing: stored.protonAutoPing !== false,
+        protonAvoidFreeMexico: stored.protonAvoidFreeMexico !== false,
     };
 }
 
@@ -1279,6 +1280,7 @@ export function getProtonSettings(_: IpcMainInvokeEvent) {
         protonCountry: settings.protonCountry,
         protonFreeOnly: settings.protonFreeOnly,
         protonAutoPing: settings.protonAutoPing,
+        protonAvoidFreeMexico: settings.protonAvoidFreeMexico,
         sessionUsername: proton.savedSessionUsername(VPN_DATA_DIR),
     };
 }

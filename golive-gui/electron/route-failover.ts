@@ -135,6 +135,21 @@ export interface ProtonRoutePoolManifest {
   disabled?: boolean;
 }
 
+// Países fora da escolha automática. Cerca de 1 min depois de ligado, o túnel passa a limitar o
+// pacote interno a 1000 B. Nas rotas gratuitas do México isso chega como IP fragmentado, e o
+// WireSock grava o checksum TCP calculado só sobre o primeiro fragmento: o Windows descarta o
+// pacote e o anexo "carrega e some" (#373, #400). A preferência protonAvoidFreeMexico desliga a
+// exclusão. Só o que foi medido: rota paga e Linux ficam como estão, e pedir México explicitamente
+// continua valendo.
+export function automaticExcludedCountries(
+  options: { countries?: string; freeOnly?: boolean; avoidFreeMexico?: boolean },
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform !== "win32" || options.freeOnly === false || options.avoidFreeMexico === false) return "BR";
+  const requested = (options.countries ?? "").split(",").map((item) => item.trim().toUpperCase());
+  return requested.includes("MX") ? "BR" : "BR,MX";
+}
+
 export const ROUTE_POOL_VERSION = 1 as const;
 export const ROUTE_POOL_TOTAL = 3;
 export const ROUTE_POOL_RESERVE_COUNT = ROUTE_POOL_TOTAL - 1;

@@ -119,6 +119,21 @@ export interface ConfgenResult {
     json?: Record<string, unknown>;
 }
 
+// Países fora da escolha automática. Cerca de 1 min depois de ligado, o túnel passa a limitar o
+// pacote interno a 1000 B. Nas rotas gratuitas do México isso chega como IP fragmentado, e o
+// WireSock grava o checksum TCP calculado só sobre o primeiro fragmento: o Windows descarta o
+// pacote e o anexo "carrega e some" (#373, #400). A preferência protonAvoidFreeMexico desliga a
+// exclusão. Só o que foi medido: rota paga e Linux ficam como estão, e pedir México explicitamente
+// continua valendo.
+export function automaticExcludedCountries(
+    options: { country?: string; freeOnly?: boolean; avoidFreeMexico?: boolean; },
+    platform: NodeJS.Platform = process.platform,
+): string {
+    if (platform !== "win32" || options.freeOnly === false || options.avoidFreeMexico === false) return "BR";
+    const requested = (options.country ?? "").split(",").map(item => item.trim().toUpperCase());
+    return requested.includes("MX") ? "BR" : "BR,MX";
+}
+
 export const MEASUREMENT_CRITERION_VERSION = 6;
 const MAX_STDOUT_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 512 * 1024;
@@ -1338,6 +1353,7 @@ export async function generateOptimalProtonConfig(
         country?: string;
         freeOnly?: boolean;
         autoPing?: boolean;
+        avoidFreeMexico?: boolean;
         speedTest?: boolean;
         signal?: AbortSignal;
         onProgress?: (progress: ProtonOptimizationProgress) => void;
@@ -1362,7 +1378,7 @@ export async function generateOptimalProtonConfig(
     const runGeneration = async (sessionFileToUse: string, commitIfUpdated?: () => void): Promise<ProtonOptimizationResult> => {
         const output = path.join(dataDir, "wireguard.conf");
         const staging = path.join(dataDir, `.wireguard.conf.${randomUUID()}.tmp`);
-        const args = ["-username", requestedUsername, "-session-file", sessionFileToUse, "-output", staging, "-json", "-ipv6", "-exclude-countries", "BR"];
+        const args = ["-username", requestedUsername, "-session-file", sessionFileToUse, "-output", staging, "-json", "-ipv6", "-exclude-countries", automaticExcludedCountries(options)];
         if (options.autoPing !== false) args.push("-auto-ping");
         if (options.speedTest) {
             // A prova HTTPS do Discord é diagnóstica: não pode reprovar uma rota que já formou o túnel e mediu tráfego.
