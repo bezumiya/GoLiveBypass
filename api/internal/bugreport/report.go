@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -13,7 +14,13 @@ const (
 	// aqui (meta + descricao + log) precisa caber — corta-se o LOG por ultimo,
 	// preservando meta e descricao que sao o diagnostico essencial.
 	MaxIssueBodyLen = 64 * 1024
-	logFence        = "````"
+	// Meta e uma tabela pequena de diagnostico (os clientes mandam ~35 campos curtos,
+	// 1-2 KB). Sem teto, meta + descricao passavam de MaxIssueBodyLen e o GitHub
+	// recusava a issue. 8 KB, mesmo com o escape de "|" dobrando, deixa folga.
+	MaxMetaKeys  = 64
+	MaxMetaBytes = 8 * 1024
+	// Cerca minima do log; cresce quando o log traz uma sequencia de crases maior.
+	logFence = "````"
 )
 
 type Report struct {
@@ -28,11 +35,23 @@ func (r *Report) Validate(maxLogBytes int64) error {
 	switch {
 	case r.Title == "":
 		return fmt.Errorf("title e obrigatorio")
-	case len(r.Title) > MaxTitleLen:
+	// Os clientes limitam em caracteres (maxlength/slice do JS); len() contaria
+	// bytes e recusaria um titulo acentuado que o formulario deixou passar.
+	case utf8.RuneCountInString(r.Title) > MaxTitleLen:
 		return fmt.Errorf("title deve ter no maximo %d caracteres", MaxTitleLen)
 	}
-	if len(r.Description) > MaxDescriptionLen {
+	if utf8.RuneCountInString(r.Description) > MaxDescriptionLen {
 		return fmt.Errorf("description deve ter no maximo %d caracteres", MaxDescriptionLen)
+	}
+	if len(r.Meta) > MaxMetaKeys {
+		return fmt.Errorf("meta deve ter no maximo %d campos", MaxMetaKeys)
+	}
+	metaBytes := 0
+	for k, v := range r.Meta {
+		metaBytes += len(k) + len(v)
+	}
+	if metaBytes > MaxMetaBytes {
+		return fmt.Errorf("meta deve ter no maximo %d bytes", MaxMetaBytes)
 	}
 	if int64(len(r.Log)) > maxLogBytes {
 		r.Log = r.Log[:maxLogBytes]
@@ -64,13 +83,19 @@ func BuildIssueBody(r Report) string {
 	}
 
 	if l := r.Log; l != "" {
-		log := strings.ReplaceAll(l, logFence, "```")
+		log := l
+		// Uma cerca so fecha com uma linha de crases do mesmo tamanho ou maior; uma
+		// cerca mais longa que qualquer sequencia do log nunca fecha no meio dele.
+		fence := logFence
+		if n := maiorSequenciaDeCrases(log); n >= len(fence) {
+			fence = strings.Repeat("`", n+1)
+		}
 		prefixo := b.String()
-		const fenceBloco = "\n" + logFence + "\n"
+		fenceBloco := "\n" + fence + "\n"
 		const marcador = "\n[... log truncado no meio ...]\n"
 		// "**Log:**\n\n" + fence aberto + log + fence fechado — inclui o \n inicial
 		// e reserva espaco para o marcador de truncamento.
-		baseLen := len(prefixo) + len("\n**Log:**\n\n") + len(logFence) + len(fenceBloco) + len(marcador)
+		baseLen := len(prefixo) + len("\n**Log:**\n\n") + len(fence) + len(fenceBloco) + len(marcador)
 		sobra := MaxIssueBodyLen - baseLen
 		if sobra < 0 {
 			sobra = 0
@@ -95,11 +120,24 @@ func BuildIssueBody(r Report) string {
 			log = log[:cabeca] + marcador + log[inicioCauda:]
 		}
 		b.WriteString("**Log:**\n\n")
-		b.WriteString(logFence + "\n")
+		b.WriteString(fence + "\n")
 		b.WriteString(log)
 		b.WriteString(fenceBloco)
 	}
 	return b.String()
+}
+
+func maiorSequenciaDeCrases(s string) int {
+	maior, atual := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '`' {
+			atual++
+			maior = max(maior, atual)
+		} else {
+			atual = 0
+		}
+	}
+	return maior
 }
 
 func tableCell(s string) string {
