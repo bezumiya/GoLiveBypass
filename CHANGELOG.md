@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.15] - 2026-11-02
+
 ### Adicionado
 
 - **GUI Windows: o relatório de bug e o log mostram se a rota estava fragmentando pacotes.** O anexo que "carrega e some" nas rotas grátis do México (2.0.14) vinha de pacotes que chegam fragmentados em IP por dentro do túnel, e o defeito continua no WireSock: outra rota pode fragmentar também, e os relatos de outras rotas (vídeo que não carrega, imagem que não sobe) não diziam se era o caso. Agora o vigia do túnel lê, a cada 45 s, os contadores de remontagem do próprio Windows (`netstat -s -p ip` e `-p ipv6`, pela posição e não pela legenda, que muda com o idioma) e grava no log, a cada 5 minutos, uma linha `fragmentos.ip` com o total do período e a maior leitura. O relatório ganha `fragmentos_v4_15min`, `fragmentos_serie` (uma contagem por leitura), `fragmentos_v4_desde_tunel` e a idade da última leitura, com o estado em `fragmentos_ip` (`ok`, `sem_amostras` ou `indisponivel`). São só contagens: nada é decidido nem mostrado na tela, e a ativação não espera essa leitura.
