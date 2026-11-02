@@ -59,6 +59,37 @@ test("relaunch preserva XAUTHORITY e mantém a filtragem do ambiente", () => {
     assert.equal(context.result.LANG, undefined);
 });
 
+test("relaunch não entrega pipe do processo atual ao cliente reiniciado", () => {
+    const source = readFileSync(new URL("../goLiveBypass/native.ts", import.meta.url), "utf8");
+    const start = source.indexOf("function spawnRelaunchDetached");
+    const end = source.indexOf("async function requestRelaunch", start);
+    assert.ok(start >= 0 && end > start);
+    const spawns = [];
+    const removed = [];
+    const context = createContext({
+        VPN_DATA_DIR: "/run/user/1000/golive",
+        randomUUID: () => "uuid-de-teste",
+        join: (...parts) => parts.join("/"),
+        openSync: () => 7,
+        closeSync: () => {},
+        readFileSync: () => "diagnostico do relaunch",
+        rmSync: (path, options) => removed.push({ path, options }),
+        spawn: (command, args, options) => { spawns.push({ command, args, options }); return { fake: true }; },
+    });
+    runInContext(`${stripTypeScriptTypes(source.slice(start, end))}
+globalThis.relaunch = spawnRelaunchDetached("pkexec", ["launcher"], { DISPLAY: ":0" });`, context);
+    assert.equal(spawns.length, 1);
+    // Um pipe quebraria quando este processo sair: o novo cliente escreve no descritor
+    // do arquivo de diagnóstico, que não gera EPIPE.
+    assert.deepEqual([...spawns[0].options.stdio], ["ignore", "ignore", 7]);
+    assert.equal(spawns[0].options.detached, true);
+    assert.deepEqual({ ...spawns[0].options.env }, { DISPLAY: ":0" });
+    assert.equal(context.relaunch.diagnostics(), "diagnostico do relaunch");
+    context.relaunch.dispose();
+    assert.equal(removed.length, 1);
+    assert.equal(removed[0].path, "/run/user/1000/golive/.relaunch-stderr-uuid-de-teste.log");
+});
+
 test("helper embutido é ELF x64 com SHA-256 válido", () => {
     const source = readFileSync(new URL("../goLiveBypass/vpn-proton.ts", import.meta.url), "utf8");
     const start = source.indexOf('"netns-launcher": {');
