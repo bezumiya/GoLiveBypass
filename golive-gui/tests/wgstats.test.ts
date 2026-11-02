@@ -139,6 +139,52 @@ describe("watchdog WireGuard", () => {
       vi.useRealTimers();
     }
   });
+
+  // 1 KiB/s = 8 kbps. Os contadores sobem nesse ritmo; a taxa registrada tem de ser 8
+  // mesmo quando uma leitura no meio falha e o delta cobre dois intervalos.
+  it("taxa usa o tempo real entre as amostras, nao o intervalo fixo", async () => {
+    vi.useFakeTimers();
+    logger._resetForTests();
+    const inicio = Date.now();
+    let chamadas = 0;
+    const provider = vi.fn(() => {
+      chamadas++;
+      if (chamadas === 2) return Promise.resolve({ ok: false, handshakeAgoS: null, rxBytes: null, txBytes: null, endpoint: null, error: "leitura falhou" });
+      const bytes = Math.round((Date.now() - inicio) / 1000) * 1024;
+      return Promise.resolve({ ok: true, handshakeAgoS: 1, rxBytes: bytes, txBytes: bytes, endpoint: "peer" });
+    });
+    try {
+      iniciarWgStatsWatchdog(provider);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 3);
+      expect(chamadas).toBe(3);
+      const recent = logger.getRecent();
+      expect(recent).toContain("rx_taxa_kbps=8 tx_taxa_kbps=8");
+      expect(recent).not.toContain("rx_taxa_kbps=16");
+    } finally {
+      pararWgStatsWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it("contador que zerou (tunel reiniciado) nao vira taxa negativa", async () => {
+    vi.useFakeTimers();
+    logger._resetForTests();
+    const amostras = [500_000, 1_000];
+    const provider = vi.fn(() => {
+      const bytes = amostras.shift() ?? 1_000;
+      return Promise.resolve({ ok: true, handshakeAgoS: 1, rxBytes: bytes, txBytes: bytes, endpoint: "peer" });
+    });
+    try {
+      iniciarWgStatsWatchdog(provider);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 2);
+      const recent = logger.getRecent();
+      expect(recent).toContain("rx_total_kb=1 ");
+      expect(recent).not.toMatch(/taxa_kbps=-/);
+    } finally {
+      pararWgStatsWatchdog();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("watchdog sem wg.exe: saude lida do log do WireSock", () => {
