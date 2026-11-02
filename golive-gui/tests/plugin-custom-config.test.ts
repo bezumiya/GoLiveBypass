@@ -1,10 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { PluginVpnController } from "../../goLiveBypass/vpn-controller";
 import type * as VpnLinux from "../../goLiveBypass/vpn-linux";
+import { forcePluginHost } from "./helpers/plugin-host";
+
+// Só o backend Linux é simulado. Sem forçar a plataforma, no Windows o controlador
+// seguia pelo WireSock real: reconfigurava o serviço da máquina com a conf de teste.
+let restaurarHost: () => void = () => {};
+beforeAll(() => { restaurarHost = forcePluginHost("linux"); });
+afterAll(() => restaurarHost());
 
 /**
  * Relato beta: "problemas em carregar uma conf própria" no plugin.

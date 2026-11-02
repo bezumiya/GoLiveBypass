@@ -121,10 +121,11 @@ export function montarLog(
   // Sem a dedup, o report repetia a sessao inteira duas vezes.
   const guiLog = lerArquivoSeguro(path.join(logsDir.logsDir(dadosRaiz, process.platform), "gui.log"));
   if (guiLog) {
+    // Uma linha repetida vem com "(xN...)", que nao existe no arquivo; sem tirar o
+    // sufixo o indexOf dava -1 e o report repetia o arquivo inteiro.
     const primeiraDoRing = recente.split("\n").find((l) => l.trim() !== "");
-    const complemento = primeiraDoRing
-      ? guiLog.slice(0, guiLog.indexOf(primeiraDoRing))
-      : guiLog;
+    const inicioDoRing = primeiraDoRing ? guiLog.indexOf(logger.semRepeticao(primeiraDoRing)) : -1;
+    const complemento = inicioDoRing >= 0 ? guiLog.slice(0, inicioDoRing) : guiLog;
     if (complemento.trim()) {
       partes.push("=== gui.log (antes do ring buffer) ===");
       partes.push(complemento.trimEnd());

@@ -3510,7 +3510,9 @@ tor_ready() {
 }
 
 # Baixa o bundle e deixa o binario pronto, se ainda nao existir. Nao sobe nada.
-ensure_tor_bundle() {
+# O corpo roda em subshell: o trap que apaga o download fica nele e nao substitui o
+# trap global de saida (limpeza da senha temporaria e rollback da ativacao).
+ensure_tor_bundle() (
     [ -x "$TOR_EXE" ] && return 0
 
     step "Baixando o Tor (tor-expert-bundle $TOR_BUNDLE_VERSION, ~30 MB)"
@@ -3541,7 +3543,7 @@ ensure_tor_bundle() {
     }
     chmod +x "$TOR_EXE" 2>/dev/null || true
     return 0
-}
+)
 
 # Garante o Tor de pe na 9060. Devolve 0 se estiver pronto.
 ensure_tor() {
