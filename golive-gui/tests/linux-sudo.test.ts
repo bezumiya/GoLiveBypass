@@ -261,7 +261,8 @@ describe("elevacao sudo no Linux", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("recusa confirm sem TTY sem bloquear e preserva ASSUME_YES", () => {
+  // Roda o confirm() real com `sh`; no Windows não existe shell POSIX para o teste.
+  itLinux("recusa confirm sem TTY sem bloquear e preserva ASSUME_YES", () => {
     const start = source.indexOf("\nconfirm() {") + 1;
     const end = source.indexOf("\n}\n", start) + 3;
     const confirm = source.slice(start, end);
