@@ -51,12 +51,41 @@ test("relaunch preserva XAUTHORITY e mantém a filtragem do ambiente", () => {
     const context = createContext({
         process: { env: { XAUTHORITY: "/run/user/1000/xauth", DISPLAY: ":0", SECRET: "excluded", LANG: "bad\nvalue" } },
         namespace: null,
+        inFlatpak: false,
+        hostEnvironmentFromFlatpak: () => { throw new Error("fora do Flatpak o ambiente do processo vale como está"); },
     });
     runInContext(stripTypeScriptTypes(source.slice(start, end)) + "\nglobalThis.result = safeEnv;", context);
     assert.equal(context.result.XAUTHORITY, "/run/user/1000/xauth");
     assert.equal(context.result.DISPLAY, ":0");
     assert.equal(context.result.SECRET, undefined);
     assert.equal(context.result.LANG, undefined);
+});
+
+test("relaunch no Flatpak monta o ambiente a partir do host, não do sandbox", () => {
+    const source = readFileSync(new URL("../goLiveBypass/native.ts", import.meta.url), "utf8");
+    const start = source.indexOf("const safeEnvKeys = [");
+    const end = source.indexOf("const setenvArgs:", start);
+    assert.ok(start >= 0 && end > start);
+    const sandboxEnv = { DISPLAY: ":0", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/flatpak/bus", XDG_DATA_HOME: "/home/u/.var/app/x/data" };
+    const recebido = [];
+    const context = createContext({
+        process: { env: sandboxEnv },
+        namespace: "glb-teste",
+        inFlatpak: true,
+        // O filtro real é testado no vitest (hostEnvironmentFromFlatpak); aqui só importa que o
+        // relaunch use o resultado dele, e não o ambiente cru do sandbox.
+        hostEnvironmentFromFlatpak: env => {
+            recebido.push(env);
+            return { DISPLAY: ":0", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", PATH: "/usr/bin" };
+        },
+        GOLIVE_PLUGIN_LINUX_NAMESPACE: "GOLIVE_PLUGIN_LINUX_NAMESPACE",
+    });
+    runInContext(stripTypeScriptTypes(source.slice(start, end)) + "\nglobalThis.result = safeEnv;", context);
+    assert.equal(recebido.length, 1);
+    assert.equal(recebido[0], sandboxEnv);
+    assert.equal(context.result.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+    assert.equal(context.result.XDG_DATA_HOME, undefined);
+    assert.equal(context.result.GOLIVE_PLUGIN_LINUX_NAMESPACE, "glb-teste");
 });
 
 test("relaunch não entrega pipe do processo atual ao cliente reiniciado", () => {
