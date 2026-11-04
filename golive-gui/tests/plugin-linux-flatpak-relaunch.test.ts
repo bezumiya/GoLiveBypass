@@ -6,8 +6,12 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+    buildLinuxPrivilegedScript,
+    failedPrivilegedStep,
     findSystemBinary,
     hostEnvironmentFromFlatpak,
+    linuxCleanupCommands,
+    relaunchEnvironment,
     parseFlatpakHostBinaryLookup,
     parseHostNetnsListing,
     readLinuxNetnsTable,
@@ -21,6 +25,93 @@ const linuxSource = () => fs.readFileSync(path.resolve(process.cwd(), "../goLive
 afterEach(() => {
     resetFlatpakHostBinaryCache();
     resetFlatpakNetnsCache();
+});
+
+describe("plugin Linux: ambiente do cliente relançado", () => {
+    // NixOS: o wrapper do Vesktop exporta isto antes do Electron "unwrapped"; sem elas o
+    // relaunch morria com SIGILL (coredump de usuário) e o mesmo binário abria com o ambiente.
+    it("leva o ambiente que o lançador montou, inclusive o do wrapper do Nix", () => {
+        const env = relaunchEnvironment({
+            CHROME_DEVEL_SANDBOX: "/nix/store/x-electron/libexec/electron/chrome-sandbox",
+            GIO_EXTRA_MODULES: "/nix/store/x-dconf/lib/gio/modules",
+            GDK_PIXBUF_MODULE_FILE: "/nix/store/x/loaders.cache",
+            LD_LIBRARY_PATH: "/nix/store/x-pipewire-jack/lib",
+            NIXOS_OZONE_WL: "1",
+            XAUTHORITY: "/run/user/1000/xauth",
+            DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+            XDG_SESSION_TYPE: "wayland",
+            PATH: "/run/current-system/sw/bin",
+        });
+        expect(env).toMatchObject({
+            CHROME_DEVEL_SANDBOX: "/nix/store/x-electron/libexec/electron/chrome-sandbox",
+            GIO_EXTRA_MODULES: "/nix/store/x-dconf/lib/gio/modules",
+            GDK_PIXBUF_MODULE_FILE: "/nix/store/x/loaders.cache",
+            LD_LIBRARY_PATH: "/nix/store/x-pipewire-jack/lib",
+            NIXOS_OZONE_WL: "1",
+            XAUTHORITY: "/run/user/1000/xauth",
+            DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+            XDG_SESSION_TYPE: "wayland",
+        });
+    });
+
+    it("deixa de fora segredos, marcas internas e valores inválidos", () => {
+        const env = relaunchEnvironment({
+            GITHUB_TOKEN: "ghp_x", NPM_TOKEN: "x", OPENAI_API_KEY: "sk", AWS_SECRET_ACCESS_KEY: "x",
+            AWS_ACCESS_KEY_ID: "x", DB_PASSWORD: "x", GPG_PASSPHRASE: "x", SOME_CREDENTIALS: "x",
+            SESSION_COOKIE: "x", SSH_AUTH_SOCK: "/run/ssh", SSH_PRIVATE_KEY: "x", HTTP_BEARER: "x",
+            GOLIVE_PLUGIN_LINUX_NAMESPACE: "glb-velho", ELECTRON_RUN_AS_NODE: "1", _: "/usr/bin/env",
+            LANG: "pt_BR\nX=1", "NOME-INVALIDO": "x", VAZIA: "", ENORME: "x".repeat(40 * 1024),
+            DISPLAY: ":0",
+        });
+        expect(env).toEqual({ DISPLAY: ":0" });
+    });
+});
+
+describe("plugin Linux: restaurar a rede pede uma autorização só", () => {
+    it("toda a limpeza vai numa única sequência elevada", () => {
+        const source = linuxSource();
+        const stop = source.slice(source.indexOf("export async function stopLinuxNetwork("));
+        expect(stop).toContain("const commands = linuxCleanupCommands({ namespace, interfaceName, ipPath, rmPath, shellPath });");
+        expect(stop).toContain("await execPrivilegedSequence(commands, { timeoutMs, signal });");
+        // Nenhum pkexec por comando sobrou no arquivo (eram cinco pedidos de senha).
+        expect(source).not.toContain("async function execPrivileged(");
+        const commands = linuxCleanupCommands({ namespace: "glb-x", interfaceName: "glbwgx", ipPath: "/usr/sbin/ip", rmPath: "/usr/bin/rm", shellPath: "/bin/sh" });
+        expect(commands).toHaveLength(4);
+        expect(linuxCleanupCommands({ namespace: null, interfaceName: null, ipPath: "/usr/sbin/ip", rmPath: "/usr/bin/rm", shellPath: "/bin/sh" })).toEqual([]);
+    });
+
+    // Executa /bin/sh do Linux com ip/rm falsos: mostra o que é tolerado e o que falha.
+    it.skipIf(process.platform !== "linux")("tolera o que já sumiu e falha só se o namespace ficar", () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-cleanup-"));
+        try {
+            const log = path.join(root, "chamadas");
+            const netnsDir = path.join(root, "netns");
+            fs.mkdirSync(netnsDir);
+            fs.writeFileSync(path.join(root, "ip"),
+                `#!/bin/sh\nprintf 'ip %s\\n' "$*" >> '${log}'\necho "Cannot find device" >&2\nexit 1\n`, { mode: 0o755 });
+            fs.writeFileSync(path.join(root, "rm"), `#!/bin/sh\nprintf 'rm %s\\n' "$*" >> '${log}'\n`, { mode: 0o755 });
+            const run = () => spawnSync("/bin/sh", ["-c", buildLinuxPrivilegedScript(linuxCleanupCommands({
+                namespace: "glb-x", interfaceName: "glbwgx", ipPath: path.join(root, "ip"), rmPath: path.join(root, "rm"), shellPath: "/bin/sh", netnsDir,
+            }))], { encoding: "utf8" });
+
+            const sumiu = run();
+            expect(sumiu.status).toBe(0);
+            expect(fs.readFileSync(log, "utf8").trim().split("\n")).toEqual([
+                `rm -rf -- /etc/netns/glb-x`,
+                "ip -n glb-x link del glbwgx",
+                "ip link del glbwgx",
+                "ip netns del glb-x",
+            ]);
+
+            // O namespace continua lá e o `ip netns del` falhou: a sequência falha no último passo.
+            fs.writeFileSync(path.join(netnsDir, "glb-x"), "");
+            const ficou = run();
+            expect(ficou.status).not.toBe(0);
+            expect(failedPrivilegedStep(ficou.stderr, 4)).toBe(3);
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
 });
 
 describe("plugin Linux no Flatpak: namespaces do host", () => {
@@ -78,7 +169,6 @@ describe("plugin Linux no Flatpak: namespaces do host", () => {
 
     it("comandos root invalidam a tabela em cache (criam/apagam namespace)", () => {
         const source = linuxSource();
-        expect(source).toContain("await runCommandAsync(spec, options).finally(resetFlatpakNetnsCache)");
         expect(source).toContain("await runPrivilegedCommand(spec, options).finally(resetFlatpakNetnsCache)");
         // A inspeção e o isProcessInNamespace usam a mesma tabela.
         expect(source).toContain("const netnsTable = readLinuxNetnsTable();");

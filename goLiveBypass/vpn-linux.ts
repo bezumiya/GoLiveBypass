@@ -253,6 +253,33 @@ const FLATPAK_SANDBOX_ENV_KEYS = Object.freeze([
     "XDG_CONFIG_DIRS",
 ]);
 
+// Ambiente do cliente relançado. Antes era uma lista fixa (DISPLAY, PATH, XDG_*...), e tudo o
+// que o lançador da distro exporta ficava de fora. No NixOS o `vesktop` é um wrapper que exporta
+// CHROME_DEVEL_SANDBOX e as variáveis do GTK/GSettings antes de executar o Electron "unwrapped":
+// sem elas o Electron relançado morria com SIGILL logo no início (coredump de usuário), e o
+// mesmo binário com o ambiente do processo abria normal. O ambiente do processo atual já é o
+// que o lançador montou, então ele vai inteiro, menos:
+//   - nomes com cara de segredo: as variáveis passam pela linha de comando do launcher e do
+//     systemd-run, visível a outros usuários por um instante;
+//   - a marca do namespace, que só o relaunch PARA DENTRO grava (o de saída não pode herdar);
+//   - ELECTRON_RUN_AS_NODE, que transformaria o cliente em um node puro;
+//   - valores com quebra de linha/NUL ou grandes demais, e nomes inválidos para o launcher.
+// XAUTHORITY e DBUS_SESSION_BUS_ADDRESS têm "AUTH"/"SESSION" no nome mas são necessários.
+const RELAUNCH_SECRET_NAME = /TOKEN|SECRET|PASSW(?:OR)?D|PASSPHRASE|CREDENTIAL|COOKIE|PRIVATE_?KEY|API_?KEY|ACCESS_?KEY|SESSION_?KEY|AUTH_?(?:TOKEN|SOCK|INFO|KEY)|BEARER/i;
+const RELAUNCH_DROPPED_NAMES = new Set([GOLIVE_PLUGIN_LINUX_NAMESPACE, "ELECTRON_RUN_AS_NODE", "_"]);
+const RELAUNCH_MAX_VALUE = 32 * 1024;
+
+export function relaunchEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const result: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(env)) {
+        if (typeof value !== "string" || value.length === 0 || value.length > RELAUNCH_MAX_VALUE) continue;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\0\r\n]/.test(value)) continue;
+        if (RELAUNCH_DROPPED_NAMES.has(key) || RELAUNCH_SECRET_NAME.test(key)) continue;
+        result[key] = value;
+    }
+    return result;
+}
+
 // Caminhos que só existem dentro do sandbox. No E2E o DBUS_SESSION_BUS_ADDRESS do sandbox
 // (unix:path=/run/flatpak/bus) fazia o zypak-helper do cliente relançado morrer sem barramento;
 // PULSE_SERVER e XAUTHORITY também apontam para /run/flatpak/ e não valem no host.
@@ -745,28 +772,6 @@ async function runCommandAsync(
     return promise;
 }
 
-async function execPrivileged(
-    binary: string,
-    args: string[],
-    options?: { timeoutMs?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
-): Promise<CommandResult> {
-    const env = options?.env || process.env;
-    const isFlatpakEnv = isFlatpak(env);
-    const inNamespace = isProcessInNamespace(undefined, env);
-    const spec = resolveCommandInvocation(binary, args, {
-        elevated: true,
-        inNamespace,
-        isFlatpakEnv,
-        env,
-    });
-    // Comando root pode criar/apagar namespace: a tabela em cache do Flatpak fica velha.
-    const result = await runCommandAsync(spec, options).finally(resetFlatpakNetnsCache);
-    if (result.exitCode !== 0) {
-        const detail = safeDiagnosticDetail(result.stderr || result.stdout || `Exit code ${result.exitCode}`);
-        throw new Error(`Falha ao executar ${path.basename(binary)}: ${detail}`);
-    }
-    return result;
-}
 class LinuxAuthorizationError extends Error {
     constructor(message: string, readonly exitCode: number | null) {
         super(message);
@@ -1672,6 +1677,34 @@ export async function startLinuxNetwork(
     }
 }
 
+// Comandos da limpeza, para uma única sequência elevada. O que pode já não existir (DNS,
+// interface dentro ou fora do namespace) é tolerado; o namespace só falha se continuar lá.
+export function linuxCleanupCommands(paths: {
+    namespace: string | null;
+    interfaceName: string | null;
+    ipPath: string | null;
+    rmPath: string | null;
+    shellPath: string;
+    netnsDir?: string;
+}): LinuxPrivilegedCommand[] {
+    const { namespace, interfaceName, ipPath, rmPath, shellPath } = paths;
+    const netnsDir = paths.netnsDir ?? NETNS_RUN_DIR;
+    const commands: LinuxPrivilegedCommand[] = [];
+    if (namespace && rmPath) {
+        commands.push([shellPath, ["-c", '"$0" -rf -- "$1" 2>/dev/null || true', rmPath, `/etc/netns/${namespace}`]]);
+    }
+    if (interfaceName && ipPath) {
+        if (namespace) {
+            commands.push([shellPath, ["-c", '"$0" -n "$1" link del "$2" 2>/dev/null || true', ipPath, namespace, interfaceName]]);
+        }
+        commands.push([shellPath, ["-c", '"$0" link del "$1" 2>/dev/null || true', ipPath, interfaceName]]);
+    }
+    if (namespace && ipPath) {
+        commands.push([shellPath, ["-c", '"$0" netns del "$1" || [ ! -e "$2/$1" ]', ipPath, namespace, netnsDir]]);
+    }
+    return commands;
+}
+
 export async function stopLinuxNetwork(
     owner?: Pick<VpnOwnerRecord, "namespace" | "interfaceName"> | LinuxNetworkOwner | null,
     options?: LinuxStopOptions
@@ -1704,67 +1737,23 @@ export async function stopLinuxNetwork(
 
     const ipPath = findSystemBinary("ip");
     const rmPath = findSystemBinary("rm");
-    const timeoutMs = options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    const shellPath = findSystemBinary("sh") || "/bin/sh";
+    // Uma autorização só, como na ativação: o prazo inclui digitar a senha.
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_AUTH_PROMPT_TIMEOUT_MS;
     const signal = options?.signal;
 
-    let dnsRemoved = false;
-    let interfaceRemoved = false;
-    let namespaceRemoved = false;
+    // Antes eram cinco pkexec, um por comando: cinco pedidos de senha para restaurar, e ao
+    // fechar o Discord (NixOS, polkit sem auth_admin_keep) cada um voltava "Not authorized" e o
+    // namespace ficava para trás. Agora vai tudo numa sequência elevada; o que pode não existir
+    // é tolerado como antes, e a inspeção abaixo é quem decide se sobrou algo.
+    const commands = linuxCleanupCommands({ namespace, interfaceName, ipPath, rmPath, shellPath });
+    if (commands.length > 0) await execPrivilegedSequence(commands, { timeoutMs, signal });
 
-    // 1. Remover /etc/netns/<ns>/resolv.conf e diretório
-    if (namespace && rmPath) {
-        try {
-            const resolvPath = `/etc/netns/${namespace}/resolv.conf`;
-            const netnsDir = `/etc/netns/${namespace}`;
-            await execPrivileged(rmPath, ["-f", resolvPath], { timeoutMs, signal });
-            await execPrivileged(rmPath, ["-rf", netnsDir], { timeoutMs, signal });
-            dnsRemoved = true;
-        } catch {
-            // DNS pode não existir
-        }
-    }
-
-    // 2. Remover interface se conhecida
-    if (interfaceName && ipPath) {
-        if (namespace) {
-            try {
-                await execPrivileged(ipPath, ["-n", namespace, "link", "del", interfaceName], { timeoutMs, signal });
-                interfaceRemoved = true;
-            } catch (err) {
-                const msg = safeDiagnosticDetail(err);
-                if (/Cannot find device|does not exist|No such device/i.test(msg)) {
-                    interfaceRemoved = true;
-                }
-            }
-        }
-        try {
-            await execPrivileged(ipPath, ["link", "del", interfaceName], { timeoutMs, signal });
-            interfaceRemoved = true;
-        } catch (err) {
-            const msg = safeDiagnosticDetail(err);
-            if (/Cannot find device|does not exist|No such device/i.test(msg)) {
-                interfaceRemoved = true;
-            }
-        }
-    }
-
-    // 3. Remover namespace se conhecido
-    if (namespace && ipPath) {
-        try {
-            await execPrivileged(ipPath, ["netns", "del", namespace], { timeoutMs, signal });
-            namespaceRemoved = true;
-        } catch (err) {
-            const msg = safeDiagnosticDetail(err);
-            if (/No such file or directory|does not exist|Cannot remove namespace file/i.test(msg)) {
-                namespaceRemoved = true;
-            } else {
-                throw err;
-            }
-        }
-    }
-
-    // 4. Verificar se a remoção teve êxito
+    // Verificar se a remoção teve êxito
     const inspection = inspectLinuxNetworkSync(owner);
+    const dnsRemoved = Boolean(namespace && rmPath);
+    const interfaceRemoved = Boolean(interfaceName && ipPath && !inspection.interfaceExists);
+    const namespaceRemoved = Boolean(namespace && ipPath && !inspection.namespaceExists);
     if (namespace && inspection.namespaceExists) {
         throw new Error(`Falha ao remover namespace '${namespace}'; o namespace ainda existe no sistema.`);
     }

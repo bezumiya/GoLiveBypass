@@ -72,6 +72,7 @@ import {
     isProcessInNamespace,
     isValidLinuxName,
     linuxAuthorizationGuidance,
+    relaunchEnvironment,
     waitForFile,
 } from "./vpn-linux";
 import * as proton from "./vpn-proton";
@@ -555,51 +556,11 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
         clientArgs.push(arg);
     }
 
-    const safeEnvKeys = [
-        "WAYLAND_DISPLAY",
-        "DISPLAY",
-        "XAUTHORITY",
-        "XDG_BACKEND",
-        "XDG_SESSION_TYPE",
-        "GDK_BACKEND",
-        "QT_QPA_PLATFORM",
-        "MOZ_ENABLE_WAYLAND",
-        "ELECTRON_OZONE_PLATFORM_HINT",
-        "OZONE_PLATFORM",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "XDG_RUNTIME_DIR",
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_DESKTOP",
-        "DESKTOP_SESSION",
-        "XDG_CONFIG_DIRS",
-        "XDG_DATA_DIRS",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "PULSE_SERVER",
-        "PIPEWIRE_REMOTE",
-        "PIPEWIRE_LATENCY",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "LC_MESSAGES",
-        "SHELL",
-        "TERM",
-        "TZ",
-    ];
-
-    // No Flatpak o ambiente vai para o `flatpak run` do HOST: sem as variáveis do sandbox.
+    // O ambiente do processo atual é o que o lançador da distro montou (no NixOS, o wrapper do
+    // Vesktop/Electron); relaunchEnvironment tira só segredos e marcas internas. No Flatpak o
+    // ambiente vai para o `flatpak run` do HOST: sem as variáveis do sandbox.
     const sourceEnv = inFlatpak ? hostEnvironmentFromFlatpak(process.env) : process.env;
-    const safeEnv: NodeJS.ProcessEnv = {};
-    for (const key of safeEnvKeys) {
-        const val = sourceEnv[key];
-        if (typeof val === "string" && val.length > 0 && !/[\0\r\n]/.test(val)) {
-            safeEnv[key] = val;
-        }
-    }
+    const safeEnv: NodeJS.ProcessEnv = relaunchEnvironment(sourceEnv);
 
     if (namespace) {
         safeEnv[GOLIVE_PLUGIN_LINUX_NAMESPACE] = namespace;
