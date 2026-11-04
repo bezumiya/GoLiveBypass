@@ -3040,7 +3040,9 @@ export class PluginVpnController {
         }
     }
 
-    private writeProtonProfileAccount(username: string, selection: ProtonProfileSelection): void {
+    // Só grava (e o protonProfileMatches só compara) país/grátis/ping: exigir o
+    // ProtonProfileSelection inteiro quebrava o tsc dos forks na seleção manual de rota.
+    private writeProtonProfileAccount(username: string, selection: Pick<ProtonProfileSelection, "country" | "freeOnly" | "autoPing">): void {
         fs.mkdirSync(this.dataDir, { recursive: true });
         const temporary = `${this.profileAccountPath}.${process.pid}.${Date.now()}.tmp`;
         fs.writeFileSync(temporary, JSON.stringify({

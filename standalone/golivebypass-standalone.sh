@@ -3836,6 +3836,13 @@ refresh_wireguard_route() {
     # precisa acompanhar a chave/peer reaplicados pelo wg setconf.
     addresses="$(grep -E '^[[:space:]]*Address[[:space:]]*=' "$wg_file" | sed -E 's/^[[:space:]]*Address[[:space:]]*=[[:space:]]*//' | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | sed '/^$/d' || true)"
     [ -n "$addresses" ] || fail "O perfil de troca nao informa nenhum endereco WireGuard."
+    # Sem IPv6 no kernel (ipv6.disable=1) o `addr add` de um endereco IPv6 responde
+    # "RTNETLINK answers: Operation not supported" e a troca de rota falhava (mesma causa
+    # do #404 no plugin). Sem a pilha IPv6 nao ha trafego IPv6 para vazar: so o IPv4 entra.
+    if [ ! -e /proc/net/if_inet6 ]; then
+        addresses="$(printf '%s\n' "$addresses" | grep -v ':' || true)"
+        [ -n "$addresses" ] || fail "O perfil de troca so tem endereco IPv6, mas o IPv6 esta desligado no kernel."
+    fi
     tmp_conf="$(mktemp)"
     if ! grep -vE "^(Address|DNS)" "$wg_file" > "$tmp_conf"; then
         rm -f "$tmp_conf"

@@ -7,10 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildLinuxPrivilegedScript,
+  describeLinuxPrivilegedCommand,
+  failedPrivilegedStep,
   formatLinuxWireGuardModuleIssue,
   identifyLinuxDistroFamily,
   kernelModulesInstallCommand,
+  linuxAddressPlan,
   linuxAuthorizationGuidance,
+  linuxKernelHasIPv6,
   linuxDependencyStatus,
   linuxWireGuardModuleCheckCommand,
   linuxWireGuardModuleState,
@@ -40,6 +44,60 @@ describe("transporte Linux do plugin", () => {
     const issue = formatLinuxWireGuardModuleIssue("missing", "6.8.0-139-generic", false, "debian");
     expect(issue).toContain("6.8.0-139-generic");
     expect(issue).toContain("sudo apt install linux-modules-6.8.0-139-generic");
+  });
+
+  // #404: com ipv6.disable=1 o `ip addr add <ipv6>` e o `ip -6 route` respondem "Operation not
+  // supported" e derrubavam a ativação inteira, embora o módulo WireGuard tivesse carregado.
+  it("aplica só o IPv4 do perfil quando o kernel não tem IPv6", () => {
+    const addresses = ["10.2.0.2/32", "2a07:b944::2:2/128"];
+    const dns = ["10.2.0.1", "2a07:b944::2:1"];
+
+    expect(linuxAddressPlan(addresses, dns, true)).toEqual({
+      addresses, dnsServers: dns, skippedAddresses: [], skippedDnsServers: [],
+    });
+    expect(linuxAddressPlan(addresses, dns, false)).toEqual({
+      addresses: ["10.2.0.2/32"],
+      dnsServers: ["10.2.0.1"],
+      skippedAddresses: ["2a07:b944::2:2/128"],
+      skippedDnsServers: ["2a07:b944::2:1"],
+    });
+    // Perfil só IPv6 não tem como subir sem IPv6: falha dizendo a causa.
+    expect(() => linuxAddressPlan(["2a07:b944::2:2/128"], [], false)).toThrow(/IPv6 está desligado no kernel/);
+  });
+
+  // #404: o parser pegava o PRIMEIRO marcador e culpava o modprobe pelo `ip addr add` IPv6.
+  it("aponta o passo que falhou, não o primeiro da sequência", () => {
+    const stderr = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(n => `__GOLIVE_STEP__${n}`).join("\n")
+      + "\nRTNETLINK answers: Operation not supported\n";
+    expect(failedPrivilegedStep(stderr, 12)).toBe(8);
+    expect(failedPrivilegedStep("__GOLIVE_STEP__0\n", 12)).toBe(0);
+    expect(failedPrivilegedStep("sem marcador", 12)).toBe(-1);
+    // Marcador fora da sequência não aponta comando inexistente.
+    expect(failedPrivilegedStep("__GOLIVE_STEP__0\n__GOLIVE_STEP__20\n", 12)).toBe(-1);
+  });
+
+  it("descreve o comando com o subcomando, sem namespace nem caminhos", () => {
+    expect(describeLinuxPrivilegedCommand(["/usr/sbin/ip", ["-n", "gl-ns-abc", "addr", "add", "2a07:b944::2:2/128", "dev", "gl-wg-abc"]]))
+      .toBe("ip addr add");
+    expect(describeLinuxPrivilegedCommand(["/usr/sbin/ip", ["-n", "gl-ns-abc", "-6", "route", "add", "default"]]))
+      .toBe("ip -6 route");
+    expect(describeLinuxPrivilegedCommand(["/usr/sbin/modprobe", ["wireguard"]])).toBe("modprobe wireguard");
+    expect(describeLinuxPrivilegedCommand(["/usr/bin/wg", ["setconf", "gl-wg-abc", "/home/u/.local/share/x/wg.tmp"]]))
+      .toBe("wg setconf gl-wg-abc");
+    // O script da checagem do módulo (sh -c '<texto com espaços>') não vai para a mensagem.
+    expect(describeLinuxPrivilegedCommand(linuxWireGuardModuleCheckCommand("/bin/sh"))).toBe("sh -c");
+  });
+
+  it("detecta IPv6 no kernel pelo /proc/net/if_inet6", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-ipv6-"));
+    try {
+      const presente = path.join(root, "if_inet6");
+      fs.writeFileSync(presente, "");
+      expect(linuxKernelHasIPv6(presente)).toBe(true);
+      expect(linuxKernelHasIPv6(path.join(root, "ausente"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("reconhece as famílias por ID/ID_LIKE e não inventa comando para desconhecidas", () => {
@@ -95,6 +153,7 @@ describe("transporte Linux do plugin", () => {
       expect(falha.status).toBe(1);
       // O passo que falha tem que ser a checagem (1), não o comando anterior.
       expect(falha.stderr).toContain("__GOLIVE_STEP__1");
+      expect(failedPrivilegedStep(falha.stderr, 2)).toBe(1);
       expect(falha.stderr).toContain("não carregou");
 
       const semFalha = linuxWireGuardModuleCheckCommand("/bin/sh", presente);
