@@ -1539,6 +1539,71 @@ motivo_paralelo() { # $1 = cliente, $2 = mod
     return 0
 }
 
+# O state.json do Vesktop deste alvo: no flatpak fica no HOME do sandbox.
+vesktop_state_file() { # $1 = alvo (resources) do Vesktop
+    local id
+    if id="$(flatpak_app_id "$1")"; then
+        printf '%s/.var/app/%s/config/vesktop/state.json\n' "$HOME" "$id"
+    else
+        printf '%s/vesktop/state.json\n' "${XDG_CONFIG_HOME:-$HOME/.config}"
+    fi
+}
+
+# O plugin roda os comandos de rede no host com flatpak-spawn --host, que exige falar com o
+# portal org.freedesktop.Flatpak. Sem isso a ativacao para em "sem permissao" no sandbox.
+grant_flatpak_host_commands() {
+    local id="$1"
+    have flatpak || return 0
+    flatpak info --show-permissions "$id" 2>/dev/null | grep -q 'org.freedesktop.Flatpak=talk' && return 0
+    if flatpak_is_user_install "$id"; then
+        flatpak override --user "$id" --talk-name=org.freedesktop.Flatpak >/dev/null 2>&1 && return 0
+    else
+        step "Liberando comandos no host para o $id (pode pedir sua senha do sudo)"
+        sudo flatpak override "$id" --talk-name=org.freedesktop.Flatpak >/dev/null 2>&1 && return 0
+    fi
+    warn "Nao consegui liberar o flatpak-spawn para o $id. A VPN do plugin precisa disso; rode:"
+    printf '  %s  flatpak override %s--talk-name=org.freedesktop.Flatpak %s%s\n' \
+        "$C_DIM" "$(flatpak_is_user_install "$id" && printf -- '--user ')" "$id" "$C_OFF" >&2
+    return 1
+}
+
+# O build do Vencord nao gera dist/vesktop.asar (so os vencordDesktop*.js), entao copiar um asar
+# para o Vesktop nunca funcionou: o instalador parava em "Build nao gerou dist/vesktop.asar". O
+# jeito que o proprio Vesktop suporta e o "Vencord Location": ele guarda a pasta em state.json
+# (vencordDir) e carrega o Vencord dali na abertura. Nao mexe no pacote instalado nem pede sudo
+# no Vesktop nativo; no flatpak libera a leitura da pasta e o flatpak-spawn.
+configure_vesktop_vencord_dir() {
+    local root="$1" target="$2" dist state id
+    dist="$root/dist"
+    if [ ! -f "$dist/vencordDesktopMain.js" ]; then
+        printf "  [!] Build nao gerou %s/vencordDesktopMain.js. Rode 'pnpm build' em %s e tente de novo.\n" "$dist" "$root"
+        return 1
+    fi
+    state="$(vesktop_state_file "$target")"
+    mkdir -p "$(dirname "$state")" || return 1
+    # Preserva as outras chaves do state.json; grava atomico para nao deixar JSON pela metade.
+    node -e '
+const fs = require("fs");
+const [file, dir] = process.argv.slice(1);
+let state = {};
+try { state = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+if (!state || typeof state !== "object" || Array.isArray(state)) state = {};
+state.vencordDir = dir;
+fs.writeFileSync(file + ".golive-tmp", JSON.stringify(state, null, 4));
+fs.renameSync(file + ".golive-tmp", file);
+' "$state" "$dist" || { printf "  [!] Nao consegui gravar %s\n" "$state"; return 1; }
+    if id="$(flatpak_app_id "$target")"; then
+        grant_flatpak_access "$id" "$dist" || true
+        grant_flatpak_host_commands "$id" || true
+    fi
+    # O Vencord carregado pelo Vesktop le as configuracoes de <dados do Vesktop>/settings, nao
+    # do ~/.config/Vencord: sem isto o plugin abria desligado depois do "ja vem ativado".
+    set_plugin_settings "$root" "$(dirname "$state")/settings/settings.json"
+    installer_log info installer.vesktop_vencord_dir inject target_count 1
+    ok "Vesktop usando o Vencord de $dist ($state)"
+    return 0
+}
+
 patch_parallel_one() {
     local root="$1" target="$2"
     local asar="" client_name="" app_path="" mod="" rel=""
@@ -1549,6 +1614,10 @@ patch_parallel_one() {
         printf "  [!] Cliente paralelo desconhecido: %s\n" "$target"
         return 1
     }
+    if [ "$client_name" = Vesktop ] && [ "$(checkout_mod "$root")" = Vencord ]; then
+        configure_vesktop_vencord_dir "$root" "$target"
+        return
+    fi
 
     # Equicord e Vencord sao forks DIFERENTES: o build do Equicord so empacota
     # equibop.asar (o cliente dele), o do Vencord so vesktop.asar (o dele) -- nenhum dos
@@ -1971,11 +2040,14 @@ escolher_alvos_inject() {
     # terminal de verdade -- nem os testes conseguiam exercita-lo. As duas formas sao
     # equivalentes: tui_is_interactive() e falso exatamente quando -Yes ou quando o stdin nao
     # e terminal.
+    # O prefixo vai em CADA linha: `printf 'P|%s\n' "$lista"` so marcava a primeira, e o
+    # leitor (IFS='|' read tipo alvo) descartava as outras -- com dois clientes paralelos
+    # (ex.: Vesktop nativo + flatpak) so o primeiro era configurado.
     if [ "$ASSUME_YES" -eq 1 ] || ! tui_is_interactive; then
         if [ -n "$oficiais" ]; then
-            printf 'O|%s\n' "$oficiais"
+            printf '%s\n' "$oficiais" | sed '/./!d; s/^/O|/'
         else
-            printf 'P|%s\n' "$paralelos"
+            printf '%s\n' "$paralelos" | sed '/./!d; s/^/P|/'
         fi
         return 0
     fi
@@ -2302,10 +2374,11 @@ select_update_channel() {
     printf '%s\n' "$CHANNEL"
 }
 
+# $2 opcional: outro settings.json (o do Vencord dentro do Vesktop, que nao usa o ~/.config do mod).
 set_plugin_settings() {
     local root="$1"
-    local file
-    file="$(mod_settings_file "$root")"
+    local file="${2:-}"
+    [ -n "$file" ] || file="$(mod_settings_file "$root")"
     mkdir -p "$(dirname "$file")"
 
     GLB_FILE="$file" GLB_CHANNEL="$CHANNEL" node -e '

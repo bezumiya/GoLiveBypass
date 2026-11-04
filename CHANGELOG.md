@@ -6,6 +6,11 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **Instalador Linux: Vesktop com checkout Vencord.** O patch direto copiava `dist/vesktop.asar`, que o build do Vencord não gera, e parava em "Build nao gerou dist/vesktop.asar". Agora o instalador grava o "Vencord Location" do próprio Vesktop (`vencordDir` no `state.json`, nativo ou `~/.var/app/<id>/config/vesktop` no flatpak), sem `sudo` e sem tocar no pacote instalado, ativa o plugin no `settings.json` do Vencord dentro do Vesktop (antes ia só para `~/.config/Vencord`, que o Vesktop não lê) e, no flatpak, libera a pasta do build e o `--talk-name=org.freedesktop.Flatpak` de que o plugin precisa.
+- **Instalador Linux: `--yes` com mais de um cliente configurava só o primeiro.** No modo sem pergunta, `printf 'P|%s\n' "$lista"` só marcava a primeira linha e o leitor descartava as outras (ex.: Vesktop nativo + flatpak). Agora cada alvo recebe o prefixo.
+
 ## [2.0.15] - 2026-11-02
 
 ### Adicionado
