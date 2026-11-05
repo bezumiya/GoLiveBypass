@@ -96,5 +96,8 @@ describe("failover Proton", () => {
     expect(refresh).toContain("addr flush dev");
     expect(refresh).toContain("addr add");
     expect(refresh).toContain("O perfil de troca nao informa nenhum endereco WireGuard");
+    // Sem IPv6 no kernel o endereço IPv6 da reserva derrubava a troca (#404): só o IPv4 entra.
+    expect(refresh).toContain("/proc/net/if_inet6");
+    expect(refresh.indexOf("/proc/net/if_inet6")).toBeLessThan(refresh.indexOf("addr flush dev"));
   });
 });

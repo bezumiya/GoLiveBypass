@@ -43,20 +43,67 @@ int main(void) {
     } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("relaunch preserva XAUTHORITY e mantém a filtragem do ambiente", () => {
-    const source = readFileSync(new URL("../goLiveBypass/native.ts", import.meta.url), "utf8");
-    const start = source.indexOf("const safeEnvKeys = [");
-    const end = source.indexOf("const setenvArgs:", start);
+// Trecho do native.ts que monta o ambiente do relaunch, rodando com a relaunchEnvironment REAL
+// recortada do vpn-linux.ts (o vpn-linux.ts importa módulos sem extensão e não carrega direto).
+function relaunchEnvironmentHarness(extra) {
+    const native = readFileSync(new URL("../goLiveBypass/native.ts", import.meta.url), "utf8");
+    const start = native.indexOf("const sourceEnv = inFlatpak");
+    const end = native.indexOf("const setenvArgs:", start);
     assert.ok(start >= 0 && end > start);
-    const context = createContext({
-        process: { env: { XAUTHORITY: "/run/user/1000/xauth", DISPLAY: ":0", SECRET: "excluded", LANG: "bad\nvalue" } },
+    const linux = readFileSync(new URL("../goLiveBypass/vpn-linux.ts", import.meta.url), "utf8");
+    const fnStart = linux.indexOf("const RELAUNCH_SECRET_NAME");
+    const fnEnd = linux.indexOf("// Caminhos que só existem dentro do sandbox.", fnStart);
+    assert.ok(fnStart >= 0 && fnEnd > fnStart);
+    const context = createContext({ GOLIVE_PLUGIN_LINUX_NAMESPACE: "GOLIVE_PLUGIN_LINUX_NAMESPACE", ...extra });
+    runInContext(stripTypeScriptTypes(linux.slice(fnStart, fnEnd)).replace(/^export /gm, ""), context);
+    runInContext(stripTypeScriptTypes(native.slice(start, end)) + "\nglobalThis.result = safeEnv;", context);
+    return context;
+}
+
+test("relaunch preserva XAUTHORITY e mantém a filtragem do ambiente", () => {
+    const context = relaunchEnvironmentHarness({
+        process: { env: {
+            XAUTHORITY: "/run/user/1000/xauth", DISPLAY: ":0", SECRET: "excluded", LANG: "bad\nvalue",
+            DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+            // Exportadas pelo wrapper do NixOS: sem elas o Electron relançado morria (SIGILL).
+            CHROME_DEVEL_SANDBOX: "/nix/store/x-electron/libexec/electron/chrome-sandbox",
+            GIO_EXTRA_MODULES: "/nix/store/x-dconf/lib/gio/modules",
+            GITHUB_TOKEN: "ghp_x", OPENAI_API_KEY: "sk-x", SSH_AUTH_SOCK: "/run/user/1000/ssh",
+            GOLIVE_PLUGIN_LINUX_NAMESPACE: "glb-velho", ELECTRON_RUN_AS_NODE: "1",
+        } },
         namespace: null,
+        inFlatpak: false,
+        hostEnvironmentFromFlatpak: () => { throw new Error("fora do Flatpak o ambiente do processo vale como está"); },
     });
-    runInContext(stripTypeScriptTypes(source.slice(start, end)) + "\nglobalThis.result = safeEnv;", context);
     assert.equal(context.result.XAUTHORITY, "/run/user/1000/xauth");
     assert.equal(context.result.DISPLAY, ":0");
-    assert.equal(context.result.SECRET, undefined);
-    assert.equal(context.result.LANG, undefined);
+    assert.equal(context.result.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+    assert.equal(context.result.CHROME_DEVEL_SANDBOX, "/nix/store/x-electron/libexec/electron/chrome-sandbox");
+    assert.equal(context.result.GIO_EXTRA_MODULES, "/nix/store/x-dconf/lib/gio/modules");
+    for (const key of ["SECRET", "LANG", "GITHUB_TOKEN", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "GOLIVE_PLUGIN_LINUX_NAMESPACE", "ELECTRON_RUN_AS_NODE"]) {
+        assert.equal(context.result[key], undefined, key);
+    }
+});
+
+test("relaunch no Flatpak monta o ambiente a partir do host, não do sandbox", () => {
+    const sandboxEnv = { DISPLAY: ":0", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/flatpak/bus", XDG_DATA_HOME: "/home/u/.var/app/x/data" };
+    const recebido = [];
+    const context = relaunchEnvironmentHarness({
+        process: { env: sandboxEnv },
+        namespace: "glb-teste",
+        inFlatpak: true,
+        // O filtro real é testado no vitest (hostEnvironmentFromFlatpak); aqui só importa que o
+        // relaunch use o resultado dele, e não o ambiente cru do sandbox.
+        hostEnvironmentFromFlatpak: env => {
+            recebido.push(env);
+            return { DISPLAY: ":0", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", PATH: "/usr/bin" };
+        },
+    });
+    assert.equal(recebido.length, 1);
+    assert.equal(recebido[0], sandboxEnv);
+    assert.equal(context.result.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+    assert.equal(context.result.XDG_DATA_HOME, undefined);
+    assert.equal(context.result.GOLIVE_PLUGIN_LINUX_NAMESPACE, "glb-teste");
 });
 
 test("relaunch não entrega pipe do processo atual ao cliente reiniciado", () => {

@@ -125,6 +125,8 @@ export interface LinuxStartOptions {
     namespace?: string;
     interfaceName?: string;
     log?: LinuxLogger;
+    // Só para testes: por padrão vem de linuxKernelHasIPv6().
+    ipv6Available?: boolean;
 }
 
 export interface LinuxStopOptions {
@@ -142,7 +144,11 @@ const DEFAULT_SYSTEM_DIRS = Object.freeze([
     "/usr/local/sbin",
 ]);
 
+// Binários que, no Flatpak, existem só no host e rodam por flatpak-spawn --host. O pkexec
+// faltava aqui desde que a lista nasceu: no sandbox ele nunca era achado e o plugin ficava em
+// dependency_missing ("pkexec não encontrado") mesmo com o polkit instalado no host.
 const FLATPAK_HOST_BINARIES = new Set([
+    "pkexec",
     "ip",
     "wg",
     "modprobe",
@@ -188,8 +194,111 @@ export function findSystemBinary(name: string, env: NodeJS.ProcessEnv = process.
     // Flatpak's filesystem view does not expose host tools. Return only
     // allowlisted absolute host paths; flatpak-spawn executes them outside
     // the sandbox and the preflight still reports actionable portal errors.
-    if (isFlatpak(env) && FLATPAK_HOST_BINARIES.has(name)) return `/usr/bin/${name}`;
+    if (isFlatpak(env) && FLATPAK_HOST_BINARIES.has(name)) return resolveFlatpakHostBinary(name, env);
     return null;
+}
+
+// O caminho do binário no HOST, visto de dentro do Flatpak. Assumir /usr/bin/<nome> falhava
+// no Debian/Ubuntu, onde modprobe (e às vezes ip) ficam em /usr/sbin: o `flatpak-spawn --host
+// /usr/bin/modprobe -n` dava erro, o módulo virava "missing" e o painel acusava "kernel sem
+// módulos" com o WireGuard carregado. Pergunta ao host uma vez por binário (o painel consulta
+// as dependências a cada poucos segundos) e só guarda respostas válidas.
+const FLATPAK_HOST_LOOKUP_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const flatpakHostBinaryCache = new Map<string, string>();
+
+export function resetFlatpakHostBinaryCache(): void {
+    flatpakHostBinaryCache.clear();
+}
+
+export function parseFlatpakHostBinaryLookup(output: string): string | null {
+    const candidate = output.trim().split("\n")[0]?.trim() ?? "";
+    return path.isAbsolute(candidate) && !/[\0\r]/.test(candidate) ? candidate : null;
+}
+
+function resolveFlatpakHostBinary(name: string, env: NodeJS.ProcessEnv): string {
+    const cached = flatpakHostBinaryCache.get(name);
+    if (cached) return cached;
+    // "flatpak-spawn" não está na lista do host: a busca acima o acha dentro do sandbox.
+    const flatpakSpawn = findSystemBinary("flatpak-spawn", env);
+    if (flatpakSpawn) {
+        try {
+            const output = execFileSync(flatpakSpawn, [
+                "--host", "/bin/sh", "-c",
+                `PATH="$PATH:${FLATPAK_HOST_LOOKUP_PATH}"; command -v -- "$1"`,
+                "sh", name,
+            ], { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] });
+            const resolved = parseFlatpakHostBinaryLookup(output);
+            if (resolved) {
+                flatpakHostBinaryCache.set(name, resolved);
+                return resolved;
+            }
+        } catch {
+            // Sem permissão de portal ou host lento: fica o palpite antigo, sem cache, e o
+            // preflight continua apontando o erro do portal quando o comando rodar.
+        }
+    }
+    return `/usr/bin/${name}`;
+}
+
+// Variáveis que, dentro do Flatpak, apontam para o sandbox (~/.var/app/<id>/..., /app/...).
+// Repassadas ao `flatpak run` do HOST no relaunch, o XDG_DATA_HOME fazia o flatpak procurar a
+// instalação e os overrides do usuário em ~/.var/app/<id>/data/flatpak: o cliente relançado
+// perdia as permissões (pasta do Vencord, talk-name do flatpak-spawn) ou nem subia.
+const FLATPAK_SANDBOX_ENV_KEYS = Object.freeze([
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_DIRS",
+    "XDG_CONFIG_DIRS",
+]);
+
+// Ambiente do cliente relançado. Antes era uma lista fixa (DISPLAY, PATH, XDG_*...), e tudo o
+// que o lançador da distro exporta ficava de fora. No NixOS o `vesktop` é um wrapper que exporta
+// CHROME_DEVEL_SANDBOX e as variáveis do GTK/GSettings antes de executar o Electron "unwrapped":
+// sem elas o Electron relançado morria com SIGILL logo no início (coredump de usuário), e o
+// mesmo binário com o ambiente do processo abria normal. O ambiente do processo atual já é o
+// que o lançador montou, então ele vai inteiro, menos:
+//   - nomes com cara de segredo: as variáveis passam pela linha de comando do launcher e do
+//     systemd-run, visível a outros usuários por um instante;
+//   - a marca do namespace, que só o relaunch PARA DENTRO grava (o de saída não pode herdar);
+//   - ELECTRON_RUN_AS_NODE, que transformaria o cliente em um node puro;
+//   - valores com quebra de linha/NUL ou grandes demais, e nomes inválidos para o launcher.
+// XAUTHORITY e DBUS_SESSION_BUS_ADDRESS têm "AUTH"/"SESSION" no nome mas são necessários.
+const RELAUNCH_SECRET_NAME = /TOKEN|SECRET|PASSW(?:OR)?D|PASSPHRASE|CREDENTIAL|COOKIE|PRIVATE_?KEY|API_?KEY|ACCESS_?KEY|SESSION_?KEY|AUTH_?(?:TOKEN|SOCK|INFO|KEY)|BEARER/i;
+const RELAUNCH_DROPPED_NAMES = new Set([GOLIVE_PLUGIN_LINUX_NAMESPACE, "ELECTRON_RUN_AS_NODE", "_"]);
+const RELAUNCH_MAX_VALUE = 32 * 1024;
+
+export function relaunchEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const result: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(env)) {
+        if (typeof value !== "string" || value.length === 0 || value.length > RELAUNCH_MAX_VALUE) continue;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\0\r\n]/.test(value)) continue;
+        if (RELAUNCH_DROPPED_NAMES.has(key) || RELAUNCH_SECRET_NAME.test(key)) continue;
+        result[key] = value;
+    }
+    return result;
+}
+
+// Caminhos que só existem dentro do sandbox. No E2E o DBUS_SESSION_BUS_ADDRESS do sandbox
+// (unix:path=/run/flatpak/bus) fazia o zypak-helper do cliente relançado morrer sem barramento;
+// PULSE_SERVER e XAUTHORITY também apontam para /run/flatpak/ e não valem no host.
+const FLATPAK_SANDBOX_PATH = /(?:^|[=:\s'"])(?:\/run\/flatpak\/|\/app\/|[^\s:'"]*\/\.var\/app\/)/;
+
+export function hostEnvironmentFromFlatpak(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const host: NodeJS.ProcessEnv = { ...env };
+    for (const key of FLATPAK_SANDBOX_ENV_KEYS) delete host[key];
+    for (const [key, value] of Object.entries(host)) {
+        if (typeof value === "string" && FLATPAK_SANDBOX_PATH.test(value)) delete host[key];
+    }
+    // O barramento de sessão do host fica no mesmo XDG_RUNTIME_DIR (é o padrão do
+    // systemd/dbus); sem endereço, o zypak do flatpak relançado não sobe.
+    if (!host.DBUS_SESSION_BUS_ADDRESS && host.XDG_RUNTIME_DIR) {
+        host.DBUS_SESSION_BUS_ADDRESS = `unix:path=${host.XDG_RUNTIME_DIR}/bus`;
+    }
+    // O PATH do sandbox (/app/bin:/usr/bin) não descreve o host.
+    host.PATH = FLATPAK_HOST_LOOKUP_PATH;
+    return host;
 }
 
 export function isLinux(platform: string = process.platform): boolean {
@@ -362,6 +471,43 @@ export function linuxWireGuardModuleState(env: NodeJS.ProcessEnv = process.env):
     return state;
 }
 
+// Com o IPv6 fora do kernel (`ipv6.disable=1` no boot, ou o módulo ipv6 bloqueado) a família
+// IPv6 não é registrada: `ip addr add <ipv6>` e `ip -6 route` respondem "RTNETLINK answers:
+// Operation not supported" e derrubavam a ativação inteira, embora o módulo WireGuard tivesse
+// carregado (#404, reproduzido com ipv6.disable=1). O /proc/net/if_inet6 só existe quando a
+// pilha IPv6 está no kernel; desligar só por sysctl (disable_ipv6) não o remove e não afeta o
+// namespace novo do plugin.
+const IPV6_PROC_PATH = "/proc/net/if_inet6";
+
+export function linuxKernelHasIPv6(procPath: string = IPV6_PROC_PATH): boolean {
+    return fs.existsSync(procPath);
+}
+
+export interface LinuxAddressPlan {
+    addresses: string[];
+    dnsServers: string[];
+    skippedAddresses: string[];
+    skippedDnsServers: string[];
+}
+
+// Sem IPv6 no kernel não existe tráfego IPv6 para escapar do túnel, então descartar o endereço,
+// a rota e o DNS IPv6 do perfil não abre vazamento; o AllowedIPs `::/0` continua no peer (o
+// `wg setconf` aceita mesmo sem IPv6). Um perfil só IPv6 não tem como funcionar e falha com a causa.
+export function linuxAddressPlan(addresses: string[], dnsServers: string[], ipv6Available: boolean): LinuxAddressPlan {
+    if (ipv6Available) return { addresses, dnsServers, skippedAddresses: [], skippedDnsServers: [] };
+    const isIPv6 = (value: string) => net.isIP(value.split("/")[0]) === 6;
+    const kept = addresses.filter(address => !isIPv6(address));
+    if (kept.length === 0) {
+        throw new Error("O perfil WireGuard só tem endereço IPv6, mas o IPv6 está desligado no kernel (ex.: ipv6.disable=1). Use um perfil com endereço IPv4 ou reative o IPv6.");
+    }
+    return {
+        addresses: kept,
+        dnsServers: dnsServers.filter(server => !isIPv6(server)),
+        skippedAddresses: addresses.filter(isIPv6),
+        skippedDnsServers: dnsServers.filter(isIPv6),
+    };
+}
+
 export function linuxWireGuardModuleIssue(env: NodeJS.ProcessEnv = process.env): string | null {
     if (!isLinux()) return null;
     const release = os.release().trim() || "atual";
@@ -387,6 +533,70 @@ export function isValidLinuxName(name: string, maxLen = MAX_LINUX_NAMESPACE_LEN)
     return /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(trimmed);
 }
 
+// Namespaces de rede nomeados do HOST (nome -> inode do nsfs). O /run/netns não existe dentro
+// do sandbox do Flatpak: o cliente relançado estava no namespace e com o túnel funcionando, mas
+// o plugin não via o próprio namespace, concluía "relaunch não confirmado" e ficava em
+// recovery_required depois de toda ativação. O inode do nsfs é global no kernel, então
+// compará-lo com /proc/self/ns/net vale dentro e fora do sandbox; no Flatpak a tabela vem do
+// host numa chamada só, em cache curto (o painel consulta o status a cada poucos segundos).
+export const NETNS_RUN_DIR = "/run/netns";
+const FLATPAK_NETNS_CACHE_MS = 5000;
+let flatpakNetnsCache: { at: number; table: LinuxNetnsTable } | null = null;
+
+export interface LinuxNetnsTable {
+    reliable: boolean;
+    entries: Map<string, number>;
+}
+
+export function resetFlatpakNetnsCache(): void {
+    flatpakNetnsCache = null;
+}
+
+export function parseHostNetnsListing(output: string): Map<string, number> {
+    const entries = new Map<string, number>();
+    for (const line of output.split("\n")) {
+        const match = /^(\d+) ([A-Za-z0-9][A-Za-z0-9_.-]*)$/.exec(line.trim());
+        if (match) entries.set(match[2], Number(match[1]));
+    }
+    return entries;
+}
+
+export function readLinuxNetnsTable(env: NodeJS.ProcessEnv = process.env, netnsDir: string = NETNS_RUN_DIR): LinuxNetnsTable {
+    if (fs.existsSync(netnsDir) || !isFlatpak(env)) {
+        const entries = new Map<string, number>();
+        try {
+            if (fs.existsSync(netnsDir)) {
+                for (const name of fs.readdirSync(netnsDir)) {
+                    let inode = 0;
+                    try { inode = fs.statSync(path.join(netnsDir, name)).ino; } catch { /* sem acesso: nome conta, inode não */ }
+                    entries.set(name, inode);
+                }
+            }
+            return { reliable: true, entries };
+        } catch {
+            return { reliable: false, entries };
+        }
+    }
+    const now = Date.now();
+    if (flatpakNetnsCache && now - flatpakNetnsCache.at < FLATPAK_NETNS_CACHE_MS) return flatpakNetnsCache.table;
+    const flatpakSpawn = findSystemBinary("flatpak-spawn", env);
+    if (flatpakSpawn) {
+        try {
+            const output = execFileSync(flatpakSpawn, [
+                "--host", "/bin/sh", "-c",
+                `for n in ${netnsDir}/*; do [ -e "$n" ] || continue; printf '%s %s\\n' "$(stat -L -c %i -- "$n")" "\${n##*/}"; done`,
+            ], { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] });
+            const table = { reliable: true, entries: parseHostNetnsListing(output) };
+            flatpakNetnsCache = { at: now, table };
+            return table;
+        } catch {
+            // Sem portal (talk-name) ou host lento: mantém a leitura antiga (vazia) sem guardar,
+            // para não trocar o dependency_missing de quem ainda não liberou o flatpak-spawn.
+        }
+    }
+    return { reliable: true, entries: new Map() };
+}
+
 export function isProcessInNamespace(namespace?: string, env: NodeJS.ProcessEnv = process.env): boolean {
     if (!isLinux()) return false;
     const envNamespace = typeof env[GOLIVE_PLUGIN_LINUX_NAMESPACE] === "string"
@@ -395,12 +605,10 @@ export function isProcessInNamespace(namespace?: string, env: NodeJS.ProcessEnv 
     const targetNamespace = namespace?.trim() || envNamespace;
     if (!targetNamespace || (envNamespace && envNamespace !== targetNamespace)) return false;
     try {
-        const nsRunPath = path.join("/run/netns", targetNamespace);
         const selfNsPath = "/proc/self/ns/net";
-        if (!fs.existsSync(nsRunPath) || !fs.existsSync(selfNsPath)) return false;
-        const statNs = fs.statSync(nsRunPath);
-        const statSelf = fs.statSync(selfNsPath);
-        return statNs.ino > 0 && statNs.ino === statSelf.ino;
+        if (!fs.existsSync(selfNsPath)) return false;
+        const inode = readLinuxNetnsTable(env).entries.get(targetNamespace);
+        return typeof inode === "number" && inode > 0 && inode === fs.statSync(selfNsPath).ino;
     } catch {
         return false;
     }
@@ -564,27 +772,6 @@ async function runCommandAsync(
     return promise;
 }
 
-async function execPrivileged(
-    binary: string,
-    args: string[],
-    options?: { timeoutMs?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
-): Promise<CommandResult> {
-    const env = options?.env || process.env;
-    const isFlatpakEnv = isFlatpak(env);
-    const inNamespace = isProcessInNamespace(undefined, env);
-    const spec = resolveCommandInvocation(binary, args, {
-        elevated: true,
-        inNamespace,
-        isFlatpakEnv,
-        env,
-    });
-    const result = await runCommandAsync(spec, options);
-    if (result.exitCode !== 0) {
-        const detail = safeDiagnosticDetail(result.stderr || result.stdout || `Exit code ${result.exitCode}`);
-        throw new Error(`Falha ao executar ${path.basename(binary)}: ${detail}`);
-    }
-    return result;
-}
 class LinuxAuthorizationError extends Error {
     constructor(message: string, readonly exitCode: number | null) {
         super(message);
@@ -593,6 +780,38 @@ class LinuxAuthorizationError extends Error {
 }
 
 export type LinuxPrivilegedCommand = readonly [file: string, args: readonly string[]];
+
+// Falha de um passo identificado da sequência elevada; o `step` permite ao chamador saber se
+// foi o modprobe/checagem do módulo ou um comando posterior.
+export class LinuxPrivilegedStepError extends Error {
+    constructor(message: string, readonly step: number) {
+        super(message);
+        this.name = "LinuxPrivilegedStepError";
+    }
+}
+
+// O script escreve "__GOLIVE_STEP__<n>" antes de cada comando e, com `set -e`, para no que
+// falhou: é o ÚLTIMO marcador que aponta o culpado. Pegar o primeiro culpava sempre o modprobe
+// ou o `ip netns add` (#404: o erro real era o `ip addr add` IPv6, vários passos depois).
+export function failedPrivilegedStep(stderr: string, commandCount: number): number {
+    let step = -1;
+    for (const match of stderr.matchAll(/__GOLIVE_STEP__(\d+)/g)) step = Number(match[1]);
+    return Number.isInteger(step) && step >= 0 && step < commandCount ? step : -1;
+}
+
+// Nome curto para a mensagem ("ip addr add", "ip -6 route", "wg setconf"): só o binário dizia
+// "ip" para uma dúzia de passos diferentes. Pula o `-n <namespace>` e para antes de caminhos e
+// de argumentos com espaço (o script do `sh -c`), para não levar arquivo temporário ao log.
+export function describeLinuxPrivilegedCommand(command: LinuxPrivilegedCommand): string {
+    const args = [...command[1]];
+    if (args[0] === "-n") args.splice(0, 2);
+    const words: string[] = [];
+    for (const arg of args) {
+        if (words.length >= 2 || arg.startsWith("/") || /\s/.test(arg)) break;
+        words.push(arg);
+    }
+    return [path.basename(command[0]), ...words].join(" ");
+}
 
 function shellQuote(value: string): string {
     return `'${value.replaceAll("'", "'\"'\"'")}'`;
@@ -659,7 +878,7 @@ async function execPrivilegedSequence(
         isFlatpakEnv: isFlatpak(env),
         env,
     });
-    let result = await runPrivilegedCommand(spec, options);
+    let result = await runPrivilegedCommand(spec, options).finally(resetFlatpakNetnsCache);
     const initialFailure = result.exitCode === null || result.exitCode === 0
         ? null
         : new LinuxAuthorizationError(
@@ -671,14 +890,11 @@ async function execPrivilegedSequence(
         const terminalSpec = pkexec
             ? resolveTerminalAuthorizationSpec(pkexec, shellPath, env, ["-c", script])
             : null;
-        if (terminalSpec) result = await runPrivilegedCommand(terminalSpec, options);
+        if (terminalSpec) result = await runPrivilegedCommand(terminalSpec, options).finally(resetFlatpakNetnsCache);
     }
     if (result.exitCode !== 0) {
-        const match = /__GOLIVE_STEP__(\d+)/.exec(result.stderr);
-        const step = match ? Number(match[1]) : -1;
-        const failedCommand = Number.isInteger(step) && step >= 0 && step < commands.length
-            ? commands[step]
-            : null;
+        const step = failedPrivilegedStep(result.stderr, commands.length);
+        const failedCommand = step >= 0 ? commands[step] : null;
         const detail = safeDiagnosticDetail(
             result.stderr.replace(/__GOLIVE_STEP__\d+/g, "").trim()
                 || result.stdout
@@ -688,7 +904,10 @@ async function execPrivilegedSequence(
         if (result.exitCode === 126) {
             throw new LinuxAuthorizationError(`A autorização administrativa foi cancelada.${guidance ? ` ${guidance}` : ""}`, result.exitCode);
         }
-        throw new Error(`Falha ao executar ${failedCommand ? path.basename(failedCommand[0]) : "comando privilegiado"}: ${detail}${guidance ? ` ${guidance}` : ""}`);
+        throw new LinuxPrivilegedStepError(
+            `Falha ao executar ${failedCommand ? describeLinuxPrivilegedCommand(failedCommand) : "comando privilegiado"}: ${detail}${guidance ? ` ${guidance}` : ""}`,
+            step,
+        );
     }
     return result;
 }
@@ -1167,16 +1386,10 @@ export function inspectLinuxNetworkSync(
     const ownerNamespace = typeof owner?.namespace === "string" && owner.namespace.trim() ? owner.namespace.trim() : null;
     const ownerInterface = typeof owner?.interfaceName === "string" && owner.interfaceName.trim() ? owner.interfaceName.trim() : null;
 
-    let knownNetns: string[] = [];
-    let netnsInspectionReliable = true;
-    try {
-        const netnsDir = "/run/netns";
-        if (fs.existsSync(netnsDir)) {
-            knownNetns = fs.readdirSync(netnsDir);
-        }
-    } catch {
-        netnsInspectionReliable = false;
-    }
+    // No Flatpak a lista vem do host (o /run/netns não existe no sandbox).
+    const netnsTable = readLinuxNetnsTable();
+    const knownNetns = [...netnsTable.entries.keys()];
+    const netnsInspectionReliable = netnsTable.reliable;
 
     let hostInterfaces: string[] = [];
     let hostInterfacesReliable = true;
@@ -1318,8 +1531,12 @@ export async function startLinuxNetwork(
     const mkdirPath = findSystemBinary("mkdir");
     const rmPath = findSystemBinary("rm");
 
-    const addresses = parseWireGuardAddresses(rawConfig);
-    const dnsServers = parseWireGuardDns(rawConfig);
+    const ipv6Available = options?.ipv6Available ?? linuxKernelHasIPv6();
+    const { addresses, dnsServers, skippedAddresses, skippedDnsServers } = linuxAddressPlan(
+        parseWireGuardAddresses(rawConfig),
+        parseWireGuardDns(rawConfig),
+        ipv6Available,
+    );
     const setconfContent = buildWireGuardSetconf(rawConfig);
 
     const randomSuffix = randomUUID().replace(/-/g, "");
@@ -1342,6 +1559,12 @@ export async function startLinuxNetwork(
     const signal = options?.signal;
 
     options?.log?.("info", "linux.network.started", { phase: "preparing" });
+    if (skippedAddresses.length > 0 || skippedDnsServers.length > 0) {
+        options?.log?.("info", "linux.network.ipv6_unavailable", {
+            skipped_addresses: skippedAddresses.length,
+            skipped_dns: skippedDnsServers.length,
+        });
+    }
     try {
         const commands: LinuxPrivilegedCommand[] = [];
         if (moduleState === "available") {
@@ -1351,6 +1574,7 @@ export async function startLinuxNetwork(
             // no erro críptico do `ip` ("Unknown device type") em vez de dizer o que fazer.
             commands.push(linuxWireGuardModuleCheckCommand(findSystemBinary("sh") || "/bin/sh"));
         }
+        const moduleStepCount = commands.length;
 
         // A sequência inteira roda sob uma única autorização; o rollback permanece dentro do
         // mesmo processo root para não abrir uma segunda janela de senha em caso de falha.
@@ -1386,9 +1610,13 @@ export async function startLinuxNetwork(
             tempResolvFile = path.join(dataDir, `resolv-${randomSuffix.slice(0, 8)}.tmp`);
             fs.writeFileSync(tempResolvFile, resolvLines, { mode: 0o600 });
             const netnsDir = `/etc/netns/${namespace}`;
+            // 644 como qualquer /etc/resolv.conf: o netns-launcher monta este arquivo sobre o
+            // /etc/resolv.conf do cliente relançado, que roda como o usuário. Com 600 (root) o
+            // Discord não conseguia ler o próprio DNS e todo nome falhava (ERR_NAME_NOT_RESOLVED)
+            // embora a rota pelo túnel funcionasse. O conteúdo é só a lista de servidores DNS.
             commands.push(
                 [mkdirPath, ["-p", netnsDir]],
-                [installPath, ["-m", "600", tempResolvFile, path.join(netnsDir, "resolv.conf")]],
+                [installPath, ["-m", "644", tempResolvFile, path.join(netnsDir, "resolv.conf")]],
             );
         }
 
@@ -1406,7 +1634,14 @@ export async function startLinuxNetwork(
             // Depois de rodar modprobe, o "available" em cache ficou velho: a proxima consulta
             // (painel/watchdog) precisa ver o estado real.
             resetLinuxWireGuardModuleCache();
-            if (moduleState === "available" && linuxWireGuardModuleState() !== "loaded") {
+            // Só a falha do próprio modprobe/checagem vira "módulo não carregou". Antes, qualquer
+            // erro com o módulo ainda descarregado virava essa mensagem, inclusive o prazo do
+            // polkit estourando antes de o modprobe rodar (#404: 60.028 ms, exatamente o timeout),
+            // e a orientação de responder o diálogo se perdia.
+            const failedAtModuleStep = error instanceof LinuxPrivilegedStepError
+                && error.step >= 0
+                && error.step < moduleStepCount;
+            if (failedAtModuleStep && linuxWireGuardModuleState() !== "loaded") {
                 throw new Error(wireGuardModuleLoadFailureMessage());
             }
             throw error;
@@ -1442,6 +1677,34 @@ export async function startLinuxNetwork(
     }
 }
 
+// Comandos da limpeza, para uma única sequência elevada. O que pode já não existir (DNS,
+// interface dentro ou fora do namespace) é tolerado; o namespace só falha se continuar lá.
+export function linuxCleanupCommands(paths: {
+    namespace: string | null;
+    interfaceName: string | null;
+    ipPath: string | null;
+    rmPath: string | null;
+    shellPath: string;
+    netnsDir?: string;
+}): LinuxPrivilegedCommand[] {
+    const { namespace, interfaceName, ipPath, rmPath, shellPath } = paths;
+    const netnsDir = paths.netnsDir ?? NETNS_RUN_DIR;
+    const commands: LinuxPrivilegedCommand[] = [];
+    if (namespace && rmPath) {
+        commands.push([shellPath, ["-c", '"$0" -rf -- "$1" 2>/dev/null || true', rmPath, `/etc/netns/${namespace}`]]);
+    }
+    if (interfaceName && ipPath) {
+        if (namespace) {
+            commands.push([shellPath, ["-c", '"$0" -n "$1" link del "$2" 2>/dev/null || true', ipPath, namespace, interfaceName]]);
+        }
+        commands.push([shellPath, ["-c", '"$0" link del "$1" 2>/dev/null || true', ipPath, interfaceName]]);
+    }
+    if (namespace && ipPath) {
+        commands.push([shellPath, ["-c", '"$0" netns del "$1" || [ ! -e "$2/$1" ]', ipPath, namespace, netnsDir]]);
+    }
+    return commands;
+}
+
 export async function stopLinuxNetwork(
     owner?: Pick<VpnOwnerRecord, "namespace" | "interfaceName"> | LinuxNetworkOwner | null,
     options?: LinuxStopOptions
@@ -1474,67 +1737,23 @@ export async function stopLinuxNetwork(
 
     const ipPath = findSystemBinary("ip");
     const rmPath = findSystemBinary("rm");
-    const timeoutMs = options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    const shellPath = findSystemBinary("sh") || "/bin/sh";
+    // Uma autorização só, como na ativação: o prazo inclui digitar a senha.
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_AUTH_PROMPT_TIMEOUT_MS;
     const signal = options?.signal;
 
-    let dnsRemoved = false;
-    let interfaceRemoved = false;
-    let namespaceRemoved = false;
+    // Antes eram cinco pkexec, um por comando: cinco pedidos de senha para restaurar, e ao
+    // fechar o Discord (NixOS, polkit sem auth_admin_keep) cada um voltava "Not authorized" e o
+    // namespace ficava para trás. Agora vai tudo numa sequência elevada; o que pode não existir
+    // é tolerado como antes, e a inspeção abaixo é quem decide se sobrou algo.
+    const commands = linuxCleanupCommands({ namespace, interfaceName, ipPath, rmPath, shellPath });
+    if (commands.length > 0) await execPrivilegedSequence(commands, { timeoutMs, signal });
 
-    // 1. Remover /etc/netns/<ns>/resolv.conf e diretório
-    if (namespace && rmPath) {
-        try {
-            const resolvPath = `/etc/netns/${namespace}/resolv.conf`;
-            const netnsDir = `/etc/netns/${namespace}`;
-            await execPrivileged(rmPath, ["-f", resolvPath], { timeoutMs, signal });
-            await execPrivileged(rmPath, ["-rf", netnsDir], { timeoutMs, signal });
-            dnsRemoved = true;
-        } catch {
-            // DNS pode não existir
-        }
-    }
-
-    // 2. Remover interface se conhecida
-    if (interfaceName && ipPath) {
-        if (namespace) {
-            try {
-                await execPrivileged(ipPath, ["-n", namespace, "link", "del", interfaceName], { timeoutMs, signal });
-                interfaceRemoved = true;
-            } catch (err) {
-                const msg = safeDiagnosticDetail(err);
-                if (/Cannot find device|does not exist|No such device/i.test(msg)) {
-                    interfaceRemoved = true;
-                }
-            }
-        }
-        try {
-            await execPrivileged(ipPath, ["link", "del", interfaceName], { timeoutMs, signal });
-            interfaceRemoved = true;
-        } catch (err) {
-            const msg = safeDiagnosticDetail(err);
-            if (/Cannot find device|does not exist|No such device/i.test(msg)) {
-                interfaceRemoved = true;
-            }
-        }
-    }
-
-    // 3. Remover namespace se conhecido
-    if (namespace && ipPath) {
-        try {
-            await execPrivileged(ipPath, ["netns", "del", namespace], { timeoutMs, signal });
-            namespaceRemoved = true;
-        } catch (err) {
-            const msg = safeDiagnosticDetail(err);
-            if (/No such file or directory|does not exist|Cannot remove namespace file/i.test(msg)) {
-                namespaceRemoved = true;
-            } else {
-                throw err;
-            }
-        }
-    }
-
-    // 4. Verificar se a remoção teve êxito
+    // Verificar se a remoção teve êxito
     const inspection = inspectLinuxNetworkSync(owner);
+    const dnsRemoved = Boolean(namespace && rmPath);
+    const interfaceRemoved = Boolean(interfaceName && ipPath && !inspection.interfaceExists);
+    const namespaceRemoved = Boolean(namespace && ipPath && !inspection.namespaceExists);
     if (namespace && inspection.namespaceExists) {
         throw new Error(`Falha ao remover namespace '${namespace}'; o namespace ainda existe no sistema.`);
     }

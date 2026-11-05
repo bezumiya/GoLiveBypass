@@ -67,10 +67,12 @@ import {
     DEFAULT_AUTH_PROMPT_TIMEOUT_MS,
     findSystemBinary,
     GOLIVE_PLUGIN_LINUX_NAMESPACE,
+    hostEnvironmentFromFlatpak,
     isFlatpak as isLinuxFlatpak,
     isProcessInNamespace,
     isValidLinuxName,
     linuxAuthorizationGuidance,
+    relaunchEnvironment,
     waitForFile,
 } from "./vpn-linux";
 import * as proton from "./vpn-proton";
@@ -155,13 +157,17 @@ export function findLinuxNetnsLauncher(preferredCandidates?: string[], materiali
     try { return proton.materializeEmbeddedLinuxAsset("netns-launcher", materializeDirectory); } catch {}
     throw new Error("O launcher Linux do namespace não foi encontrado no pacote do plugin.");
 }
+// Script root que grava o launcher a partir do stdin. O stdin chega como socket (o libuv usa
+// socketpair e o flatpak-spawn repassa o fd), e `install ... /dev/stdin` falhava com "cannot
+// open '/dev/stdin': No such device or address": o relaunch Flatpak nunca passava daqui. Ler o
+// fd 0 com `cat` funciona com socket; o rm + noclobber evita gravar por cima de algo existente.
+const FLATPAK_LAUNCHER_WRITE_SCRIPT = 'rm -f -- "$1" && umask 077 && set -C && cat > "$1" && chmod 700 -- "$1"';
+
 async function installFlatpakNetnsLauncher(flatpakSpawn: string, pkexec: string, launcher: string, uid: number): Promise<string> {
-    const install = findSystemBinary("install");
-    if (!install) throw new Error("Utilitário 'install' não encontrado no host para preparar o relaunch Flatpak.");
     const destination = `/run/user/${uid}/golivebypass-netns-launcher-${process.pid}-${Date.now()}`;
     const payload = readFileSync(launcher);
     const { promise, resolve, reject } = Promise.withResolvers<string>();
-    const child = spawn(flatpakSpawn, ["--host", pkexec, install, "-m", "700", "/dev/stdin", destination], {
+    const child = spawn(flatpakSpawn, ["--host", pkexec, "/bin/sh", "-c", FLATPAK_LAUNCHER_WRITE_SCRIPT, "sh", destination], {
         stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
@@ -535,6 +541,12 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
     }
 
     const currentlyInNamespace = isProcessInNamespace();
+    // Só o relaunch PARA DENTRO do namespace grava GOLIVE_PLUGIN_LINUX_NAMESPACE no ambiente (o
+    // relaunch comum e o de saída não repassam). Ao restaurar, o controller apaga o namespace
+    // ANTES de pedir o relaunch; o isProcessInNamespace compara com /run/netns/<ns>, que já não
+    // existe, e caía no relaunch comum: o cliente novo herdava o namespace morto (só lo, nenhuma
+    // rota) e ficava sem internet. Para SAIR basta saber que o processo foi lançado lá dentro.
+    const launchedIntoNamespace = Boolean(process.env[GOLIVE_PLUGIN_LINUX_NAMESPACE]?.trim());
 
     const rawArgs = process.argv.slice(1);
     const clientArgs: string[] = [];
@@ -544,49 +556,11 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
         clientArgs.push(arg);
     }
 
-    const safeEnvKeys = [
-        "WAYLAND_DISPLAY",
-        "DISPLAY",
-        "XAUTHORITY",
-        "XDG_BACKEND",
-        "XDG_SESSION_TYPE",
-        "GDK_BACKEND",
-        "QT_QPA_PLATFORM",
-        "MOZ_ENABLE_WAYLAND",
-        "ELECTRON_OZONE_PLATFORM_HINT",
-        "OZONE_PLATFORM",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "XDG_RUNTIME_DIR",
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_DESKTOP",
-        "DESKTOP_SESSION",
-        "XDG_CONFIG_DIRS",
-        "XDG_DATA_DIRS",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "PULSE_SERVER",
-        "PIPEWIRE_REMOTE",
-        "PIPEWIRE_LATENCY",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "LC_MESSAGES",
-        "SHELL",
-        "TERM",
-        "TZ",
-    ];
-
-    const safeEnv: NodeJS.ProcessEnv = {};
-    for (const key of safeEnvKeys) {
-        const val = process.env[key];
-        if (typeof val === "string" && val.length > 0 && !/[\0\r\n]/.test(val)) {
-            safeEnv[key] = val;
-        }
-    }
+    // O ambiente do processo atual é o que o lançador da distro montou (no NixOS, o wrapper do
+    // Vesktop/Electron); relaunchEnvironment tira só segredos e marcas internas. No Flatpak o
+    // ambiente vai para o `flatpak run` do HOST: sem as variáveis do sandbox.
+    const sourceEnv = inFlatpak ? hostEnvironmentFromFlatpak(process.env) : process.env;
+    const safeEnv: NodeJS.ProcessEnv = relaunchEnvironment(sourceEnv);
 
     if (namespace) {
         safeEnv[GOLIVE_PLUGIN_LINUX_NAMESPACE] = namespace;
@@ -605,7 +579,7 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
         }
     }
 
-    if (!namespace && currentlyInNamespace) {
+    if (!namespace && (currentlyInNamespace || launchedIntoNamespace)) {
         const unitName = `golivebypass-relaunch-${Date.now()}`;
         if (inFlatpak) {
             const flatpakSpawn = findSystemBinary("flatpak-spawn");
@@ -684,7 +658,9 @@ async function requestRelaunch(namespace: string | null): Promise<boolean> {
     }
 
     if (namespace) {
-        const directNativeLaunch = currentlyInNamespace && !inFlatpak;
+        // Só relança direto quando já está NESTE namespace; com env de outro namespace (ou de um
+        // que sumiu) o processo filho herdaria a rede errada, então passa pelo launcher.
+        const directNativeLaunch = isProcessInNamespace(namespace) && !inFlatpak;
         let temporaryHostLauncher: string | undefined;
         let temporaryHostLauncherAccepted = false;
         // Marcador combinado com o launcher (--confirm=): só existe depois que o novo processo

@@ -6,6 +6,11 @@
 
 import { sendBotMessage } from "@api/Commands";
 import { definePluginSettings } from "@api/Settings";
+// O Button saiu de @webpack/common no Vencord v1.15.14 (commit 2bf2440c, 25/10/2026) e no
+// Equicord: importar de lá quebrava o `pnpm build` em qualquer checkout atual. O componente
+// próprio (@components/Button) existe nos dois desde o fim de 2025, com as mesmas props
+// que o plugin usa (onClick, disabled, children).
+import { Button } from "@components/Button";
 import { Card } from "@components/Card";
 import { FormSwitch } from "@components/FormSwitch";
 import { Paragraph } from "@components/Paragraph";
@@ -15,7 +20,8 @@ import { useAwaiter } from "@utils/react";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import type { RenderModalProps } from "@vencord/discord-types";
 import { findStoreLazy } from "@webpack";
-import { Button, closeModal as closeDiscordModal, Constants, MaskedLink, Modal, openModal, React, RestAPI, SearchableSelect, showToast, TextArea, TextInput, useEffect, UserStore, useState } from "@webpack/common";
+import * as WebpackCommon from "@webpack/common";
+import { closeModal as closeDiscordModal, Constants, MaskedLink, Modal, openModal, React, RestAPI, SearchableSelect, TextArea, TextInput, useEffect, UserStore, useState } from "@webpack/common";
 
 import {
     formatProtonRoutePing,
@@ -89,6 +95,47 @@ type PluginIpcExports = Omit<typeof import("./native"), "findLinuxNetnsLauncher"
 const Native = VencordNative?.pluginHelpers?.GoLiveBypass as unknown as (PluginNative<PluginIpcExports> & PluginUpdateNative) | undefined;
 
 const logger = new Logger("GoLiveBypass");
+
+type PluginToastKind = "message" | "success" | "failure" | "custom";
+interface PluginToastOptions {
+    position?: number;
+    duration?: number;
+    component?: React.ReactNode;
+    /** Texto do toast quando o mod não aceita componente (API nova). */
+    fallback?: string;
+}
+interface LegacyToastsApi {
+    create(message: string, type: string, options?: object): unknown;
+    show(toast: unknown): void;
+}
+
+// Vencord/Equicord trocaram a API de toast em 03/10/2026 (Vencord 0c3c962, "fix Toasts"). Antes:
+// showToast(mensagem, tipo, opções) e Toasts.create/show, inclusive o toast "custom" com
+// componente. Depois: só o showToast({ text, variant }) do Discord, sem componente. Chamado no
+// formato antigo numa versão nova, o toast não aparecia (aviso de falha, de sucesso, de update).
+// O plugin roda nas duas: usa Toasts quando o mod ainda o exporta e o formato novo quando não.
+function showToast(text: string, kind: PluginToastKind = "message", options: PluginToastOptions = {}): void {
+    const { fallback, ...legacyOptions } = options;
+    try {
+        const legacy = Reflect.get(WebpackCommon, "Toasts") as Partial<LegacyToastsApi> | undefined;
+        if (legacy && typeof legacy.create === "function" && typeof legacy.show === "function") {
+            legacy.show(legacy.create(text, kind, legacyOptions));
+            return;
+        }
+        const showDiscordToast = Reflect.get(WebpackCommon, "showToast") as (data: {
+            text: string;
+            variant?: "default" | "success" | "critical";
+            duration?: number;
+        }) => void;
+        showDiscordToast({
+            text: kind === "custom" && fallback ? fallback : text,
+            variant: kind === "success" ? "success" : kind === "failure" ? "critical" : "default",
+            ...(typeof options.duration === "number" ? { duration: options.duration } : {}),
+        });
+    } catch (error) {
+        logger.warn("não consegui mostrar o toast", error);
+    }
+}
 
 interface RegionStore {
     getPreferredRegion(): string | null;
@@ -351,6 +398,7 @@ function notifyPluginUpdateFailure(current: unknown, channel: unknown, error: un
         position: 1 /* Discord ToastPosition.BOTTOM */,
         duration: 15_000,
         component: <PluginUpdateFailureToast currentVersion={context.currentVersion} channel={context.channel} error={context.detail} lifecycleGeneration={pluginLifecycleGeneration} />,
+        fallback: "A atualização do GoLiveBypass falhou. Abra o painel do plugin para ver o motivo e tentar de novo.",
     });
 }
 
@@ -366,6 +414,7 @@ function notifyPendingPluginUpdate(current: unknown, version: unknown, channel: 
         position: 1 /* Discord ToastPosition.BOTTOM */,
         duration: 15_000,
         component: <PluginUpdateToast currentVersion={currentVersion} availableVersion={version} channel={normalizedChannel} lifecycleGeneration={pluginLifecycleGeneration} />,
+        fallback: `GoLiveBypass ${version} disponível. Atualize pelo painel do plugin.`,
     });
 }
 
