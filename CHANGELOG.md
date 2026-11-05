@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.16] - 2026-11-05
+
 ### Corrigido
 
 - **Windows: anexo "carrega e some" nas rotas que fragmentam (#373, #400).** A causa era do WireSock: quando o pacote do servidor chegava fragmentado em IP por dentro do túnel, o `wiresock-client` gravava o checksum TCP calculado só sobre o primeiro fragmento, e o Windows descartava o pacote remontado (medido na 3.4.8.1 e na 3.8.1.1, relatado em [wiresock/WireSockUI#168](https://github.com/wiresock/WireSockUI/issues/168)). A WireSock corrigiu na 3.8.2. A GUI e o plugin agora instalam o SDK 3.8.2.1 oficial, com o hash fixado, e exigem essa versão: uma instalação anterior é trocada sozinha na próxima ativação, como já acontecia com uma instalação incompleta. A exclusão das rotas grátis do México na escolha automática (`protonAvoidFreeMexico`) continua ligada por padrão até o Go Live ser validado nelas sem o contorno. Validado no Windows 11 com a GUI: a ativação trocou a 3.4.8.1 instalada pela 3.8.2.1 sozinha; na MX-FREE#11, com a rota fragmentando (54 fragmentos IPv4 recebidos, nenhuma falha de remontagem), todos os anexos de 195 KB a 6,6 MB subiram, inclusive depois do primeiro minuto de túnel, quando a 3.4.8.1 travava; na MX-FREE#17 também, e desativar parou o WireSock sem resíduo.
