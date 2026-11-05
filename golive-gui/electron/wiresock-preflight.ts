@@ -3,7 +3,9 @@ import path from "path";
 import { execFile } from "child_process";
 import * as logger from "./logger";
 
-export const MIN_WIRESOCK_SDK = Object.freeze({ major: 3, minor: 4, patch: 8, build: 1 });
+// Mínimo é a versão com o checksum de fragmentos corrigido: uma instalação mais antiga é
+// tratada como incompatível e trocada pelo instalador oficial fixado.
+export const MIN_WIRESOCK_SDK = Object.freeze({ major: 3, minor: 8, patch: 2, build: 1 });
 export type WireSockVersion = { major: number; minor: number; patch: number; build: number };
 export type WireSockCandidate = { executable: string; booster: string; executableVersion: WireSockVersion; boosterVersion: WireSockVersion };
 
@@ -20,6 +22,10 @@ export function compareWireSockVersion(left: WireSockVersion, right: WireSockVer
   return 0;
 }
 
+export function formatWireSockVersion(version: WireSockVersion): string {
+  return `${version.major}.${version.minor}.${version.patch}.${version.build}`;
+}
+
 export function isSupportedWireSockVersion(version: WireSockVersion): boolean {
   return compareWireSockVersion(version, MIN_WIRESOCK_SDK) >= 0;
 }
@@ -30,7 +36,7 @@ export function selectSupportedWireSock(candidates: WireSockCandidate[]): WireSo
     isSupportedWireSockVersion(candidate.boosterVersion),
   ).filter((candidate) => compareWireSockVersion(candidate.executableVersion, candidate.boosterVersion) === 0
   ).sort((a, b) => compareWireSockVersion(b.executableVersion, a.executableVersion));
-  if (!valid[0]) throw new Error("Nenhuma instalação WireSock SDK compatível foi encontrada (mínimo 3.4.8.1 com wiresock-client.exe e wgbooster.dll).");
+  if (!valid[0]) throw new Error(`Nenhuma instalação WireSock SDK compatível foi encontrada (mínimo ${formatWireSockVersion(MIN_WIRESOCK_SDK)} com wiresock-client.exe e wgbooster.dll).`);
   return valid[0];
 }
 

@@ -2138,7 +2138,7 @@ const settings = definePluginSettings({
     },
     protonAvoidFreeMexico: {
         type: OptionType.BOOLEAN,
-        description: "Evitar rotas grátis do México na escolha automática (Windows). Nelas, imagens e arquivos param de enviar cerca de 1 minuto depois de ativar.",
+        description: "Evitar rotas grátis do México na escolha automática (Windows). Precaução: o envio de imagens e arquivos nelas foi corrigido com o WireSock 3.8.2, e o Go Live ainda está em validação.",
         default: true
     }
 });

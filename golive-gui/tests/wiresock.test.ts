@@ -311,7 +311,8 @@ describe("WireSock no Windows", () => {
     expect(src).toContain("wiresock.net/_api/download-release.php");
     expect(src).toContain("/quiet");
     expect(src).toContain("/norestart");
-    expect(src).toContain("abfeebdc645de36b95fabbed00c7fdb0bf4d0c68c5518608450619c61876d33e");
+    expect(src).toContain("version=3.8.2.1");
+    expect(src).toContain("3fa1ca6e595ff64ee638ccda8c14c8c5c6b65099130c4345f94464bcc3a0469c");
   });
 
   it("valida o instalador antes de elevar e deixa o driver como diagnostico", () => {

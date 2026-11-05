@@ -545,7 +545,7 @@ Um registro típico de uma ativação que deu certo:
 
 ```
 abrindo plugin VPN | win32 x64 | electron 43.x
-WireSock SDK compatível encontrado | version=3.4.8.1
+WireSock SDK compatível encontrado | version=3.8.2.1
 serviço WireSock ativo com filtro por aplicativo | allowedApps=...Discord.exe, ...Update.exe
 diagnóstico assíncrono da rede | mode=log-only
 probe de rota do Discord concluído | mode=log-only
