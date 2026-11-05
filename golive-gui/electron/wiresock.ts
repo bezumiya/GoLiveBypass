@@ -25,11 +25,14 @@ Endpoint = 84.20.27.53:51820
 PersistentKeepalive = 25
 `;
 
-const WIRESOCK_OFFICIAL_DOWNLOAD = "https://wiresock.net/_api/download-release.php?product=wiresock-secure-connect-sdk&platform={platform}&version=3.4.8.1&channel=winget";
+// 3.8.2.1 corrige o checksum TCP de fragmentos IPv4 recebidos (wiresock/WireSockUI#168):
+// até a 3.8.1.1 o Windows descartava os pacotes remontados e o anexo do Discord travava
+// nas rotas que fragmentam (#373/#400).
+const WIRESOCK_OFFICIAL_DOWNLOAD = "https://wiresock.net/_api/download-release.php?product=wiresock-secure-connect-sdk&platform={platform}&version=3.8.2.1&channel=winget";
 const WIRESOCK_INSTALLER_HASHES: Record<string, string> = {
-  x64: "abfeebdc645de36b95fabbed00c7fdb0bf4d0c68c5518608450619c61876d33e",
-  x86: "53c8b434482043b2eb734d05595fb357ce87460dc60f49c79f57011d655539b0",
-  arm64: "62f641a19c2d4a89ce58ba4c0539166982fb89373aef3c87b66fea33e26db311",
+  x64: "3fa1ca6e595ff64ee638ccda8c14c8c5c6b65099130c4345f94464bcc3a0469c",
+  x86: "5e6ff229c3ddc5fbe136b2db0ff19433a80a6ae8228584da0b88c422a73a0b17",
+  arm64: "725e3b671118d63a0d6de95756540f0d297bcb7b2eaff665b8726bdd628407b3",
 };
 const WIRESOCK_SERVICE_NAMES = ["wiresock-client-service", "wiresock-pro-client-service"] as const;
 // O SDK 3.4.x instala o filtro WireGuard como serviço de kernel `ndiswgc` (medido

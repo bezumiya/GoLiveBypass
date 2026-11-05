@@ -17,14 +17,25 @@ describe("WireSock SDK preflight", () => {
 
   it("rejeita a versão legada 1.4.7.1 antes do serviço", () => {
     expect(isSupportedWireSockVersion(version(1, 4, 7, 1))).toBe(false);
-    expect(() => selectSupportedWireSock([{ executable: "legacy.exe", booster: "wgbooster.dll", executableVersion: version(1, 4, 7, 1), boosterVersion: version(1, 4, 7, 1) }])).toThrow(/3\.4\.8\.1/);
-    expect(isSupportedWireSockVersion(parseWireSockVersion("3.4.8.1-beta") ?? version(0, 0, 0, 0))).toBe(false);
+    expect(() => selectSupportedWireSock([{ executable: "legacy.exe", booster: "wgbooster.dll", executableVersion: version(1, 4, 7, 1), boosterVersion: version(1, 4, 7, 1) }])).toThrow(/3\.8\.2\.1/);
+    expect(isSupportedWireSockVersion(parseWireSockVersion("3.8.2.1-beta") ?? version(0, 0, 0, 0))).toBe(false);
+  });
+
+  // Até a 3.8.1.1 o checksum TCP de fragmentos IPv4 recebidos saía errado e o Windows
+  // descartava o pacote (anexo travado, #373/#400; wiresock/WireSockUI#168).
+  it("recusa as versões com o checksum de fragmentos errado", () => {
+    expect(isSupportedWireSockVersion(version(3, 4, 8, 1))).toBe(false);
+    expect(isSupportedWireSockVersion(version(3, 8, 1, 1))).toBe(false);
+    expect(isSupportedWireSockVersion(version(3, 8, 2, 1))).toBe(true);
+    expect(() => selectSupportedWireSock([
+      { executable: "old.exe", booster: "old.dll", executableVersion: version(3, 4, 8, 1), boosterVersion: version(3, 4, 8, 1) },
+    ])).toThrow(/3\.8\.2\.1/);
   });
 
   it("exige o par EXE + wgbooster.dll e escolhe a maior versão suportada", () => {
     const candidates = [
-      { executable: "C:/Program Files/WireSock Secure Connect/sdk/wiresock-client.exe", booster: "C:/Program Files/WireSock Secure Connect/sdk/wgbooster.dll", executableVersion: version(3, 4, 8, 1), boosterVersion: version(3, 4, 8, 1) },
-      { executable: "C:/Users/teste/AppData/Local/Microsoft/WinGet/Packages/WireSock/sdk/wiresock-client.exe", booster: "C:/Users/teste/AppData/Local/Microsoft/WinGet/Packages/WireSock/sdk/wgbooster.dll", executableVersion: version(3, 4, 9, 0), boosterVersion: version(3, 4, 9, 0) },
+      { executable: "C:/Program Files/WireSock Secure Connect/sdk/wiresock-client.exe", booster: "C:/Program Files/WireSock Secure Connect/sdk/wgbooster.dll", executableVersion: version(3, 8, 2, 1), boosterVersion: version(3, 8, 2, 1) },
+      { executable: "C:/Users/teste/AppData/Local/Microsoft/WinGet/Packages/WireSock/sdk/wiresock-client.exe", booster: "C:/Users/teste/AppData/Local/Microsoft/WinGet/Packages/WireSock/sdk/wgbooster.dll", executableVersion: version(3, 9, 0, 0), boosterVersion: version(3, 9, 0, 0) },
     ];
     expect(selectSupportedWireSock(candidates).executable).toContain("WinGet");
   });

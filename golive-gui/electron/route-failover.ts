@@ -136,11 +136,13 @@ export interface ProtonRoutePoolManifest {
 }
 
 // Países fora da escolha automática. Cerca de 1 min depois de ligado, o túnel passa a limitar o
-// pacote interno a 1000 B. Nas rotas gratuitas do México isso chega como IP fragmentado, e o
-// WireSock grava o checksum TCP calculado só sobre o primeiro fragmento: o Windows descarta o
-// pacote e o anexo "carrega e some" (#373, #400). A preferência protonAvoidFreeMexico desliga a
-// exclusão. Só o que foi medido: rota paga e Linux ficam como estão, e pedir México explicitamente
-// continua valendo.
+// pacote interno a 1000 B. Nas rotas gratuitas do México isso chega como IP fragmentado, e até a
+// 3.8.1 o WireSock gravava o checksum TCP calculado só sobre o primeiro fragmento: o Windows
+// descartava o pacote e o anexo "carregava e sumia" (#373, #400). A 3.8.2.1, mínimo exigido em
+// wiresock-preflight.ts, corrige o checksum (wiresock/WireSockUI#168). A exclusão continua ligada
+// por padrão até o Go Live (UDP) ser validado nessas rotas sem ela. A preferência
+// protonAvoidFreeMexico desliga a exclusão. Só o que foi medido: rota paga e Linux ficam como
+// estão, e pedir México explicitamente continua valendo.
 export function automaticExcludedCountries(
   options: { countries?: string; freeOnly?: boolean; avoidFreeMexico?: boolean },
   platform: NodeJS.Platform = process.platform,

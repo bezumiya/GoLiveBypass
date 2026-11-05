@@ -1,12 +1,13 @@
 // Fragmentos IP que chegam ao Windows enquanto o tunel esta ligado. So diagnostico: nao troca
 // rota, nao bloqueia nada e nao mostra aviso.
 //
-// Por que existe: o anexo que "carrega e some" nas rotas gratis do Mexico (2.0.14) vem de pacotes
-// que chegam fragmentados em IP por dentro do tunel. O WireSock grava o checksum TCP calculado so
-// sobre o primeiro fragmento e o Windows descarta o pacote remontado. A escolha automatica de rota
-// evita o Mexico, mas o defeito continua no WireSock, e os relatos de outras rotas (video que nao
-// carrega, imagem que nao sobe) nao diziam se a rota da pessoa estava fragmentando. Os contadores
-// de remontagem do proprio Windows respondem isso sem captura de pacotes.
+// Por que existe: o anexo que "carregava e sumia" nas rotas gratis do Mexico (2.0.14) vinha de
+// pacotes que chegam fragmentados em IP por dentro do tunel. Ate a 3.8.1 o WireSock gravava o
+// checksum TCP calculado so sobre o primeiro fragmento e o Windows descartava o pacote remontado;
+// a 3.8.2.1, minimo exigido agora, corrige isso (wiresock/WireSockUI#168). Os relatos de outras
+// rotas (video que nao carrega, imagem que nao sobe) nao diziam se a rota da pessoa estava
+// fragmentando, e continua valendo saber: os contadores de remontagem do proprio Windows
+// respondem isso sem captura de pacotes.
 //
 // O que os numeros NAO dizem: o contador e da maquina inteira (outro programa e o trafego de fora
 // do tunel tambem contam) e sobe devagar mesmo com o Discord parado. Por isso nada aqui decide

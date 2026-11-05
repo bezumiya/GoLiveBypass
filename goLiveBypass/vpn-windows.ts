@@ -23,9 +23,11 @@ import {
 import { parseWireSockSnapshot, type WireSockSnapshot } from "./vpn-snapshot";
 import { runWireSockSnapshotOutsideMainThread } from "./vpn-snapshot-worker";
 
-export const WIRESOCK_VERSION = "3.4.8.1";
-const WIRESOCK_DOWNLOAD = "https://wiresock.net/_api/download-release.php?product=wiresock-secure-connect-sdk&platform=x64&version=3.4.8.1&channel=winget";
-const WIRESOCK_INSTALLER_SHA256 = "abfeebdc645de36b95fabbed00c7fdb0bf4d0c68c5518608450619c61876d33e";
+// 3.8.2.1 corrige o checksum TCP de fragmentos IPv4 recebidos (wiresock/WireSockUI#168);
+// também é o mínimo aceito, então uma instalação anterior é trocada pelo instalador fixado.
+export const WIRESOCK_VERSION = "3.8.2.1";
+const WIRESOCK_DOWNLOAD = `https://wiresock.net/_api/download-release.php?product=wiresock-secure-connect-sdk&platform=x64&version=${WIRESOCK_VERSION}&channel=winget`;
+const WIRESOCK_INSTALLER_SHA256 = "3fa1ca6e595ff64ee638ccda8c14c8c5c6b65099130c4345f94464bcc3a0469c";
 const WIRESOCK_DRIVER_NAMES = ["ndiswgc", "ndiswg", "NDISRD"] as const;
 const WIRESOCK_EXECUTABLE = "wiresock-client.exe";
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
