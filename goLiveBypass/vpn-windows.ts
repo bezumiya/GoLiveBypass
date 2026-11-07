@@ -505,24 +505,131 @@ function compareVersions(left: string, right: string): number {
     return 0;
 }
 
-export function selectWireSockCandidate(candidates: WireSockCandidate[]): WireSockCandidate | null {
+export function selectWireSockCandidate(candidates: WireSockCandidate[], minimum: string = WIRESOCK_VERSION): WireSockCandidate | null {
     return candidates
-        .filter(candidate => compareVersions(candidate.executableVersion, WIRESOCK_VERSION) >= 0)
-        .filter(candidate => compareVersions(candidate.boosterVersion, WIRESOCK_VERSION) >= 0)
+        .filter(candidate => compareVersions(candidate.executableVersion, minimum) >= 0)
+        .filter(candidate => compareVersions(candidate.boosterVersion, minimum) >= 0)
         .filter(candidate => candidate.executableVersion === candidate.boosterVersion)
         .sort((a, b) => compareVersions(b.executableVersion, a.executableVersion))[0] ?? null;
 }
 
-export function findWireSockCandidate(env: NodeJS.ProcessEnv = process.env): WireSockCandidate | null {
-    if (!isWindows()) return null;
-    const candidates = candidatePairs(env).flatMap(pair => {
+function scanWireSockCandidates(env: NodeJS.ProcessEnv = process.env): WireSockCandidate[] {
+    if (!isWindows()) return [];
+    return candidatePairs(env).flatMap(pair => {
         const executableVersion = versionOf(pair.executable);
         const boosterVersion = versionOf(pair.booster);
         return executableVersion && boosterVersion
             ? [{ ...pair, executableVersion, boosterVersion }]
             : [];
     });
-    return selectWireSockCandidate(candidates);
+}
+
+export function findWireSockCandidate(env: NodeJS.ProcessEnv = process.env): WireSockCandidate | null {
+    return selectWireSockCandidate(scanWireSockCandidates(env));
+}
+
+// Último SDK aceito antes da exigência da 3.8.2.1. Só serve de reserva: quando a troca falha numa
+// máquina em que o Windows Installer não instala nada (1632 sem %SystemRoot%\Installer, num
+// Windows "enxugado"), bloquear a ativação derrubava quem funcionava na versão anterior do app.
+export const WIRESOCK_FALLBACK_VERSION = "3.4.8.1";
+
+// Códigos de saída do setup (Burn/Windows Installer) que já apareceram ou que têm ação clara.
+// Sem eles o erro chegava como "Command failed: powershell.exe …", e o código se perdia.
+const WIRESOCK_INSTALLER_EXIT_MEANINGS: Record<number, string> = {
+    1601: "o serviço Windows Installer não está acessível",
+    1602: "a instalação foi cancelada",
+    1603: "erro fatal durante a instalação",
+    1612: "o pacote da versão instalada sumiu e o Windows não consegue removê-la",
+    1618: "outra instalação já está em andamento; espere terminar ou reinicie o Windows",
+    1619: "o pacote de instalação não pôde ser aberto",
+    1620: "o pacote de instalação não pôde ser aberto",
+    1625: "uma política do sistema bloqueia a instalação",
+    1632: "o Windows Installer não consegue gravar na pasta temporária ou na pasta Installer do Windows",
+    1638: "outra versão do WireSock já está instalada",
+};
+
+/** Normaliza o código (HRESULT 0x8007xxxx vira o código Win32) e devolve o texto conhecido. */
+export function describeWireSockInstallerExit(rawCode: unknown): { code: number | null; meaning: string } {
+    let code = typeof rawCode === "number" ? rawCode : Number(rawCode);
+    if (!Number.isFinite(code)) return { code: null, meaning: "" };
+    const unsigned = code < 0 ? code + 0x1_0000_0000 : code;
+    if (unsigned >= 0x8007_0000 && unsigned <= 0x8007_FFFF) code = unsigned & 0xFFFF;
+    return { code, meaning: WIRESOCK_INSTALLER_EXIT_MEANINGS[code] ?? "" };
+}
+
+/**
+ * Linhas de erro do log do próprio setup (`%TEMP%\WireSock_Secure_Connect_SDK_*.log`), sem o
+ * prefixo de processo/horário do Burn e sem caminhos. Era o único lugar que dizia em qual pacote
+ * o 0x80070660 aparecia; antes isso exigia pedir o arquivo à pessoa.
+ */
+export function extractWireSockInstallerLogErrors(text: string, max = 6): string[] {
+    const lines: string[] = [];
+    for (const raw of text.split(/\r?\n/)) {
+        if (!/\berror\b|\bfailed\b|0x8007[0-9a-f]{4}/i.test(raw)) continue;
+        const line = raw
+            .replace(/^\[[0-9A-Fa-f]+:[0-9A-Fa-f]+\]\[[^\]]+\]/, "")
+            .replace(/[A-Za-z]:\\[^\s"',;]*/g, "<caminho>")
+            .replace(/\\\\[^\s"',;]+/g, "<caminho>")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 200);
+        if (line && !lines.includes(line)) lines.push(line);
+    }
+    return lines.slice(-max);
+}
+
+function collectWireSockInstallerLogErrors(sinceMs: number): string[] {
+    try {
+        const dir = os.tmpdir();
+        const files = fs.readdirSync(dir)
+            .filter(name => /^WireSock_Secure_Connect_SDK_.*\.log$/i.test(name))
+            .map(name => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }))
+            .filter(file => file.mtime >= sinceMs - 5_000)
+            .sort((a, b) => a.mtime - b.mtime);
+        const lines: string[] = [];
+        for (const file of files.slice(-4)) {
+            const text = fs.readFileSync(path.join(dir, file.name), "utf8").slice(-256 * 1024);
+            for (const line of extractWireSockInstallerLogErrors(text)) if (!lines.includes(line)) lines.push(line);
+        }
+        return lines.slice(-6);
+    } catch {
+        return [];
+    }
+}
+
+export function windowsInstallerFolderPresent(env: NodeJS.ProcessEnv = process.env): boolean | null {
+    const root = env.SystemRoot || env.windir;
+    if (!root) return null;
+    try { return fs.statSync(path.join(root, "Installer")).isDirectory(); } catch { return false; }
+}
+
+/**
+ * Causa provável e o reparo manual, por extenso no log. O plugin NÃO mexe na pasta do sistema: só
+ * deixa escrito o que falta e o que fazer como administrador (mesmo texto da GUI).
+ */
+export function installerFolderDiagnosis(installerFolder: boolean | null): { causa_provavel: string; acao_manual: string } | null {
+    if (installerFolder !== false) return null;
+    return {
+        causa_provavel: "pasta %SystemRoot%\\Installer ausente: o Windows Installer recusa qualquer pacote MSI (codigo 1632)",
+        acao_manual: "como administrador, recriar %SystemRoot%\\Installer (SYSTEM e Administradores: controle total; Todos: leitura; oculta e de sistema) e ativar de novo",
+    };
+}
+
+/** Retrato do que foi escolhido na última ativação, para o relato e o env.snapshot. */
+let lastWireSockSelection: { version: string; upgrade: "ok" | "falhou_usando_anterior" | "nao_necessario" } | null = null;
+// Uma troca que falhou não é repetida a cada ativação da mesma sessão: cada tentativa baixa o setup
+// e pede elevação de novo, e numa máquina que não instala MSI o resultado não muda até reiniciar.
+let upgradeFailedThisSession = false;
+
+export function windowsEnvironmentSnapshot(env: NodeJS.ProcessEnv = process.env): Record<string, string | boolean> {
+    const snapshot: Record<string, string | boolean> = { so: "windows", so_build: os.release() };
+    const installer = windowsInstallerFolderPresent(env);
+    if (installer !== null) snapshot.msi_pasta_installer = installer;
+    if (lastWireSockSelection) {
+        snapshot.wiresock_versao = lastWireSockSelection.version;
+        snapshot.wiresock_upgrade = lastWireSockSelection.upgrade;
+    }
+    return snapshot;
 }
 
 function downloadInstaller(target: string, url = WIRESOCK_DOWNLOAD, redirects = 0): Promise<void> {
@@ -854,14 +961,23 @@ export function ensureWireSockInstalled(log: WireSockLogger): Promise<string> {
 async function ensureWireSockInstalledOnce(log: WireSockLogger): Promise<string> {
     if (!isWindows()) throw new Error("A VPN do plugin nesta versão exige Windows x64.");
     if (process.arch !== "x64") throw new Error("A VPN do plugin nesta versão exige Windows x64.");
-    const existing = findWireSockCandidate();
+    const candidates = scanWireSockCandidates();
+    const existing = selectWireSockCandidate(candidates);
     if (existing) {
+        lastWireSockSelection = { version: existing.executableVersion, upgrade: "nao_necessario" };
         log("info", "WireSock SDK compatível encontrado", { version: existing.executableVersion });
         return existing.executable;
+    }
+    const previous = selectWireSockCandidate(candidates, WIRESOCK_FALLBACK_VERSION);
+    if (previous && upgradeFailedThisSession) {
+        lastWireSockSelection = { version: previous.executableVersion, upgrade: "falhou_usando_anterior" };
+        log("warn", "wiresock.upgrade.skipped", { version: previous.executableVersion, motivo: "a troca já falhou nesta sessão; reinicie o Discord para tentar de novo" });
+        return previous.executable;
     }
 
     const temporary = await fs.promises.mkdtemp(path.join(os.tmpdir(), "golive-plugin-wiresock-"));
     const installer = path.join(temporary, "wiresock-sdk.exe");
+    const startedAt = Date.now();
     try {
         log("info", "baixando instalador oficial do WireSock", { version: WIRESOCK_VERSION });
         await downloadInstaller(installer);
@@ -896,15 +1012,49 @@ async function ensureWireSockInstalledOnce(log: WireSockLogger): Promise<string>
             installed = await waitForCompatibleWireSock(WIRESOCK_SETTLE_TIMEOUT_MS);
         }
         if (!installed) throw new Error("O instalador WireSock terminou, mas não deixou uma instalação SDK compatível.");
+        lastWireSockSelection = { version: WIRESOCK_VERSION, upgrade: "ok" };
         return installed;
     } catch (error) {
-        const code = Number((error as { code?: unknown })?.code);
-        if (code === 1223) throw new Error("A instalação do WireSock foi cancelada pelo usuário.");
+        const exit = describeWireSockInstallerExit((error as { code?: unknown })?.code);
+        const cancelled = exit.code === 1223;
         // O setup ja tocou o driver: a maquina nao pode ficar sem saida por causa disso.
-        const restore = await restoreWireSockNetwork(log, { force: true });
-        log("error", "instalacao do WireSock falhou", { erro: logError(error), restore: { ...restore } });
-        const hint = wireSockInstallFailureHint(restore);
-        throw new Error(`Não foi possível preparar o WireSock: ${logError(error)}${hint ? ` ${hint}` : ""}`);
+        const restore = cancelled ? null : await restoreWireSockNetwork(log, { force: true });
+        const installerFolder = windowsInstallerFolderPresent();
+        const setupErrors = collectWireSockInstallerLogErrors(startedAt);
+        log(cancelled ? "warn" : "error", "wiresock.install.failed", {
+            exit_code: exit.code ?? "desconhecido",
+            significado: exit.meaning || undefined,
+            msi_pasta_installer: installerFolder ?? undefined,
+            setup_erros: setupErrors.length ? setupErrors : undefined,
+            ...installerFolderDiagnosis(installerFolder),
+            erro: logError(error),
+            ...(restore ? { restore: { ...restore } } : {}),
+        });
+        // A versão anterior continua instalada (a falha do setup é desfeita por ele mesmo) e
+        // funcionava até a exigência subir: ativar com ela é melhor que derrubar quem já usava.
+        // O problema dos anexos nas rotas que fragmentam volta só nessa máquina, e fica no log.
+        const stillThere = selectWireSockCandidate(scanWireSockCandidates(), WIRESOCK_FALLBACK_VERSION);
+        if (stillThere) {
+            upgradeFailedThisSession = true;
+            lastWireSockSelection = { version: stillThere.executableVersion, upgrade: "falhou_usando_anterior" };
+            log("warn", "wiresock.upgrade.fallback", {
+                version: stillThere.executableVersion,
+                esperado: WIRESOCK_VERSION,
+                exit_code: exit.code ?? "desconhecido",
+                motivo: "a troca do SDK falhou; ativando com a versão já instalada, sem a correção de fragmentos IP",
+                ...installerFolderDiagnosis(installerFolder),
+            });
+            return stillThere.executable;
+        }
+        if (cancelled) throw new Error("A instalação do WireSock foi cancelada pelo usuário.");
+        const exitText = exit.code !== null && exit.code !== 1
+            ? ` O instalador saiu com o código ${exit.code}${exit.meaning ? ` (${exit.meaning})` : ""}.`
+            : "";
+        const folderText = installerFolder === false
+            ? " A pasta Installer do Windows (%SystemRoot%\\Installer) não existe; sem ela nenhum pacote MSI instala."
+            : "";
+        const hint = restore ? wireSockInstallFailureHint(restore) : "";
+        throw new Error(`Não foi possível preparar o WireSock: ${logError(error)}${exitText}${folderText}${hint ? ` ${hint}` : ""}`);
     } finally {
         await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => {});
     }

@@ -101,6 +101,33 @@ export interface BugReportMetaSources {
     estadoVpn: BugReportVpnState;
     modo: string;
     onboarding: boolean;
+    /** Retrato do ambiente (ver `montarAmbiente`); ausente em quem chama sem coletar. */
+    ambiente?: Record<string, unknown>;
+}
+
+/**
+ * Lista branca do retrato do ambiente que vai no relato e no evento `env.snapshot`. Cada campo
+ * existe porque já foi perguntado à mão numa issue: IPv6 no kernel, distro e empacotamento (#404),
+ * build do Windows, pasta do Windows Installer e versão do WireSock (upgrade do SDK que falhava
+ * com 1632 num Windows sem `%SystemRoot%\Installer`). Só rótulos técnicos: nada de usuário,
+ * máquina, caminho, rede ou endpoint.
+ */
+export const CAMPOS_AMBIENTE = [
+    "so", "so_build", "kernel", "distro", "ipv6_kernel", "wg_modulo", "empacotamento",
+    "sessao_grafica", "cliente", "fuso", "wiresock_versao", "wiresock_upgrade", "msi_pasta_installer",
+] as const;
+
+export function montarAmbiente(fontes: Record<string, unknown> | undefined): Record<string, string> {
+    const saida: Record<string, string> = {};
+    if (!fontes) return saida;
+    for (const campo of CAMPOS_AMBIENTE) {
+        const valor = fontes[campo];
+        const texto = typeof valor === "boolean" ? (valor ? "sim" : "nao") : textoCurto(valor, 80);
+        // Letras, dígitos, espaço e . _ : + - entram ("nixos 25.05", "-03:00"); barra e o resto
+        // viram "_", para que um valor inesperado nunca carregue caminho para a issue.
+        if (texto) saida[campo] = texto.replace(/[^A-Za-z0-9 ._:+\-]/g, "_");
+    }
+    return saida;
 }
 
 export interface BugReportLogSources {
@@ -139,7 +166,9 @@ const RE_GATEWAY_QUERY = /(https:\/\/gateway[^?\s]+)\?\S*/g;
 const RE_EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const RE_HOME_POSIX = /(\/(?:home|var\/home|Users)\/)[^/\s]+/g;
 const RE_HOME_WINDOWS = /([A-Z]:\\Users\\)[^\\\s]+/gi;
-const RE_IDENTITY_LABEL = /\b(nome|name|usu[aá]rio|username|user)\s*([:=])\s*[^\s,;]+/gi;
+// "as another user: Not authorized" é a frase fixa do pkexec, não um nome: sem a exclusão o relato
+// perdia justamente o "Not" e a causa da recusa (#404, fechamento negado pelo polkit).
+const RE_IDENTITY_LABEL = /\b(?<!another\s)(nome|name|usu[aá]rio|username|user)\s*([:=])\s*[^\s,;]+/gi;
 // O endpoint WireGuard é a saída escolhida pela pessoa e a chave privada nunca deve
 // aparecer num relato; as duas regras valem para o log montado e para o texto digitado.
 const RE_PRIVATE_KEY = /(PrivateKey\s*=\s*)\S+/gi;
@@ -247,6 +276,7 @@ export function montarMeta(fontes: BugReportMetaSources): Record<string, string>
         vpn_geracao: typeof vpn.generation === "number" && Number.isFinite(vpn.generation) ? String(vpn.generation) : "desconhecida",
         vpn_modo: fontes.modo === "custom" ? "custom" : "proton",
         onboarding: fontes.onboarding === true ? "sim" : "nao",
+        ...montarAmbiente(fontes.ambiente),
     };
 }
 

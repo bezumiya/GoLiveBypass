@@ -90,7 +90,8 @@ describe("núcleo de logs do plugin", () => {
     });
 
     it("descarta chaves desconhecidas e nunca lança quando a escrita falha", () => {
-        expect(redactPluginData({ unknown: "not-written", state: "active" })).toEqual({ state: "active" });
+        // O valor de texto fora da lista branca continua fora; só o nome da chave fica registrado.
+        expect(redactPluginData({ unknown: "not-written", state: "active" })).toEqual({ state: "active", dropped_keys: ["unknown"] });
         const logger = createPluginLogger({
             component: "plugin.native",
             pluginVersion: "test",

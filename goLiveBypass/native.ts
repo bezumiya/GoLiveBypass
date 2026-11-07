@@ -42,6 +42,7 @@ import {
     interpretarResposta,
     interpretarStatusDeBloqueio,
     limparEntradaDoRenderer,
+    montarAmbiente,
     montarLog,
     montarMeta,
     montarPayload,
@@ -72,12 +73,14 @@ import {
     isProcessInNamespace,
     isValidLinuxName,
     linuxAuthorizationGuidance,
+    linuxEnvironmentSnapshot,
     relaunchEnvironment,
     waitForFile,
 } from "./vpn-linux";
+import { installerFolderDiagnosis, windowsEnvironmentSnapshot } from "./vpn-windows";
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
-import { createOperationId, createPluginLogger, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
+import { createOperationId, createPluginLogger, pendingNamespaceRelaunch, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
 
 const PLUGIN_VERSION = "2.0.16";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
@@ -436,6 +439,26 @@ function eventForMessage(message: string): string {
     if (lower.includes("updater") || lower.includes("update")) return "updater.event";
     if (lower.includes("proton") || lower.includes("autenticação") || lower.includes("sessão")) return "proton.event";
     return "legacy.message";
+}
+
+// Retrato do ambiente que vai no log (env.snapshot, uma vez por abertura) e nos metadados do relato.
+// O fuso é só o deslocamento ("-03:00"), para converter o UTC do log no horário que a pessoa conta.
+function pluginEnvironmentSnapshot(): Record<string, string> {
+    let base: Record<string, string | boolean> = { so: process.platform };
+    try {
+        if (process.platform === "linux") base = linuxEnvironmentSnapshot();
+        else if (process.platform === "win32") base = windowsEnvironmentSnapshot();
+    } catch {
+        // Diagnóstico nunca impede o plugin de abrir.
+    }
+    const offset = -new Date().getTimezoneOffset();
+    const pad = (value: number) => String(Math.floor(value)).padStart(2, "0");
+    const fuso = `${offset >= 0 ? "+" : "-"}${pad(Math.abs(offset) / 60)}:${pad(Math.abs(offset) % 60)}`;
+    // Nome do app (vesktop, discord, equibop…): no Nix o executável se chama só "electron".
+    let nomeApp = "";
+    try { nomeApp = app.getName(); } catch { nomeApp = ""; }
+    const cliente = (nomeApp || basename(process.execPath).replace(/\.exe$/i, "")).toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 32) || "desconhecido";
+    return montarAmbiente({ ...base, cliente, fuso });
 }
 
 function log(level: "info" | "warn" | "error", message: string, data?: Record<string, unknown>): void {
@@ -1210,6 +1233,7 @@ export async function submitBugReport(_: IpcMainInvokeEvent, value: unknown): Pr
         estadoVpn: { state: status.state, active: status.active, owned: status.owned, generation: status.generation },
         modo: pluginSettings().vpnMode === "custom" ? "custom" : "proton",
         onboarding: pluginSettings().onboardingCompleted === true,
+        ambiente: pluginEnvironmentSnapshot(),
     });
 
     const montado = montarPayload({ titulo: pedido.title, descricao: pedido.description, log: blocoDeLog, meta, segredos, token: BUG_API_TOKEN });
@@ -2854,7 +2878,23 @@ app.on("will-quit", () => {
 });
 
 app.whenReady().then(async () => {
+    const relaunchPendente = process.platform === "linux" ? pendingNamespaceRelaunch(pluginLogger.records()) : null;
     log("info", `abrindo plugin VPN | ${process.platform} ${process.arch} | electron ${process.versions.electron}`);
+    const ambiente = pluginEnvironmentSnapshot();
+    log("info", "env.snapshot", ambiente);
+    // O cliente relançado no namespace nunca abriu o plugin e este processo está fora dele: o relaunch
+    // morreu ao iniciar. Sem esta linha o log ficava mudo entre o relaunch e a reabertura manual.
+    if (relaunchPendente && !isProcessInNamespace()) {
+        log("warn", "relaunch.cliente_nao_subiu", {
+            namespace: relaunchPendente.namespace,
+            segundos_desde: Math.max(0, Math.round((Date.now() - Date.parse(relaunchPendente.at)) / 1000)),
+            operacao: relaunchPendente.operation_id,
+            motivo: "o cliente relançado no namespace não chegou a carregar o plugin; provável crash ao iniciar (no Linux, 'coredumpctl list' mostra se houve)",
+        });
+    }
+    // O plugin não conserta a pasta do sistema; só deixa explícito, já na abertura, que instalar ou
+    // atualizar o WireSock vai falhar e o que fazer à mão.
+    if (ambiente.msi_pasta_installer === "nao") log("warn", "env.windows_installer_ausente", { ...installerFolderDiagnosis(false) });
     try {
         const lock = acquirePluginUpdateLock();
         try { await recoverInterruptedPluginUpdate({ allowStaged: true }); }
