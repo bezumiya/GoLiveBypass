@@ -483,6 +483,53 @@ export function linuxKernelHasIPv6(procPath: string = IPV6_PROC_PATH): boolean {
     return fs.existsSync(procPath);
 }
 
+/** "nixos 25.05", "ubuntu 24.04", "arch": só ID e VERSION_ID do os-release, nunca o nome livre. */
+export function linuxDistroLabel(osRelease?: string | null): string {
+    if (!osRelease) return "desconhecida";
+    const fields = new Map<string, string>();
+    for (const line of osRelease.split("\n")) {
+        const match = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+        if (match) fields.set(match[1], match[2].replace(/^"|"$/g, "").trim());
+    }
+    const clean = (value: string | undefined) => (value ?? "").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 32);
+    const id = clean(fields.get("ID"));
+    const version = clean(fields.get("VERSION_ID"));
+    return id ? `${id}${version ? ` ${version}` : ""}` : "desconhecida";
+}
+
+export function linuxPackagingLabel(env: NodeJS.ProcessEnv = process.env, execPath: string = process.execPath): string {
+    if (isFlatpak(env)) return "flatpak";
+    if (env.APPIMAGE) return "appimage";
+    if (env.SNAP || execPath.startsWith("/snap/")) return "snap";
+    if (execPath.startsWith("/nix/store/")) return "nix";
+    return "nativo";
+}
+
+/**
+ * Retrato do ambiente Linux para o log (`env.snapshot`) e o relato. Na #404 cada um destes campos
+ * foi perguntado à mão: distro, kernel, IPv6 fora do kernel, módulo WireGuard, Flatpak/Nix e
+ * sessão gráfica. Nada aqui roda comando nem pede senha: o estado do módulo vem do /sys e, se o
+ * painel já consultou o modprobe, do cache dele.
+ */
+export function linuxEnvironmentSnapshot(env: NodeJS.ProcessEnv = process.env): Record<string, string | boolean> {
+    let osRelease: string | null = null;
+    try { osRelease = fs.readFileSync("/etc/os-release", "utf8"); } catch { osRelease = null; }
+    const cached = wireGuardModuleCache?.state;
+    const wg = fs.existsSync(WIREGUARD_MODULE_PATH)
+        ? "carregado"
+        : cached === "available" ? "disponivel" : cached === "missing" ? "ausente" : "nao_carregado";
+    const session = (env.XDG_SESSION_TYPE ?? "").toLowerCase();
+    return {
+        so: "linux",
+        kernel: os.release().trim() || "desconhecido",
+        distro: linuxDistroLabel(osRelease),
+        ipv6_kernel: linuxKernelHasIPv6(),
+        wg_modulo: wg,
+        empacotamento: linuxPackagingLabel(env),
+        sessao_grafica: /^[a-z0-9]{1,16}$/.test(session) ? session : "desconhecida",
+    };
+}
+
 export interface LinuxAddressPlan {
     addresses: string[];
     dnsServers: string[];
@@ -904,8 +951,13 @@ async function execPrivilegedSequence(
         if (result.exitCode === 126) {
             throw new LinuxAuthorizationError(`A autorização administrativa foi cancelada.${guidance ? ` ${guidance}` : ""}`, result.exitCode);
         }
+        // Elevador, código de saída e passo vão no texto: "recusado antes do 1º comando" (polkit
+        // negou sem diálogo) e "falhou no passo 7" pedem respostas diferentes, e na #404 isso só
+        // apareceu perguntando à pessoa. Ficam antes do stderr: o log corta campos longos no fim.
+        const where = step >= 0 ? `passo ${step + 1} de ${commands.length}` : "nenhum passo chegou a rodar";
+        const facts = `[${path.basename(spec.file)} saiu com ${result.exitCode ?? "sinal"}; ${where}]`;
         throw new LinuxPrivilegedStepError(
-            `Falha ao executar ${failedCommand ? describeLinuxPrivilegedCommand(failedCommand) : "comando privilegiado"}: ${detail}${guidance ? ` ${guidance}` : ""}`,
+            `Falha ao executar ${failedCommand ? describeLinuxPrivilegedCommand(failedCommand) : "comando privilegiado"} ${facts}: ${detail}${guidance ? ` ${guidance}` : ""}`,
             step,
         );
     }

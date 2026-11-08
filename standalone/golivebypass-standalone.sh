@@ -2823,6 +2823,27 @@ flatpak_pid_for_id() {
     return 1
 }
 
+# Todos os PIDs do application ID no `flatpak ps`, um por linha. O Discord Flatpak pode
+# aparecer em mais de uma instancia com o mesmo ID: no Bazzite da #416 eram duas, a
+# principal dentro do namespace e outra, mais nova, fora dele, listada primeiro (seguia
+# igual com ZYPAK_DISABLE_SANDBOX=1). A ordem das linhas nao e garantida: olhar so a
+# primeira derrubava uma sessao que estava no tunel.
+flatpak_pids_for_id() {
+    local wanted="${1:-}" pids="" pid columns found=1
+    [ -n "$wanted" ] && have flatpak || return 1
+    for columns in child-pid pid; do
+        pids="$(flatpak ps --columns="$columns,application" 2>/dev/null \
+            | awk -v wanted="$wanted" '$2 == wanted { print $1 }')"
+        for pid in $pids; do
+            pid="$(normalize_pid "$pid" 2>/dev/null)" || continue
+            printf '%s\n' "$pid"
+            found=0
+        done
+        [ "$found" -eq 0 ] && return 0
+    done
+    return 1
+}
+
 # IDs da lista suportada que o `flatpak ps` mostra em execucao agora. O ID exato e a
 # chave que o `flatpak kill` aceita e o unico sinal que alcanca o cliente dentro do
 # sandbox do bubblewrap: pkill por nome no host nao encerra a sessao registrada e a
@@ -3347,6 +3368,26 @@ discord_pid_in_netns_elevated() {
         fi
     fi
     [ -n "$pid_ns" ] && [ -n "$netns_ns" ] && [ "$pid_ns" = "$netns_ns" ]
+}
+
+# PID do cliente confirmado dentro do namespace, ou rc 1. No Flatpak qualquer instancia
+# do ID no namespace prova a sessao: so o launcher da ativacao abre o cliente nele, e
+# instancias extras fora do namespace nao desmentem a principal (#416).
+# A checagem sem privilegio passa por todos os PIDs antes de o elevate entrar.
+discord_netns_pid_flav() {
+    local flav="$1" flatpak_id="${2:-}" resources="${3:-}" pids="" pid
+    case "$flav:$flatpak_id" in
+        manual:*|*:) pids="$(discord_pid_flav "$flav" "$flatpak_id" "$resources" 2>/dev/null || true)" ;;
+        *) pids="$(flatpak_pids_for_id "$flatpak_id" 2>/dev/null || true)" ;;
+    esac
+    [ -n "$pids" ] || return 1
+    for pid in $pids; do
+        discord_pid_in_netns "$pid" && { printf '%s\n' "$pid"; return 0; }
+    done
+    for pid in $pids; do
+        discord_pid_in_netns_elevated "$pid" && { printf '%s\n' "$pid"; return 0; }
+    done
+    return 1
 }
 
 
@@ -4226,7 +4267,7 @@ wait_discord_started() {
         WAIT_DISCORD_MOTIVO="sem-processo"
         pid="$(discord_pid_flav "$flav" "$flatpak_id" "$resources" 2>/dev/null || true)"
         if [ -n "$pid" ]; then
-            if discord_pid_in_netns_elevated "$pid"; then
+            if discord_netns_pid_flav "$flav" "$flatpak_id" "$resources" >/dev/null; then
                 WAIT_DISCORD_MOTIVO="confirmado"
                 return 0
             fi
@@ -4237,6 +4278,12 @@ wait_discord_started() {
         tentativas=$((tentativas - 1))
         [ "$tentativas" -gt 0 ] && sleep 0.5
     done
+    # As instancias vistas no fim da espera vao para o log com o marcador launch=, que
+    # a mensagem de falha ignora ao escolher a saida do launcher.
+    if [ -n "$flatpak_id" ] && [ -n "${START_DISCORD_LOG:-}" ] && have flatpak; then
+        flatpak ps --columns=instance,pid,child-pid,application 2>/dev/null \
+            | sed "s/^/[$(date -Is)] launch=flatpak-ps /" >>"$START_DISCORD_LOG" 2>/dev/null || true
+    fi
     return 1
 }
 
@@ -4501,7 +4548,10 @@ if [ "$MODE" = "status" ]; then
             discord_pid=""
             if discord_pid="$(discord_pid_flav "$flav" "$id" "$resources" 2>/dev/null)"; then
                 running="sim"
-                if discord_pid_in_netns_elevated "$discord_pid"; then in_namespace="sim"; fi
+                if netns_pid="$(discord_netns_pid_flav "$flav" "$id" "$resources")"; then
+                    in_namespace="sim"
+                    discord_pid="$netns_pid"
+                fi
             fi
             printf '{"path":"%s","state":"%s","flavour":"%s","detected_by":"%s","running":"%s","inNamespace":"%s"' "$resources" "$(injection_state "$resources")" "$flav" "$detect" "$running" "$in_namespace"
             [ -n "$discord_pid" ] && printf ',"pid":"%s"' "$discord_pid"

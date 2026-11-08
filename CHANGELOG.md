@@ -6,6 +6,42 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **Windows (GUI e plugin): a troca obrigatória do WireSock não derruba mais quem já funcionava.** Desde a 2.0.16 a ativação exige o SDK 3.8.2.1 e troca a versão anterior. Num Windows em que o Windows Installer não instala nenhum pacote MSI, a troca falhava e a ativação parava, mesmo com a 3.4.8.1 instalada e funcionando. O caso medido foi um Windows "enxugado" sem a pasta `%SystemRoot%\Installer`, com o setup saindo com 1632. Agora, se a troca falhar e a versão anterior continuar instalada, o túnel ativa com ela. O app não repete a tentativa (download e pedido de elevação) a cada ativação da mesma sessão, e registra no log e no relato que ficou na versão anterior. Quando o próprio setup pede reinicialização (3010/1641) ou é morto por sinal, a reserva não entra: a reinicialização pode deixar a instalação nova pela metade, e processo morto não tem código de saída para registrar. O defeito dos anexos nas rotas que fragmentam volta só nessa máquina, e o México segue fora da escolha automática por padrão. Sem versão anterior, a falha continua bloqueando como antes.
+- **Windows (GUI e plugin): a falha do instalador do WireSock diz o motivo.** A mensagem trazia só `Command failed: powershell.exe …`. Agora traz:
+  - o código de saída do setup e o significado dos códigos conhecidos (1603, 1618, 1625, 1632 e outros);
+  - um aviso quando a pasta `%SystemRoot%\Installer` não existe.
+
+  O log também guarda as linhas de erro do próprio setup (`%TEMP%\WireSock_Secure_Connect_SDK_*.log`), sem caminhos. Antes era preciso pedir esses arquivos à pessoa.
+
+  O app não mexe na pasta do sistema. Quando ela falta, o log diz a causa provável e o reparo manual (`causa_provavel` e `acao_manual`) já na abertura, antes de qualquer falha. Os mesmos campos voltam a aparecer na falha da instalação e na ativação com a versão anterior.
+- **Plugin: o log não descarta mais campos em silêncio.** O filtro de privacidade só aceitava chaves de uma lista branca e apagava as outras sem deixar marca. Assim se perdiam as contagens do IPv6 pulado (#404), a versão e o canal do updater e o que sobrava da restauração de rede no Windows. Agora esses campos entram. Número e booleano passam com qualquer chave não sensível. Texto fora da lista continua fora, mas o nome da chave fica em `dropped_keys`.
+- **Relato (GUI e plugin): a recusa do polkit não perde mais a causa.** A redação de rótulos de identidade (`user: <nome>`) tratava a frase fixa do pkexec, "as another user: Not authorized", como nome de usuário. No relato ficava "another user:<usuario> authorized", sem o "Not".
+- **Instaladores do plugin: "pnpm build falhou (exit=1)" sem detalhe num checkout do Equicord atualizado.** O Equicord liga `verifyDepsBeforeRun: prompt` no `pnpm-workspace.yaml`. Quando o checkout muda (git pull, updater do próprio mod) e o `node_modules` fica fora de sincronia com o lockfile, o `pnpm build` tenta perguntar se pode rodar o install. No Windows, com a saída canalizada pelo instalador, ele saía com exit 1 em ~50 ms e só escrevia o aviso de versão do pnpm. No Linux sem terminal (`curl | sh`) dava `ERR_PNPM_VERIFY_DEPS_BEFORE_RUN`. O instalador só rodava `pnpm install` quando faltava o `node_modules`, então cada nova tentativa batia no mesmo erro.
+  - Os dois instaladores sincronizam as dependências antes de todo build, inclusive ao recompilar na desinstalação. Primeiro com `pnpm install --frozen-lockfile`, que não reescreve o lockfile do checkout; o install comum fica de reserva para quando o lockfile não bate com o `package.json`. `confirm-modules-purge=false` evita o outro prompt do pnpm.
+  - Se o build falhar mesmo assim, o `installer.log` ganha um `installer.build_context` com a versão do pnpm em uso e a que o projeto pede, a do node, se o `node_modules` existia, se a sincronização passou e o código de saída, sem caminho.
+  - Quando o pnpm sai sem escrever nada, a mensagem diz isso e manda rodar `pnpm build` na pasta do mod. Antes ela terminava em "falhou (exit=1): " e parecia cortada. Nos dois sistemas, a mensagem leva o fim da saída do pnpm: no Windows extraída do canal, no Linux da própria saída capturada do `pnpm build`.
+
+  Reproduzido no Windows (PowerShell 5.1, pnpm 12.8.1, console de verdade) com o lockfile atualizado e o `node_modules` antigo: antes, exit 1 só com o aviso de versão; depois, o build passa.
+
+- **GUI Linux e standalone: Discord Flatpak fechado segundos depois de abrir no túnel (#416).** No Bazzite, o Discord Flatpak abria dentro do namespace WireGuard e funcionava (dava para entrar em live), mas a ativação esperava 20 s, dizia "uma instancia do com.discordapp.Discord ficou fora do namespace" e fechava o cliente. O `flatpak ps` do reporter mostrava duas instâncias de `com.discordapp.Discord`: a principal no namespace (`ip netns identify` devolvia `discord-vpn`) e outra, mais nova, fora dele e listada primeiro. A confirmação lia só a primeira linha, e a ordem das linhas não é garantida. A instância extra continuou com `ZYPAK_DISABLE_SANDBOX=1`, e o que a cria ainda não foi identificado. Agora a confirmação da ativação e o `inNamespace` do status olham todas as instâncias do ID e aceitam a que está no namespace. Quando nenhuma está, a falha continua igual e o `flatpak ps` da hora vai para o log do Discord. Regressão hermética em `tests/test-linux-flatpak-instancias-netns.sh`, com a ordem do relato (a lógica anterior reproduz o `fora-do-namespace`); a correção ainda não rodou no Bazzite do reporter.
+
+### Adicionado
+
+- **Retrato do ambiente no log e no relato (GUI e plugin).** Uma linha `env.snapshot` por abertura e os mesmos campos nos metadados do relato. Entram só rótulos técnicos: nada de usuário, máquina, caminho, rede ou endpoint.
+  - **No Windows:** build, pasta do Windows Installer, versão do WireSock em uso e se a troca falhou.
+  - **No Linux:** distro (`ID` e `VERSION_ID`), kernel, IPv6 no kernel, estado do módulo WireGuard, empacotamento (nativo, Flatpak, Nix, AppImage ou Snap) e sessão gráfica.
+
+  Na #404, cada um desses dados foi perguntado à mão. No plugin Linux, a coleta não roda comando nem pede senha.
+- **Horários do log com data e fuso.**
+  - **Plugin:** a linha do relato passa de `HH:MM:SS` em UTC para mês/dia + horário com o `Z` do UTC, com a operação e a fase na linha (três `linux.network.phase` seguidos pareciam iguais).
+  - **GUI:** a abertura grava a data completa, porque o `gui.log` só tem `HH:MM:SS` e junta dias.
+  - **Os dois:** o relato traz o fuso (`-03:00`) para converter o horário que a pessoa conta.
+- **Plugin Linux: a falha elevada diz quem negou e onde parou.** A mensagem traz o elevador (`pkexec`/`sudo`), o código de saída e o passo da sequência. "Nenhum passo chegou a rodar" separa o polkit que recusou sem diálogo de um comando que falhou no meio. Esses dados vêm antes do texto do sistema, que o log corta quando é longo.
+- **Plugin Linux: o log aponta o cliente relançado que não subiu.** Se o relaunch no namespace foi aceito e o plugin não abriu de novo dentro dele, a próxima abertura registra `relaunch.cliente_nao_subiu`, com o namespace, os segundos desde o relaunch e a dica do `coredumpctl`. Na #404 (SIGILL no NixOS) o log ficava em silêncio entre o relaunch e a reabertura manual.
+- **Plugin: o retrato do ambiente usa o nome do app** (`vesktop`, `discord`…). No Nix o executável se chama só `electron`.
+
 ## [2.0.16] - 2026-11-05
 
 ### Corrigido

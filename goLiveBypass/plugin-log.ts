@@ -60,6 +60,11 @@ const MAX_ARRAY = 32;
 const SENSITIVE_KEY = /(?:password|senha|passphrase|token|captcha|2fa|twofactor|secret|private(?:_?key)?|public(?:_?key)?|authorization|cookie|session|credential|stdin|rawconfig|config|endpoint|commandline|allowedapps|profilepath|conf(?:ig)?file)/i;
 const SAFE_KEYS: Record<string, true> = {
     mode: true, state: true, previous_state: true, next_state: true, phase: true, stage: true, status: true, outcome: true, reason: true, motivo: true, error: true, erro: true, error_code: true, code: true, codigo: true, codigo_saida: true, structured_code: true, codigo_estruturado: true, retryable: true, cancelled: true, aborted: true, suppressed: true, diagnostic_only: true, log_only: true, source: true, origin: true, origem: true, platform: true, architecture: true, arch: true, plugin_version: true, version: true, channel: true, current: true, latest: true, pending: true, pending_version: true, pending_channel: true, reload_required: true, relaunch_requested: true, duration_ms: true, timeout_ms: true, exit_code: true, signal: true, stdout_bytes: true, stderr_bytes: true, json: true, valid: true, authorized: true, storage: true, session_storage: true, account_present: true, candidate_count: true, tested: true, succeeded: true, total: true, measured: true, server: true, country: true, city: true, tier: true, load: true, score: true, ping_ms: true, download_mbps: true, upload_mbps: true, services: true, service: true, servico: true, process_ids: true, pids: true, pid: true, generation: true, measurement_id: true, request_id: true, count: true, first_ts: true, last_ts: true, removed: true, removidos: true, busy: true, ocupados: true, invalid: true, inválidos: true, recent: true, recentes: true, dns_ok: true, https_ok: true, network_lock_reset: true, dns_cleared: true, dns_flushed: true, preflight: true, updated_at: true, detected: true, identity: true, candidate_kind: true, install_count: true, selected: true, target_count: true, injected: true, preserved: true, build: true, verify: true, size_bytes: true, digest: true, redaction_applied: true,
+    // Campos que o código já registrava e o filtro descartava em silêncio (#404: as contagens do
+    // IPv6 pulado, versão/canal do updater, o que sobrou da restauração do Windows).
+    canal: true, versão: true, versao: true, versao_atual: true, versao_nova: true, estado: true, modo: true, servicos: true, issue: true, namespace: true, namespace_removed: true, skipped_addresses: true, skipped_dns: true, driver_service: true, adapter_default_route: true, residual: true, allowed_apps_count: true, dropped_keys: true,
+    // Retrato do ambiente (env.snapshot) e falhas de instalação: só rótulos técnicos, nunca caminho ou nome.
+    so: true, so_build: true, kernel: true, distro: true, ipv6_kernel: true, wg_modulo: true, empacotamento: true, sessao_grafica: true, cliente: true, fuso: true, wiresock_versao: true, wiresock_upgrade: true, msi_pasta_installer: true, significado: true, passo: true, step: true, elevacao: true, esperado: true, setup_erros: true, causa_provavel: true, acao_manual: true, operacao: true, segundos_desde: true,
 };
 const DEDUPE_EVENT = /(?:watchdog|progress|probe|diagnostic|diagnóstico)/i;
 
@@ -114,12 +119,23 @@ function sanitize(value: unknown, key: string, depth: number): unknown {
     if (typeof value !== "object") return "<omitted>";
 
     const output: Record<string, unknown> = {};
+    const dropped: string[] = [];
     for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>).slice(0, MAX_KEYS)) {
+        // Campo opcional não preenchido: não vira "<omitted>" nem conta como descartado.
+        if (childValue === undefined) continue;
         const normalized = childKey.replace(/[A-Z]/g, character => `_${character.toLowerCase()}`).toLowerCase();
-        if (!safeKey(normalized) && !SENSITIVE_KEY.test(normalized)
-            && (childValue === null || typeof childValue !== "object")) continue;
+        // Número e booleano não carregam nome, caminho nem segredo: passam com qualquer chave que
+        // não seja sensível. Texto fora da lista branca continua fora, mas deixa o nome da chave
+        // em dropped_keys: antes sumia sem marca, e quem lia o log achava que o dado nem existia.
+        const harmless = typeof childValue === "boolean" || (typeof childValue === "number" && Number.isFinite(childValue));
+        if (!safeKey(normalized) && !SENSITIVE_KEY.test(normalized) && !harmless
+            && (childValue === null || typeof childValue !== "object")) {
+            if (dropped.length < 8) dropped.push(clip(childKey, 40));
+            continue;
+        }
         output[childKey] = sanitize(childValue, normalized, depth + 1);
     }
+    if (dropped.length) output.dropped_keys = dropped;
     return output;
 }
 
@@ -140,10 +156,15 @@ function eventName(value: string): string {
     const normalized = value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
     return normalized.slice(0, 120) || "plugin.event";
 }
+// O texto que vai no relato leva mês/dia e o "Z" do UTC: só o horário, sem data e sem fuso, fazia
+// o "22:37" que a pessoa contava não bater com o "01:37" do log (#404), e o arquivo junta dias.
+// Fase e operação vão na linha: sem elas, três "linux.network.phase" seguidos pareciam iguais.
 function legacyLine(record: PluginLogRecord): string {
-    const stamp = record.ts.slice(11, 23);
+    const stamp = `${record.ts.slice(5, 23)}Z`;
     const label = record.message ? redactString(record.message) : record.event;
     const fields: string[] = [];
+    if (record.operation_id) fields.push(`op=${record.operation_id}`);
+    if (record.phase && record.data?.phase === undefined) fields.push(`phase=${record.phase}`);
     for (const [key, value] of Object.entries(record.data || {})) {
         const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
         fields.push(`${key}=${clip(text, 300)}`);
@@ -159,6 +180,23 @@ function sameDedupe(a: PluginLogRecord, b: PluginLogRecord): boolean {
 function validTimestamp(value: unknown): string | undefined {
     if (typeof value !== "string" || value.length > 40 || Number.isNaN(Date.parse(value))) return undefined;
     return value;
+}
+
+/**
+ * Relaunch no namespace aceito sem nenhuma abertura do plugin depois: o cliente relançado morreu
+ * antes de carregar o plugin. Na #404 (SIGILL no NixOS) o log ficava em silêncio entre o relaunch
+ * e a reabertura manual, e só o coredump mostrou o crash. Chamar antes de registrar a abertura atual.
+ */
+export function pendingNamespaceRelaunch(records: readonly PluginLogRecord[]): { at: string; namespace?: string; operation_id?: string } | null {
+    for (let index = records.length - 1; index >= 0; index--) {
+        const record = records[index];
+        if (record.event === "plugin.process.started") return null;
+        if (record.message?.includes("relaunch no namespace aceito")) {
+            const namespace = typeof record.data?.namespace === "string" ? record.data.namespace : undefined;
+            return { at: record.ts, namespace, operation_id: record.operation_id };
+        }
+    }
+    return null;
 }
 
 export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {

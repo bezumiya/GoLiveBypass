@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, readWireSockResult, sanitizeWireGuardConfig, wireSockExecError, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
+import { collectWireSockInstallerLogErrors, describeWireSockInstallerExit, installerFolderDiagnosis, wireSockInstallerFailureDetail } from "../electron/wiresock-install-diag";
 import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockNetworkRestoreScript, wireSockServiceScript } from "../electron/wiresock-service";
 
 const sourcePath = path.resolve(process.cwd(), "electron/wiresock.ts");
@@ -35,7 +36,9 @@ function makeInstallOfficial() {
       WIRESOCK_INSTALLER_HASHES, wireSockInstallerExitKind, wireSockInstallFailureHint,
       detalheErro, markWireSockRebootPending, detectWireSockInstallState, wireSockInstallModeError,
       runWireSockInstaller, findCompatibleWireSockAsync, restoreWireSockNetwork,
-      verifyWindowsNetworkStable, waitForCompatibleWireSock } = ctx;
+      verifyWindowsNetworkStable, waitForCompatibleWireSock, windowsInstallerFolderPresent,
+      describeWireSockInstallerExit, collectWireSockInstallerLogErrors, wireSockInstallerFailureDetail, logger,
+      installerFolderDiagnosis } = ctx;
     const esperar = async () => {};
     const WIRESOCK_INSTALLER_TIMEOUT_MS = 1;
     const WIRESOCK_UNINSTALL_TIMEOUT_MS = 1;
@@ -54,6 +57,8 @@ interface InstallCtxOptions {
   state?: "compatible" | "stale" | "none";
   pairAfterInstall?: string | null;
   cancelOn?: "uninstall" | "install";
+  installerFolder?: boolean | null;
+  failInstallWith?: number;
 }
 
 function installCtx(options: InstallCtxOptions = {}) {
@@ -78,6 +83,7 @@ function installCtx(options: InstallCtxOptions = {}) {
     runWireSockInstaller: async (_installer: string, mode: string) => {
       modes.push(mode);
       if (options.cancelOn === mode) throw Object.assign(new Error("cancelado"), { code: 1223 });
+      if (options.failInstallWith && mode === "install") throw Object.assign(new Error("Command failed: powershell.exe"), { code: options.failInstallWith });
     },
     findCompatibleWireSockAsync: async () =>
       options.pairAfterInstall === undefined ? "C:\\WireSock\\wiresock-client.exe" : options.pairAfterInstall,
@@ -85,6 +91,12 @@ function installCtx(options: InstallCtxOptions = {}) {
       settleChecks += 1;
       return ctx.findCompatibleWireSockAsync();
     },
+    windowsInstallerFolderPresent: () => options.installerFolder ?? true,
+    describeWireSockInstallerExit,
+    collectWireSockInstallerLogErrors: () => [],
+    wireSockInstallerFailureDetail,
+    installerFolderDiagnosis,
+    logger: { logEvent: () => {}, warn: () => {}, info: () => {} },
     restoreWireSockNetwork: async (reason: string, opts: { force?: boolean } = {}) => {
       restores.push({ reason, force: opts.force });
       return restoreOk;
@@ -109,7 +121,9 @@ function makeEnsure() {
   return new Function(`return async function(ctx, onProgress) {
     const { assertNoPendingWireSockReboot, findCompatibleWireSockAsync,
       isWireSockPacketFilterInstalled, isWireSockPacketFilterDriverInstalled, logger, installOfficialWireSock,
-      WIRESOCK_OFFICIAL_DOWNLOAD } = ctx;
+      WIRESOCK_OFFICIAL_DOWNLOAD, findPreviousWireSockAsync, recordWireSockSelection, wireSockUpgradeState,
+      isWireSockRebootPending, detalheErro, formatWireSockVersion, MIN_WIRESOCK_SDK,
+      installerFolderDiagnosis, windowsInstallerFolderPresent } = ctx;
     ${body}
   }`)();
 }
@@ -121,6 +135,81 @@ const base = () => ({
   isWireSockPacketFilterDriverInstalled: () => true,
   logger: { warn: () => {}, info: () => {} },
   installOfficialWireSock: async () => "C:\\Program Files\\WireSock Secure Connect\\wiresock-client.exe",
+  // Reserva: par anterior à exigência do SDK (3.4.8.1) ainda instalado. Padrão: nenhum.
+  findPreviousWireSockAsync: async (): Promise<{ executable: string; version: string } | null> => null,
+  selections: [] as Array<{ upgrade: string; version?: string }>,
+  recordWireSockSelection: (() => {}) as (upgrade: string, version?: string) => void,
+  wireSockUpgradeState: { failed: false },
+  isWireSockRebootPending: () => false,
+  detalheErro: (error: unknown) => String((error as Error)?.message ?? error),
+  formatWireSockVersion: (v: { major: number; minor: number; patch: number; build: number }) => `${v.major}.${v.minor}.${v.patch}.${v.build}`,
+  MIN_WIRESOCK_SDK: { major: 3, minor: 8, patch: 2, build: 1 },
+  installerFolderDiagnosis,
+  windowsInstallerFolderPresent: (): boolean | null => true,
+});
+
+describe("troca do SDK que falha usa a versão anterior ainda instalada", () => {
+  const withPrevious = () => {
+    const ctx = base();
+    ctx.recordWireSockSelection = (upgrade, version) => { ctx.selections.push({ upgrade, version }); };
+    ctx.findPreviousWireSockAsync = async () => ({ executable: "old.exe", version: "3.4.8.1" });
+    return ctx;
+  };
+
+  it("instalação que falha com a 3.4.8.1 no lugar ativa com ela e registra a troca falha", async () => {
+    const run = makeEnsure(); const ctx = withPrevious(); const warns: string[] = []; const progress: string[] = [];
+    ctx.logger = { warn: (_c: string, msg: string) => { warns.push(msg); }, info: () => {} };
+    ctx.installOfficialWireSock = async () => { throw new Error("O instalador saiu com o código 1632"); };
+    await expect(run(ctx, (m: string) => progress.push(m))).resolves.toBe("old.exe");
+    expect(ctx.wireSockUpgradeState.failed).toBe(true);
+    expect(ctx.selections).toEqual([{ upgrade: "falhou_usando_anterior", version: "3.4.8.1" }]);
+    expect(warns).toContain("upgrade.fallback");
+    expect(progress.at(-1)).toMatch(/usando a versão já instalada/);
+  });
+
+  it("a reserva registra a causa e o reparo manual quando falta a pasta Installer", async () => {
+    const run = makeEnsure(); const ctx = withPrevious(); const data: Array<Record<string, unknown>> = [];
+    ctx.logger = { warn: (_c: string, _m: string, d: Record<string, unknown>) => { data.push(d); }, info: () => {} };
+    ctx.windowsInstallerFolderPresent = () => false;
+    ctx.installOfficialWireSock = async () => { throw new Error("1632"); };
+    await expect(run(ctx, () => {})).resolves.toBe("old.exe");
+    expect(data.at(-1)).toMatchObject({ causa_provavel: expect.stringContaining("Installer ausente"), acao_manual: expect.stringContaining("recriar") });
+  });
+
+  it("na mesma sessão não baixa nem pede elevação de novo depois da falha", async () => {
+    const run = makeEnsure(); const ctx = withPrevious(); let installs = 0;
+    ctx.wireSockUpgradeState.failed = true;
+    ctx.installOfficialWireSock = async () => { installs++; return "new.exe"; };
+    await expect(run(ctx, () => {})).resolves.toBe("old.exe");
+    expect(installs).toBe(0);
+  });
+
+  it("sem versão anterior a falha continua propagando", async () => {
+    const run = makeEnsure(); const ctx = base();
+    ctx.installOfficialWireSock = async () => { throw new Error("1632"); };
+    await expect(run(ctx, () => {})).rejects.toThrow("1632");
+    expect(ctx.wireSockUpgradeState.failed).toBe(false);
+  });
+
+  it("reinicialização pedida pelo setup não cai na versão anterior", async () => {
+    const run = makeEnsure(); const ctx = withPrevious();
+    ctx.isWireSockRebootPending = () => true;
+    ctx.installOfficialWireSock = async () => { throw new Error("reinicie"); };
+    await expect(run(ctx, () => {})).rejects.toThrow("reinicie");
+  });
+
+  it("troca bem-sucedida registra ok", async () => {
+    const run = makeEnsure(); const ctx = withPrevious();
+    ctx.installOfficialWireSock = async () => "new.exe";
+    await expect(run(ctx, () => {})).resolves.toBe("new.exe");
+    expect(ctx.selections).toEqual([{ upgrade: "ok", version: undefined }]);
+  });
+
+  it("o erro do setup leva o código de saída e a pasta Installer ausente", async () => {
+    const run = makeInstallOfficial();
+    const { ctx } = installCtx({ failInstallWith: 1632, installerFolder: false });
+    await expect(run(ctx, () => {})).rejects.toThrow(/código 1632 \(o Windows Installer não consegue gravar.*%SystemRoot%\\Installer\) não existe/);
+  });
 });
 
 describe("instalação WireSock extraída do fluxo real", () => {

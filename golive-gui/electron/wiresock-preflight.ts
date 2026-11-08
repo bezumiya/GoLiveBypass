@@ -30,14 +30,24 @@ export function isSupportedWireSockVersion(version: WireSockVersion): boolean {
   return compareWireSockVersion(version, MIN_WIRESOCK_SDK) >= 0;
 }
 
-export function selectSupportedWireSock(candidates: WireSockCandidate[]): WireSockCandidate {
-  const valid = candidates.filter((candidate) =>
-    isSupportedWireSockVersion(candidate.executableVersion) &&
-    isSupportedWireSockVersion(candidate.boosterVersion),
+// Último SDK aceito antes da exigência da 3.8.2.1. Só vale como reserva quando a troca falha:
+// num Windows em que o Windows Installer não instala nada (1632 sem %SystemRoot%\Installer), a
+// ativação travava para quem funcionava na versão anterior do app.
+export const FALLBACK_WIRESOCK_SDK = Object.freeze({ major: 3, minor: 4, patch: 8, build: 1 });
+
+/** Melhor par cliente/booster da mesma versão, a partir de `minimum`; null se nenhum serve. */
+export function pickWireSock(candidates: WireSockCandidate[], minimum: WireSockVersion = MIN_WIRESOCK_SDK): WireSockCandidate | null {
+  return candidates.filter((candidate) =>
+    compareWireSockVersion(candidate.executableVersion, minimum) >= 0 &&
+    compareWireSockVersion(candidate.boosterVersion, minimum) >= 0,
   ).filter((candidate) => compareWireSockVersion(candidate.executableVersion, candidate.boosterVersion) === 0
-  ).sort((a, b) => compareWireSockVersion(b.executableVersion, a.executableVersion));
-  if (!valid[0]) throw new Error(`Nenhuma instalação WireSock SDK compatível foi encontrada (mínimo ${formatWireSockVersion(MIN_WIRESOCK_SDK)} com wiresock-client.exe e wgbooster.dll).`);
-  return valid[0];
+  ).sort((a, b) => compareWireSockVersion(b.executableVersion, a.executableVersion))[0] ?? null;
+}
+
+export function selectSupportedWireSock(candidates: WireSockCandidate[]): WireSockCandidate {
+  const selected = pickWireSock(candidates);
+  if (!selected) throw new Error(`Nenhuma instalação WireSock SDK compatível foi encontrada (mínimo ${formatWireSockVersion(MIN_WIRESOCK_SDK)} com wiresock-client.exe e wgbooster.dll).`);
+  return selected;
 }
 
 /**

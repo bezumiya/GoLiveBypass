@@ -30,7 +30,9 @@ import * as logger from "./logger";
 import * as discordscan from "./discordscan";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
-import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type TunnelStats, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, verifyWindowsNetwork, type WireSockConnectionStatus } from "./wiresock";
+import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type TunnelStats, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, verifyWindowsNetwork, type WireSockConnectionStatus, wireSockSelectionForReport } from "./wiresock";
+import { guiEnvironmentSnapshot } from "./env-snapshot";
+import { installerFolderDiagnosis } from "./wiresock-install-diag";
 import { classifyWgReadiness, getWgStats, getWgStatsAsync, iniciarWgStatsWatchdog, pararWgStatsWatchdog, type WgTunnelStats } from "./wgstats";
 import { automaticExcludedCountries, classifyFailoverHealth, FailoverHealthTracker, FAILOVER_ROUTE_TIMEOUT_MS, FAILOVER_SAMPLE_INTERVAL_MS, routeCandidateUsable, routePoolDirectory, readRoutePoolManifest, makeRoutePoolManifest, routePoolMatches, ROUTE_POOL_RESERVE_COUNT, ROUTE_POOL_TOTAL, safeRoutePoolPath, writeRoutePoolManifest, type ProtonRouteMetadata, type ProtonRoutePoolManifest } from "./route-failover";
 import { validateWgConfContent } from "./wg-validator";
@@ -793,7 +795,14 @@ if (!gotLock) {
       const logs = logsDir.garantirLogsDir(app.getPath("home"), process.platform);
       logger.initLogger(logs);
       logger.patchConsole();
-      logger.info("app", "iniciado", { versao: app.getVersion(), plataforma: process.platform });
+      // As linhas do gui.log so tem HH:MM:SS e o arquivo junta dias: a data completa fica aqui.
+      logger.info("app", "iniciado", { versao: app.getVersion(), plataforma: process.platform, inicio: new Date().toISOString() });
+      // Uma linha por abertura com SO/build, fuso e o que o relato precisaria perguntar (env-snapshot.ts).
+      const ambiente = guiEnvironmentSnapshot();
+      logger.info("env", "snapshot", ambiente);
+      // O app nao conserta a pasta do sistema; so deixa explicito, ja na abertura, que instalar ou
+      // atualizar o WireSock vai falhar e o que fazer a mao.
+      if (ambiente.msi_pasta_installer === "nao") logger.warn("env", "pasta do Windows Installer ausente", { ...installerFolderDiagnosis(false) });
     } catch {}
     // Beta 16: esta nao e mais uma preferencia. Corrige na abertura tanto o
     // settings compartilhado (Linux) quanto o settings de injecoes existentes
@@ -4832,7 +4841,7 @@ ipcMain.handle("report-bug", async (_event, payload: unknown) => {
   const wgTunel = !isMac && statusBypass === "ACTIVE" ? await wgStatsProvider() : undefined;
   return submitBugReport(
     { title: String(p.title ?? ""), description: String(p.description ?? ""), includeLogs: !!p.includeLogs },
-    { statusBypass, installsFlavours: ultimosFlavoursLinux, graphics: ultimosGraficosLinux, wgTunel },
+    { statusBypass, installsFlavours: ultimosFlavoursLinux, graphics: ultimosGraficosLinux, wgTunel, wiresock: wireSockSelectionForReport() },
   );
 });
 

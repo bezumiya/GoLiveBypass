@@ -14,6 +14,7 @@ import { descreverQuicDoDiscord } from "./discord-args";
 import { metaFragmentos } from "./fragmentos-ip";
 import { caminhoLogWireSock, ipv6NoPerfil, metaDoLogWireSock } from "./wiresock-log";
 import * as logsDir from "./logsDir";
+import { guiEnvironmentSnapshot } from "./env-snapshot";
 import type { WgTunnelStats } from "./wgstats";
 import {
   cortarDoFim,
@@ -188,7 +189,11 @@ function lerSettingsDoApp(): Record<string, unknown> {
 }
 
 // Metadados tecnicos: diagnostico sem identificar a pessoa nem expor a saida escolhida.
-export function montarMeta(statusBypass: string, wgTunel?: WgTunnelStats): Record<string, string> {
+export function montarMeta(
+  statusBypass: string,
+  wgTunel?: WgTunnelStats,
+  wiresock?: { version: string; upgrade: string } | null,
+): Record<string, string> {
   return {
     versao: app.getVersion(),
     plataforma: `${process.platform}-${process.arch}`,
@@ -224,6 +229,9 @@ export function montarMeta(statusBypass: string, wgTunel?: WgTunnelStats): Recor
     installs: String(installsDaSessao(settingsDir(app.getPath("home"))).length),
     // Diagnostico da deteccao do Discord — sem caminhos completos do usuario.
     localappdata_presente: process.env.LOCALAPPDATA ? "sim" : "nao",
+    // SO/build, fuso, pasta do Windows Installer e o WireSock que a ativacao usou (inclusive se a
+    // troca do SDK falhou e ficou na versao anterior). Ver env-snapshot.ts.
+    ...guiEnvironmentSnapshot({ wiresock }),
   };
 }
 
@@ -234,6 +242,7 @@ export async function submitBugReport(
     installsFlavours?: string;
     graphics?: string;
     wgTunel?: WgTunnelStats;
+    wiresock?: { version: string; upgrade: string } | null;
   },
 ): Promise<ReportResult> {
   const title = payload.title.trim().slice(0, TITLE_MAX);
@@ -249,7 +258,7 @@ export async function submitBugReport(
     title: redigir(title, segredos, BUG_API_TOKEN),
     description: redigir(description, segredos, BUG_API_TOKEN),
     meta: {
-      ...montarMeta(ctx.statusBypass, ctx.wgTunel),
+      ...montarMeta(ctx.statusBypass, ctx.wgTunel, ctx.wiresock),
       // Flavours vistos na varredura (discord,vesktop,...) — mostra na hora se
       // um cliente paralelo foi achado ou se o report e de "nao achei o Vesktop".
       ...(ctx.installsFlavours ? { installs_flavours: ctx.installsFlavours } : {}),

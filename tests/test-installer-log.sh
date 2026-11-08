@@ -276,6 +276,93 @@ else
     ok "caminho de falha nao tenta POST"
 fi
 
+printf '\n== 6. build do mod: dependencias sincronizadas e contexto da falha ==\n'
+# Checkout atualizado (git pull/updater do mod) com node_modules antigo: o Equicord liga
+# verifyDepsBeforeRun e o `pnpm build` sem terminal falhava sem dizer nada. O instalador
+# precisa sincronizar antes de todo build e, se o build falhar mesmo assim, deixar no log
+# versoes e estado do checkout, sem caminho.
+BUILD_HARNESS="$TMP/build-harness.sh"
+{
+    cat "$LOG_SECTION"
+    for fn in sync_mod_deps log_build_context build_mod; do
+        awk "/^$fn\\(\\) \\{/,/^\\}\$/" "$SH_INSTALLER"
+    done
+    cat <<'EOF'
+C_RED=""; C_DIM=""; C_OFF=""
+step() { :; }
+checkout_mod() { printf 'Equicord\n'; }
+node() { printf 'v22.11.0\n'; }
+# pnpm falso: registra as chamadas; PNPM_FAIL lista as que devem falhar (frozen, install, build).
+pnpm() {
+    printf '%s\n' "$*" >> "$PNPM_CALLS"
+    case "$*" in
+        --version) printf '12.8.1\n'; return 0 ;;
+        *--frozen-lockfile*) case " $PNPM_FAIL " in *" frozen "*) return 1 ;; esac ;;
+        install*) case " $PNPM_FAIL " in *" install "*) return 1 ;; esac ;;
+        build) case " $PNPM_FAIL " in *" build "*) return 1 ;; esac ;;
+    esac
+    return 0
+}
+EOF
+} > "$BUILD_HARNESS"
+
+# $1 = nome do caso, $2 = falhas do pnpm falso. Deixa $BROOT, $BLOG, $BCALLS e $brc.
+run_build_case() {
+    BROOT="$TMP/home/alice/Equicord-$1"
+    mkdir -p "$BROOT/node_modules"
+    printf '{"name":"equicord","packageManager":"pnpm@12.16.1"}\n' > "$BROOT/package.json"
+    BLOG="$TMP/data-build-$1"
+    BCALLS="$TMP/pnpm-calls-$1"
+    : > "$BCALLS"
+    brc=0
+    # shellcheck disable=SC1090
+    ( set -eu; GLB_INSTALLER_LOG_DIR="$BLOG"; PNPM_CALLS="$BCALLS"; PNPM_FAIL="$2"
+      . "$BUILD_HARNESS"; build_mod "$BROOT" ) >/dev/null 2>"$TMP/build-$1.err" || brc=$?
+}
+
+run_build_case ok ""
+if [ "$brc" -eq 0 ] && [ "$(sed -n 1p "$BCALLS")" = "install --frozen-lockfile --config.confirm-modules-purge=false" ] \
+    && [ "$(sed -n 2p "$BCALLS")" = "build" ]; then
+    ok "node_modules presente: sincroniza com --frozen-lockfile antes do build"
+else
+    bad "build sem sincronizar antes (rc=$brc): $(tr '\n' ';' < "$BCALLS")"
+fi
+
+run_build_case lock "frozen"
+if [ "$brc" -eq 0 ] && [ "$(sed -n 2p "$BCALLS")" = "install --config.confirm-modules-purge=false" ] \
+    && [ "$(sed -n 3p "$BCALLS")" = "build" ]; then
+    ok "lockfile fora do package.json: cai no install comum e compila"
+else
+    bad "reserva do install nao rodou (rc=$brc): $(tr '\n' ';' < "$BCALLS")"
+fi
+
+run_build_case build "build"
+BLOGF="$BLOG/installer.log"
+if [ "$brc" -eq 1 ] && grep -q 'pnpm build falhou (exit=1)' "$TMP/build-build.err"; then
+    ok "falha do build informa o codigo de saida"
+else
+    bad "falha do build sem exit (rc=$brc): $(cat "$TMP/build-build.err")"
+fi
+ctx="$(grep '"event":"installer.build_context"' "$BLOGF" 2>/dev/null || true)"
+case "$ctx" in
+    *'"pnpm_version":"12.8.1"'*'"pnpm_esperado":"pnpm@12.16.1"'*'"node_version":"v22.11.0"'*'"node_modules":true'*'"deps_sync":"ok"'*'"exit_code":1'*)
+        ok "installer.build_context traz versoes, node_modules, deps_sync e exit" ;;
+    *) bad "contexto do build incompleto: $ctx" ;;
+esac
+if grep -q 'alice' "$BLOGF"; then
+    bad "contexto do build vazou caminho pessoal"
+else
+    ok "contexto do build sem caminho pessoal"
+fi
+
+run_build_case deps "frozen install"
+ctx="$(grep '"event":"installer.build_context"' "$BLOG/installer.log" 2>/dev/null || true)"
+if [ "$brc" -eq 1 ] && ! grep -qx build "$BCALLS" && case "$ctx" in *'"deps_sync":"falhou"'*) true ;; *) false ;; esac; then
+    ok "install que falha nas duas tentativas para antes do build e registra deps_sync=falhou"
+else
+    bad "falha do install mal registrada (rc=$brc): $ctx"
+fi
+
 printf '\n----------------------------------------\n'
 printf '  %s: %s passaram, %s falharam\n' "$(basename "$0")" "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

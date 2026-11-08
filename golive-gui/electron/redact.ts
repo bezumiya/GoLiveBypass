@@ -26,7 +26,9 @@ const RE_GATEWAY_QUERY = /(https:\/\/gateway[^?\s]+)\?\S*/g;
 const RE_EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const RE_HOME_POSIX = /(\/(?:home|var\/home|Users)\/)[^/\s]+/g;
 const RE_HOME_WINDOWS = /([A-Z]:\\Users\\)[^\\\s]+/gi;
-const RE_IDENTITY_LABEL = /\b(nome|name|usu[aá]rio|username|user)\s*([:=])\s*[^\s,;]+/gi;
+// "as another user: Not authorized" e a frase fixa do pkexec, nao um nome: sem a exclusao o relato
+// perdia justamente o "Not" e a causa da recusa (#404, fechamento negado pelo polkit).
+const RE_IDENTITY_LABEL = /\b(?<!another\s)(nome|name|usu[aá]rio|username|user)\s*([:=])\s*[^\s,;]+/gi;
 
 export function l1Padroes(texto: string): string {
   return (

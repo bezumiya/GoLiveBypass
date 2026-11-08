@@ -297,7 +297,9 @@ $script:InstallerForbiddenKey = '(?i)(password|senha|token|captcha|secret|privat
 $script:InstallerAllowedKeys = @(
     'mode', 'channel', 'permanent', 'we_injected', 'target_count', 'candidate_count', 'candidate_kind',
     'discord_count', 'mod_kind', 'reason', 'reason_code', 'result', 'exit_code',
-    'duration_ms', 'path_present', 'path_kind', 'active', 'preserved', 'identity', 'count'
+    'duration_ms', 'path_present', 'path_kind', 'active', 'preserved', 'identity', 'count',
+    # Contexto de um build que falhou (installer.build_context): versoes e estado do checkout, sem caminho.
+    'pnpm_version', 'pnpm_esperado', 'node_version', 'node_modules', 'deps_sync', 'saida_vazia'
 )
 
 function Get-InstallerLogDir {
@@ -1707,7 +1709,55 @@ function Format-PnpmDetail($saida) {
         Where-Object { ($_ -replace '\s+', ' ').Trim() } |
         Select-Object -Last 10)
     $text = ($linhas -join ' | ') -replace '\s+', ' '
+    # Vazio nao pode virar "falhou (exit=1): " e nada mais: o relato parecia cortado pela pessoa.
+    # Sair calado e um sintoma em si (prompt que o pnpm nao conseguiu mostrar, por exemplo).
+    if (-not $text.Trim()) { return '(o pnpm saiu sem nenhuma mensagem; rode "pnpm build" na pasta do mod para ver o erro)' }
     return ConvertTo-InstallerSafeText $text.Trim() 600
+}
+
+# O que um "pnpm build falhou" precisa para ser entendido sem perguntar nada: versao do pnpm em uso
+# contra a que o projeto pede, versao do node e se o node_modules existia. No relato do Equicord
+# atualizado (verifyDepsBeforeRun) o log trazia so "exit=1" e o resto teve de ser reproduzido.
+function Get-ModBuildContext($root) {
+    $ctx = [ordered]@{
+        pnpm_version = [string]$script:PnpmVersion
+        node_modules = [bool](Test-Path -LiteralPath (Join-Path $root 'node_modules'))
+    }
+    try {
+        $pkg = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($pkg.packageManager) { $ctx.pnpm_esperado = [string]$pkg.packageManager }
+    } catch {}
+    try {
+        $node = Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $ctx.node_version = [string](& $node.Source --version 2>$null | Select-Object -First 1)
+    } catch {}
+    return $ctx
+}
+
+# O Equicord liga `verifyDepsBeforeRun: prompt` no pnpm-workspace.yaml. Depois que o checkout
+# muda (git pull, updater do proprio mod) e o node_modules fica fora de sincronia com o lockfile,
+# o `pnpm build` tenta perguntar "rodar install?". Com a saida canalizada pelo instalador num
+# console de verdade, ele morre com exit 1 em ~50 ms sem escrever nada alem do WARN de versao
+# do pnpm: o relato chegava como "pnpm build falhou (exit=1): " vazio, todas as vezes. Instalar
+# so quando o node_modules faltava deixava esse checkout preso. Sincronizar antes de todo build
+# custa quase nada quando ja esta em dia. --frozen-lockfile nao reescreve o pnpm-lock.yaml do
+# checkout (o updater do mod faz git pull nele); o install comum fica de reserva para quando o
+# lockfile nao bate com o package.json. confirm-modules-purge=false evita o outro prompt do
+# pnpm (recriar o node_modules feito por outra versao), que travaria do mesmo jeito.
+# Devolve $null quando deu certo, ou a mensagem de falha com o fim da saida do pnpm.
+function Sync-ModDeps($root) {
+    if (Test-Path -LiteralPath (Join-Path $root 'node_modules')) {
+        Write-Step 'Conferindo as dependencias do mod'
+    } else {
+        Write-Step 'Instalando dependencias (na primeira vez demora alguns minutos)'
+    }
+    $saidaInstall = @()
+    Invoke-Pnpm @('install', '--frozen-lockfile', '--config.confirm-modules-purge=false') | Tee-Object -Variable saidaInstall | Out-Host
+    if ($script:PnpmExitCode -eq 0) { return $null }
+    $saidaInstall = @()
+    Invoke-Pnpm @('install', '--config.confirm-modules-purge=false') | Tee-Object -Variable saidaInstall | Out-Host
+    if ($script:PnpmExitCode -eq 0) { return $null }
+    return "pnpm install falhou (exit=$($script:PnpmExitCode)): $(Format-PnpmDetail $saidaInstall)"
 }
 
 function Build-Mod($root) {
@@ -1717,17 +1767,27 @@ function Build-Mod($root) {
     Assert-CheckoutBuildPreReqs $root
     Push-Location -LiteralPath $root
     try {
-        if (-not (Test-Path -LiteralPath (Join-Path $root 'node_modules'))) {
-            Write-Step 'Instalando dependencias (na primeira vez demora alguns minutos)'
-            $saidaInstall = @()
-            Invoke-Pnpm @('install') | Tee-Object -Variable saidaInstall | Out-Host
-            if ($script:PnpmExitCode -ne 0) { throw "pnpm install falhou (exit=$($script:PnpmExitCode)): $(Format-PnpmDetail $saidaInstall)" }
+        $falhaDeps = Sync-ModDeps $root
+        if ($falhaDeps) {
+            $ctx = Get-ModBuildContext $root
+            $ctx.deps_sync = 'falhou'
+            Write-InstallerEvent 'error' 'installer.build_context' 'build' $ctx
+            throw $falhaDeps
         }
 
         Write-Step 'Compilando'
         $saidaBuild = @()
         Invoke-Pnpm @('build') | Tee-Object -Variable saidaBuild | Out-Host
-        if ($script:PnpmExitCode -ne 0) { throw "pnpm build falhou (exit=$($script:PnpmExitCode)): $(Format-PnpmDetail $saidaBuild)" }
+        if ($script:PnpmExitCode -ne 0) {
+            $exitBuild = $script:PnpmExitCode
+            $detalhe = Format-PnpmDetail $saidaBuild
+            $ctx = Get-ModBuildContext $root
+            $ctx.deps_sync = 'ok'
+            $ctx.exit_code = $exitBuild
+            $ctx.saida_vazia = [bool]($detalhe -like '(o pnpm saiu sem nenhuma mensagem*')
+            Write-InstallerEvent 'error' 'installer.build_context' 'build' $ctx
+            throw "pnpm build falhou (exit=$exitBuild): $detalhe"
+        }
     } finally {
         Pop-Location
     }
@@ -1739,6 +1799,8 @@ function Remove-PluginSource($root) {
     Remove-CaminhoSilencioso $target
     Push-Location -LiteralPath $root
     try {
+        $falhaDeps = Sync-ModDeps $root
+        if ($falhaDeps) { Write-Warn $falhaDeps }
         $saidaBuild = @()
         Invoke-Pnpm @('build') | Tee-Object -Variable saidaBuild | Out-Host
         if ($script:PnpmExitCode -ne 0) { Write-Warn "Nao consegui recompilar o mod sem o GoLiveBypass (exit=$($script:PnpmExitCode)): $(Format-PnpmDetail $saidaBuild)" }
