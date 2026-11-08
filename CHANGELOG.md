@@ -25,6 +25,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   Reproduzido no Windows (PowerShell 5.1, pnpm 12.8.1, console de verdade) com o lockfile atualizado e o `node_modules` antigo: antes, exit 1 só com o aviso de versão; depois, o build passa.
 
+- **GUI Linux e standalone: Discord Flatpak fechado segundos depois de abrir no túnel (#416).** No Bazzite, o Discord Flatpak abria dentro do namespace WireGuard e funcionava (dava para entrar em live), mas a ativação esperava 20 s, dizia "uma instancia do com.discordapp.Discord ficou fora do namespace" e fechava o cliente. O `flatpak ps` do reporter mostrava duas instâncias de `com.discordapp.Discord`: a principal no namespace (`ip netns identify` devolvia `discord-vpn`) e outra, mais nova, fora dele e listada primeiro. A confirmação lia só a primeira linha, e a ordem das linhas não é garantida. A instância extra continuou com `ZYPAK_DISABLE_SANDBOX=1`, e o que a cria ainda não foi identificado. Agora a confirmação da ativação e o `inNamespace` do status olham todas as instâncias do ID e aceitam a que está no namespace. Quando nenhuma está, a falha continua igual e o `flatpak ps` da hora vai para o log do Discord. Regressão hermética em `tests/test-linux-flatpak-instancias-netns.sh`, com a ordem do relato (a lógica anterior reproduz o `fora-do-namespace`); a correção ainda não rodou no Bazzite do reporter.
+
 ### Adicionado
 
 - **Retrato do ambiente no log e no relato (GUI e plugin).** Uma linha `env.snapshot` por abertura e os mesmos campos nos metadados do relato. Entram só rótulos técnicos: nada de usuário, máquina, caminho, rede ou endpoint.

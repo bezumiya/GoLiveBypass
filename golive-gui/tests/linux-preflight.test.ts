@@ -795,6 +795,7 @@ describe("preflight Linux", () => {
     const pidFunction = extract("discord_pid_flav");
     const namespaceFunction = extract("discord_pid_in_netns");
     const elevatedFunction = extract("discord_pid_in_netns_elevated");
+    const netnsPidFunction = extract("discord_netns_pid_flav");
     const waitFunction = extract("wait_discord_started");
     const runWait = (scenario: "outside" | "inside" | "disappeared") => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "golive-wait-netns-"));
@@ -832,6 +833,7 @@ describe("preflight Linux", () => {
         pidFunction,
         namespaceFunction,
         elevatedFunction,
+        netnsPidFunction,
         waitFunction,
         "wait_discord_started '/resources|discord||'",
       ].join("\n"));
