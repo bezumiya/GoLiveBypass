@@ -67,7 +67,8 @@ NODE
 FUNCTIONS="$TMP/functions.sh"
 awk '/^validate_plugin_source_tree\(\)/,/^# De onde vem o plugin instalado/ { print }' \
     "$REPO/installer/golivebypass-installer.sh" > "$FUNCTIONS"
-awk '/^build_mod\(\)/,/^remove_plugin_source\(\)/ {
+# sync_mod_deps e log_build_context ficam logo acima de build_mod e fazem parte do build.
+awk '/^sync_mod_deps\(\)/,/^remove_plugin_source\(\)/ {
     if ($0 !~ /^remove_plugin_source\(\)/) print
 }' "$REPO/installer/golivebypass-installer.sh" >> "$FUNCTIONS"
 cat >> "$FUNCTIONS" <<'EOF'
@@ -97,6 +98,8 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/pnpm" <<'EOF'
 #!/bin/sh
 set -eu
+# O build sempre e precedido pela sincronizacao das dependencias.
+[ "${1:-}" = install ] && exit 0
 [ "${1:-}" = build ] || exit 2
 for file in $PLUGIN_FILES; do
     test -s "$ROOT/src/userplugins/$PLUGIN_DIR_NAME/$(basename "$file")" || {

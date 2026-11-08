@@ -477,12 +477,14 @@ try {
     function Find-GitApplication { return [pscustomobject]@{ Source = 'git-stub' } }
     function Test-GitComandoOk([string]$GitSource, [string[]]$GitArgs) { return $true }
     function Invoke-Pnpm([string[]]$Arguments) {
+        if ($Arguments -contains 'install') { $script:PnpmExitCode = 0; return }
         $script:PnpmExitCode = 1
         1..12 | ForEach-Object { Write-Output ("linha-de-enchimento-$_") }
         Write-Output 'Error: Command failed: git rev-parse HEAD'
         Write-Output '[ELIFECYCLE] Command failed with exit code 1.'
         return
     }
+    $buildLogFile = Join-Path $env:GLB_INSTALLER_LOG_DIR 'installer.log'
     try {
         Build-Mod $buildRoot
         Assert-Equal $false $true "Build-Mod com pnpm exit=1 deveria falhar"
@@ -492,6 +494,77 @@ try {
         Assert-Equal ($msg -match 'exit=1') $true "falha do build informa o codigo de saida"
         Assert-Equal ($msg -match 'ELIFECYCLE') $true "falha do build traz o fim da saida do pnpm"
         Assert-Equal ($msg -match 'linha-de-enchimento-1 ') $false "falha do build nao carrega a saida inteira"
+    }
+    # O log tem que explicar o build sem perguntar nada a pessoa: versoes, node_modules e exit.
+    Set-Content -LiteralPath (Join-Path $buildRoot 'package.json') -Value '{"name":"equicord","packageManager":"pnpm@12.16.1"}' -Encoding ASCII
+    $script:PnpmVersion = '12.8.1'
+    Remove-Item -LiteralPath $buildLogFile -Force -ErrorAction SilentlyContinue
+    try { Build-Mod $buildRoot } catch {}
+    $ctxLinha = @(Get-Content -LiteralPath $buildLogFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '"event":"installer.build_context"' }) | Select-Object -Last 1
+    $ctx = if ($ctxLinha) { ($ctxLinha | ConvertFrom-Json).data } else { $null }
+    Assert-Equal ([string]$ctx.pnpm_version) '12.8.1' "build_context traz o pnpm em uso"
+    Assert-Equal ([string]$ctx.pnpm_esperado) 'pnpm@12.16.1' "build_context traz o pnpm que o projeto pede"
+    Assert-Equal $ctx.node_modules $true "build_context diz se o node_modules existia"
+    Assert-Equal ([string]$ctx.deps_sync) 'ok' "build_context diz que as dependencias foram sincronizadas"
+    Assert-Equal $ctx.exit_code 1 "build_context traz o exit do build"
+    Assert-Equal $ctx.saida_vazia $false "build_context marca saida nao vazia"
+    Assert-Equal ($ctxLinha -match [regex]::Escape($buildRoot)) $false "build_context nao grava o caminho do checkout"
+
+    # Checkout atualizado com node_modules antigo: o pnpm do Equicord (verifyDepsBeforeRun) morria
+    # calado. A mensagem nao pode terminar em "falhou (exit=1): " e nada mais.
+    Set-Item -Path Function:Invoke-Pnpm {
+        param([string[]]$Arguments)
+        if ($Arguments -contains 'install') { $script:PnpmExitCode = 0; return }
+        $script:PnpmExitCode = 1
+        Write-Output ' '
+        return
+    }
+    Remove-Item -LiteralPath $buildLogFile -Force -ErrorAction SilentlyContinue
+    try {
+        Build-Mod $buildRoot
+        Assert-Equal $false $true "Build-Mod com pnpm calado deveria falhar"
+    } catch {
+        Assert-Equal ($_.Exception.Message -match 'o pnpm saiu sem nenhuma mensagem') $true "build calado diz que o pnpm nao escreveu nada"
+    }
+    $ctxLinha = @(Get-Content -LiteralPath $buildLogFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '"event":"installer.build_context"' }) | Select-Object -Last 1
+    Assert-Equal (($ctxLinha | ConvertFrom-Json).data.saida_vazia) $true "build_context marca saida vazia"
+
+    # Lockfile que nao bate com o package.json: o --frozen-lockfile falha e o install comum assume.
+    $script:mockBuildPnpmArgs = @()
+    Set-Item -Path Function:Invoke-Pnpm {
+        param([string[]]$Arguments)
+        $script:mockBuildPnpmArgs += ,($Arguments -join ' ')
+        $script:PnpmExitCode = $(if ($Arguments -contains '--frozen-lockfile') { 1 } else { 0 })
+        return
+    }
+    Build-Mod $buildRoot
+    Assert-Equal ($script:mockBuildPnpmArgs -join '|') 'install --frozen-lockfile --config.confirm-modules-purge=false|install --config.confirm-modules-purge=false|build' "lockfile divergente cai no install comum e compila"
+
+    # Install que falha nas duas tentativas: para antes do build, com a causa e o contexto.
+    $script:mockBuildPnpmArgs = @()
+    Set-Item -Path Function:Invoke-Pnpm {
+        param([string[]]$Arguments)
+        $script:mockBuildPnpmArgs += ,($Arguments -join ' ')
+        $script:PnpmExitCode = $(if ($Arguments -contains 'install') { 1 } else { 0 })
+        if ($Arguments -contains 'install') { Write-Output 'ERR_PNPM_FETCH_404 pacote ausente' }
+        return
+    }
+    Remove-Item -LiteralPath $buildLogFile -Force -ErrorAction SilentlyContinue
+    try {
+        Build-Mod $buildRoot
+        Assert-Equal $false $true "Build-Mod com install quebrado deveria falhar"
+    } catch {
+        Assert-Equal ($_.Exception.Message -match 'pnpm install falhou \(exit=1\).*ERR_PNPM_FETCH_404') $true "install quebrado traz exit e o fim da saida"
+    }
+    Assert-Equal (@($script:mockBuildPnpmArgs) -contains 'build') $false "install quebrado nao chega ao build"
+    $ctxLinha = @(Get-Content -LiteralPath $buildLogFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '"event":"installer.build_context"' }) | Select-Object -Last 1
+    Assert-Equal ([string]($ctxLinha | ConvertFrom-Json).data.deps_sync) 'falhou' "build_context marca deps_sync=falhou"
+
+    # Volta ao pnpm que falha so no build para os pre-requisitos de git abaixo.
+    Set-Item -Path Function:Invoke-Pnpm {
+        param([string[]]$Arguments)
+        $script:PnpmExitCode = $(if ($Arguments -contains 'install') { 0 } else { 1 })
+        return
     }
 
     # Git ausente do PATH: falha antes do build, com o que instalar.
@@ -539,17 +612,18 @@ try {
         Assert-Equal ($_.Exception.Message -match "remote 'origin'") $true "checkout sem remote origin tem mensagem propria"
     }
 
-    # Caminho feliz: node_modules presente pula o install e roda so o build.
+    # Caminho feliz: node_modules presente ainda confere as dependencias (sem reescrever o
+    # lockfile) antes do build; checkout atualizado com node_modules antigo travava aqui.
     Set-Item -Path Function:Test-GitComandoOk { param([string]$GitSource, [string[]]$GitArgs) return $true }
     $script:mockBuildPnpmArgs = @()
     Set-Item -Path Function:Invoke-Pnpm {
         param([string[]]$Arguments)
-        $script:mockBuildPnpmArgs = @($Arguments)
+        $script:mockBuildPnpmArgs += ,($Arguments -join ' ')
         $script:PnpmExitCode = 0
         return
     }
     Build-Mod $buildRoot
-    Assert-Equal (($script:mockBuildPnpmArgs -join '|') -eq 'build') $true "node_modules presente pula o install e roda so o build"
+    Assert-Equal ($script:mockBuildPnpmArgs -join '|') 'install --frozen-lockfile --config.confirm-modules-purge=false|build' "node_modules presente sincroniza com --frozen-lockfile e compila"
 
     # Detalhe sanitizado: mantem o fim, limita o tamanho e nao vaza credencial.
     $detalhe = Format-PnpmDetail @('preambulo', 'Authorization: Bearer secret-token', 'https://alice:secret@example.test/x', 'fim-importante')

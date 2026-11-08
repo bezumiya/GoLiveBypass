@@ -187,7 +187,7 @@ installer_log() {
         case "$chave" in
             *password*|*senha*|*token*|*captcha*|*secret*|*privatekey*|*private_key*|*publickey*|*authorization*|*cookie*|*session*|*credential*|*stdin*|*rawconfig*|config|endpoint)
                 valor="<redacted>" ;;
-            mode|channel|permanent|we_injected|target_count|candidate_count|discord_count|mod_kind|reason|reason_code|result|exit_code|duration_ms|path_present|path_kind|active|preserved|identity|count)
+            mode|channel|permanent|we_injected|target_count|candidate_count|discord_count|mod_kind|reason|reason_code|result|exit_code|duration_ms|path_present|path_kind|active|preserved|identity|count|pnpm_version|pnpm_esperado|node_version|node_modules|deps_sync)
                 valor="$(_glb_redact "$valor")" ;;
             *) continue ;;
         esac
@@ -195,7 +195,7 @@ installer_log() {
             target_count|candidate_count|discord_count|exit_code|duration_ms|count)
                 case "$valor" in ''|*[!0-9]*) par="\"$chave\":\"$(_glb_json_escape "$valor")\"" ;;
                     *) par="\"$chave\":$valor" ;; esac ;;
-            path_present|permanent|we_injected|active|preserved)
+            path_present|permanent|we_injected|active|preserved|node_modules)
                 case "$valor" in true|false) par="\"$chave\":$valor" ;;
                     *) par="\"$chave\":\"$(_glb_json_escape "$valor")\"" ;; esac ;;
             *) par="\"$chave\":\"$(_glb_json_escape "$valor")\"" ;;
@@ -1475,17 +1475,46 @@ install_plugin_source() {
     do_update_from_zip "$root" "$zip" "$version" "$sha"
 }
 
-build_mod() {
+# O Equicord liga `verifyDepsBeforeRun: prompt`: com o node_modules fora de sincronia com o
+# lockfile (checkout atualizado por git pull/updater do mod), o `pnpm build` pede confirmacao e,
+# sem terminal (curl | sh), falha. Instalar so quando o node_modules faltava deixava o checkout
+# preso. Sincroniza antes de todo build: --frozen-lockfile nao reescreve o pnpm-lock.yaml do
+# checkout, o install comum fica de reserva e confirm-modules-purge=false evita o outro prompt.
+sync_mod_deps() {
     local root="$1"
+    if [ -d "$root/node_modules" ]; then
+        step "Conferindo as dependencias do mod"
+    else
+        step "Instalando dependencias (na primeira vez demora alguns minutos)"
+    fi
+    (cd "$root" && pnpm install --frozen-lockfile --config.confirm-modules-purge=false) && return 0
+    (cd "$root" && pnpm install --config.confirm-modules-purge=false)
+}
+
+# Versoes e estado do checkout no log de um build que falhou (mesmos campos do instalador Windows):
+# pnpm em uso contra o que o projeto pede, node e se o node_modules existia. Sem caminho.
+log_build_context() {
+    local root="$1" deps="$2" exit_code="$3" esperado nm=false
+    esperado="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/package.json" 2>/dev/null | head -n 1)"
+    [ -d "$root/node_modules" ] && nm=true
+    installer_log error installer.build_context build \
+        pnpm_version "$(pnpm --version 2>/dev/null | head -n 1)" pnpm_esperado "$esperado" \
+        node_version "$(node --version 2>/dev/null | head -n 1)" node_modules "$nm" \
+        deps_sync "$deps" exit_code "$exit_code"
+}
+
+build_mod() {
+    local root="$1" rc=0
     GLB_PHASE="build"
     installer_log info installer.build build mod_kind "$(checkout_mod "$root")"
-    if [ ! -d "$root/node_modules" ]; then
-        step "Instalando dependencias (na primeira vez demora alguns minutos)"
-        (cd "$root" && pnpm install) || fail "pnpm install falhou"
-    fi
+    sync_mod_deps "$root" || { log_build_context "$root" falhou ""; fail "pnpm install falhou"; }
 
     step "Compilando"
-    (cd "$root" && pnpm build) || fail "pnpm build falhou"
+    (cd "$root" && pnpm build) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_build_context "$root" ok "$rc"
+        fail "pnpm build falhou (exit=$rc)"
+    fi
 }
 remove_plugin_source() {
     local root="$1" target="$1/src/userplugins/$PLUGIN_DIR_NAME"
@@ -1494,6 +1523,7 @@ remove_plugin_source() {
     rm -rf "$target"
     # O loader do mod permanece apontando para o checkout; recompilar remove
     # somente o userplugin e não desfaz Vencord/Equicord do app.asar.
+    sync_mod_deps "$root" || warn "pnpm install falhou; tentando recompilar mesmo assim."
     (cd "$root" && pnpm build) || warn "Nao consegui recompilar o mod sem o GoLiveBypass."
 }
 

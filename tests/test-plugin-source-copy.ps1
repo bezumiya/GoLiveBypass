@@ -11,8 +11,13 @@ Set-Content -LiteralPath $tempInstaller -Value $installerContent.Substring(0, $b
 
 # O helper binario nao faz parte desta regressao; a copia de fontes e o build sao reais.
 function Copy-PluginHelper($target) { }
+# Os pre-requisitos de git do build tem regressao propria (test-error-handling.ps1, 2.9);
+# o checkout temporario daqui nao e um repositorio.
+function Assert-CheckoutBuildPreReqs($root) { }
 $script:ExpectedRoot = $null
 function Invoke-Pnpm([string[]]$Arguments) {
+    # O build sempre e precedido pela sincronizacao das dependencias.
+    if ($Arguments -contains 'install') { $script:PnpmExitCode = 0; return }
     if ($Arguments -notcontains 'build') { throw "build fake inesperado: $($Arguments -join ' ')" }
     foreach ($file in $PluginFiles) {
         $candidate = Join-Path $script:ExpectedRoot "src\userplugins\$PluginDirName\$(Split-Path -Leaf $file)"
