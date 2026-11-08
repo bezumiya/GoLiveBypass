@@ -4,7 +4,8 @@ import { windowsInstallerFolderPresent } from "./wiresock-install-diag";
 
 // Retrato do ambiente para o log (uma linha `env snapshot` por abertura) e os metadados do relato.
 // Cada campo já precisou ser perguntado à mão: build do Windows e pasta do Windows Installer
-// (upgrade do WireSock que falhava com 1632 num Windows "enxugado"), distro/kernel/IPv6 no Linux.
+// (upgrade do WireSock que falhava com 1632 num Windows "enxugado"), distro/kernel/IPv6,
+// módulo WireGuard, empacotamento e sessão gráfica no Linux (#404).
 // Só rótulos técnicos: nada de usuário, máquina, caminho, rede ou endpoint.
 
 export function linuxDistroLabel(osRelease: string | null): string {
@@ -49,6 +50,13 @@ export function guiEnvironmentSnapshot(extras: GuiEnvironmentExtras = {}, platfo
     snapshot.kernel = os.release();
     snapshot.distro = linuxDistroLabel(osRelease);
     snapshot.ipv6_kernel = fs.existsSync("/proc/net/if_inet6") ? "sim" : "nao";
+    // Mesmos campos do plugin (goLiveBypass/vpn-linux.ts), sem rodar comando nem pedir senha:
+    // o estado do módulo vem do /sys; o empacotamento e a sessão, do ambiente e do execPath.
+    snapshot.wg_modulo = fs.existsSync("/sys/module/wireguard") ? "carregado" : "nao_carregado";
+    const env = process.env;
+    snapshot.empacotamento = env.AppImage ? "appimage" : env.SNAP || process.execPath.startsWith("/snap/") ? "snap" : process.execPath.startsWith("/nix/store/") ? "nix" : env.FLATPAK_ID || process.execPath.startsWith("/app/") ? "flatpak" : "nativo";
+    const session = (env.XDG_SESSION_TYPE ?? "").toLowerCase();
+    snapshot.sessao_grafica = /^[a-z0-9]{1,16}$/.test(session) ? session : "desconhecida";
   } else {
     snapshot.so = platform;
   }

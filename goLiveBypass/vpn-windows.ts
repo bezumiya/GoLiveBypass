@@ -551,7 +551,9 @@ const WIRESOCK_INSTALLER_EXIT_MEANINGS: Record<number, string> = {
 /** Normaliza o código (HRESULT 0x8007xxxx vira o código Win32) e devolve o texto conhecido. */
 export function describeWireSockInstallerExit(rawCode: unknown): { code: number | null; meaning: string } {
     let code = typeof rawCode === "number" ? rawCode : Number(rawCode);
-    if (!Number.isFinite(code)) return { code: null, meaning: "" };
+    // null/undefined (processo morto por sinal) viraria 0 em Number(): mesma defesa da GUI
+    // (wiresock-install-diag.ts), para o log não registrar saída 0 que não aconteceu.
+    if (rawCode === null || rawCode === undefined || !Number.isFinite(code)) return { code: null, meaning: "" };
     const unsigned = code < 0 ? code + 0x1_0000_0000 : code;
     if (unsigned >= 0x8007_0000 && unsigned <= 0x8007_FFFF) code = unsigned & 0xFFFF;
     return { code, meaning: WIRESOCK_INSTALLER_EXIT_MEANINGS[code] ?? "" };
@@ -1015,8 +1017,17 @@ async function ensureWireSockInstalledOnce(log: WireSockLogger): Promise<string>
         lastWireSockSelection = { version: WIRESOCK_VERSION, upgrade: "ok" };
         return installed;
     } catch (error) {
-        const exit = describeWireSockInstallerExit((error as { code?: unknown })?.code);
+        const exitCodeFromError = (error: unknown): number | null => {
+            if (!error || typeof error !== "object" || !("code" in error)) return null;
+            const code = Number(error.code);
+            return Number.isFinite(code) ? code : null;
+        };
+        const exit = describeWireSockInstallerExit(exitCodeFromError(error));
         const cancelled = exit.code === 1223;
+        // Reinicialização pedida pelo setup (3010/1641): a instalação nova pode estar pela metade,
+        // não dá para confiar na anterior até o Windows reiniciar (mesma defesa da GUI,
+        // wireSockInstallerExitKind).
+        if (exit.code === 3010 || exit.code === 1641) throw error;
         // O setup ja tocou o driver: a maquina nao pode ficar sem saida por causa disso.
         const restore = cancelled ? null : await restoreWireSockNetwork(log, { force: true });
         const installerFolder = windowsInstallerFolderPresent();

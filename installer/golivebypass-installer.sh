@@ -1504,16 +1504,23 @@ log_build_context() {
 }
 
 build_mod() {
-    local root="$1" rc=0
+    local root="$1" rc=0 saida
     GLB_PHASE="build"
     installer_log info installer.build build mod_kind "$(checkout_mod "$root")"
     sync_mod_deps "$root" || { log_build_context "$root" falhou ""; fail "pnpm install falhou"; }
 
     step "Compilando"
-    (cd "$root" && pnpm build) || rc=$?
+    saida="$(cd "$root" && pnpm build 2>&1)" || rc=$?
+    if [ -n "$saida" ]; then
+        printf '%s\n' "$saida"
+    fi
     if [ "$rc" -ne 0 ]; then
         log_build_context "$root" ok "$rc"
-        fail "pnpm build falhou (exit=$rc)"
+        if [ -z "$saida" ]; then
+            # Sair calado e um sintoma em si (ex.: prompt que o pnpm nao conseguiu mostrar).
+            fail "pnpm build falhou (exit=$rc): o pnpm saiu sem nenhuma mensagem; rode \"pnpm build\" na pasta do mod para ver o erro"
+        fi
+        fail "pnpm build falhou (exit=$rc): fim da saida do pnpm: $(printf '%s\n' "$saida" | grep -v '^[[:space:]]*$' | tail -n 8 | tr '\n' '|' | sed 's/|$//')"
     fi
 }
 remove_plugin_source() {
