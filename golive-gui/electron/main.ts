@@ -1420,8 +1420,8 @@ async function executarAtivacao(event: any) {
   }
 
   // Injeção legada que sobrou de versões antigas roteia o gateway por SOCKS por cima do
-  // túnel. Desliga só a cópia comprovadamente nossa, sem tocar em app.asar/_app.asar; vale
-  // a partir da reabertura do Discord que a própria ativação faz.
+  // túnel. Desliga só a cópia comprovadamente nossa (settings.json dela), sem restaurar nem
+  // remover o asar do Discord; vale a partir da reabertura que a própria ativação faz.
   if (IS_WINDOWS) {
     for (const install of installs) {
       const resultado = neutralizeLegacyInjection(install.resources, diskFs);
