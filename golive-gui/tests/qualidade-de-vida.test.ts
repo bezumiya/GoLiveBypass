@@ -76,8 +76,9 @@ describe("processos em segundo plano (amostrador de failover, a cada 3 s)", () =
     const fn = wiresock.slice(wiresock.indexOf("export async function isWireSockActiveAsync"), wiresock.indexOf("export async function getWireSockConnectionStatusAsync"));
     expect(fn.indexOf('"tasklist"')).toBeGreaterThan(-1);
     expect(fn.indexOf('"tasklist"')).toBeLessThan(fn.indexOf('"sc.exe"'));
-    // A mesma regex do original: servico em RUNNING.
-    expect(fn).toContain(String.raw`/STATE\s*:\s*\d+\s+RUNNING/i`);
+    // A mesma leitura do original: servico em RUNNING, agora pelo codigo do SCM
+    // (o rotulo `STATE` do `sc query` e traduzido e nao pode ser usado).
+    expect(fn).toContain("scQueryShowsRunning(output)");
   });
 
   it("a procura da CLI do WireSock e guardada em cache (evita `where` sincrono a cada tique)", () => {

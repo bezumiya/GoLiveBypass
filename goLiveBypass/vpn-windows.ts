@@ -195,9 +195,12 @@ function serviceRunningFromSc(name: string): boolean | null {
         const output = execFileSync("sc.exe", ["query", name], {
             encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 5000,
         });
-        if (/STATE\s*:\s*\d+\s+RUNNING/i.test(output)) return true;
-        if (/STATE\s*:\s*\d+\s+STOPPED/i.test(output)) return false;
-        if (/STATE\s*:\s*\d+\s+(?:START_PENDING|STOP_PENDING|PAUSED|PAUSE_PENDING|CONTINUE_PENDING)/i.test(output)) return null;
+        // O rotulo do `sc query` e traduzido (pt-BR: `ESTADO : 4 RUNNING`), mas o
+        // codigo numerico do SCM e o nome do estado nao sao — por isso a leitura
+        // casa `: 4 RUNNING` em vez de `STATE :`.
+        if (/:\s*4\s+RUNNING\b/i.test(output)) return true;
+        if (/:\s*1\s+STOPPED\b/i.test(output)) return false;
+        if (/:\s*\d+\s+(?:START_PENDING|STOP_PENDING|PAUSED|PAUSE_PENDING|CONTINUE_PENDING)/i.test(output)) return null;
         return null;
     } catch (error) {
         return Number((error as { status?: unknown })?.status) === 1060 ? false : null;

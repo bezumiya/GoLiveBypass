@@ -448,6 +448,7 @@ describe("instalação quebrada do WireSock nunca deixa a máquina sem internet"
     ["pasta do pacote sobrando", { installDir: true }],
     ["registro do Windows sobrando", { registered: true }],
     ["driver carregado sem cliente", { driverService: true }],
+    ["leitura do registro que falhou", { registrationUnknown: true }],
   ])("classifica %s como instalação pela metade", (_nome, residuo) => {
     expect(classifyWireSockInstallState({ compatiblePair: false, installDir: false, registered: false, driverService: false, ...residuo })).toBe("stale");
   });

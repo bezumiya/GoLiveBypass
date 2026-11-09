@@ -256,6 +256,8 @@ export interface WireSockInstallStateProbe {
   installDir: boolean;
   registered: boolean;
   driverService: boolean;
+  /** Leitura do registro falhou: ausencia nao e o mesmo que "nao registrado". */
+  registrationUnknown?: boolean;
 }
 
 /**
@@ -263,10 +265,15 @@ export interface WireSockInstallStateProbe {
  * sem um par cliente/booster utilizavel. Nesse estado o setup reexecutado cai
  * em manutencao ("Modify Setup"), que em /quiet nao instala nada e pode deixar
  * o driver pela metade — foi assim que maquinas ficaram sem internet.
+ *
+ * Leitura de registro que falhou entra como "stale": desinstalar antes custa
+ * pouco (1605/1614 sao tolerados quando nao havia nada) e o erro oposto —
+ * tratar incerteza como ausencia — termina no setup em manutencao, que devolve
+ * 0 sem instalar o par.
  */
 export function classifyWireSockInstallState(probe: WireSockInstallStateProbe): WireSockInstallState {
   if (probe.compatiblePair) return "compatible";
-  if (probe.installDir || probe.registered || probe.driverService) return "stale";
+  if (probe.installDir || probe.registered || probe.driverService || probe.registrationUnknown === true) return "stale";
   return "none";
 }
 
@@ -518,19 +525,26 @@ export async function restoreWireSockNetwork(
 }
 
 /** Registro do Windows que sobrou sem um par cliente/booster utilizavel. */
-async function hasWireSockUninstallRegistration(): Promise<{ registered: boolean; entries: string[] }> {
-  if (process.platform !== "win32") return { registered: false, entries: [] };
+async function hasWireSockUninstallRegistration(): Promise<{ registered: boolean; entries: string[]; known: boolean }> {
+  if (process.platform !== "win32") return { registered: false, entries: [], known: true };
   const script = "$roots=@('HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'); $found=@(); foreach($root in $roots){ try { Get-ItemProperty -Path $root -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and $_.DisplayName -match '(?i)wire\\s?sock|wglaunch' } | ForEach-Object { $found += [PSCustomObject]@{ name=[string]$_.DisplayName } } } catch {} }; ConvertTo-Json -Compress $found";
   try {
     const output = await new Promise<string>((resolve, reject) => execFile(
       "powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script],
-      { encoding: "utf8", windowsHide: true, timeout: 8000 },
+      { encoding: "utf8", windowsHide: true, timeout: 20000 },
       (error, stdout) => error ? reject(error) : resolve(stdout),
     ));
     const entries = parseWireSockUninstallEntries(output);
-    return { registered: entries.length > 0, entries };
-  } catch {
-    return { registered: false, entries: [] };
+    return { registered: entries.length > 0, entries, known: true };
+  } catch (error) {
+    // Leitura que falhou NAO e o mesmo que "nao esta registrado". Assumir a
+    // ausencia pulava o `/uninstall` e deixava o setup em manutencao — que em
+    // /quiet nao instala nada e ainda assim termina com 0 —, ou seja, a maquina
+    // ficava sem par compatível e sem nenhum sinal do porque. Quem chama trata
+    // leitura falha como sinal de instalacao previa (desinstalar antes e barato
+    // e tolera 1605/1614 quando nao havia nada).
+    logger.warn("wiresock", "leitura do registro do WireSock nao confirmada", { detalhe: detalheErro(error) });
+    return { registered: false, entries: [], known: false };
   }
 }
 
@@ -544,8 +558,9 @@ async function detectWireSockInstallState(compatiblePair: boolean): Promise<Wire
     installDir,
     registered: registration.registered,
     driverService: isWireSockPacketFilterDriverInstalled(),
+    registrationUnknown: !registration.known,
   });
-  logger.info("wiresock", "estado de instalacao do WireSock", { state, installDir, registered: registration.registered, entradas: registration.entries.join(" | ") });
+  logger.info("wiresock", "estado de instalacao do WireSock", { state, installDir, registered: registration.registered, registro_conhecido: registration.known, entradas: registration.entries.join(" | ") });
   return state;
 }
 
@@ -634,8 +649,22 @@ async function installOfficialWireSock(onProgress?: (message: string) => void): 
   }
 }
 
+/**
+ * O `sc query` sai traduzido na maquina do usuario (medido no Windows 11 pt-BR
+ * com o 3.4.8.1: `NOME_DO_SERVICO: ndiswgc` e `ESTADO : 4 RUNNING`). Ler os
+ * rotulos `SERVICE_NAME`/`STATE` dava "nada instalado" em toda maquina que nao
+ * seja inglesa — inclusive o publico pt-BR do app, que ficava sem ver o driver
+ * carregado e sem "Restaurar internet" para um driver orfao. O que o Windows
+ * NAO traduz e o codigo numerico do SCM e o nome do estado (`4 RUNNING`), e e
+ * neles que a leitura se apoia. `1060` (servico inexistente) tambem e codigo.
+ */
+export function scQueryShowsRunning(output: string): boolean {
+  return /:\s*4\s+RUNNING\b/i.test(output);
+}
+
 export function wireSockDriverQueryShowsInstalled(output: string): boolean {
-  return /SERVICE_NAME:\s*(?:ndiswgc|ndiswg|NDISRD)\b/i.test(output) && !/\b1060\b/.test(output);
+  if (/\b1060\b/.test(output)) return false;
+  return WIRESOCK_DRIVER_SERVICE_NAMES.some((name) => new RegExp(`\\b${name}\\b`, "i").test(output));
 }
 
 export function isWireSockPacketFilterDriverInstalled(): boolean {
@@ -661,7 +690,7 @@ export function isWireSockRunning(): boolean {
         encoding: "utf8",
         windowsHide: true,
       });
-      return /STATE\s*:\s*\d+\s+RUNNING/i.test(out);
+      return scQueryShowsRunning(out);
     } catch {
       return false;
     }
@@ -906,7 +935,7 @@ export async function isWireSockActiveAsync(options: { processAlive?: boolean } 
   for (const name of WIRESOCK_SERVICE_NAMES) {
     try {
       const output = await execFileText("sc.exe", ["query", name]);
-      if (/STATE\s*:\s*\d+\s+RUNNING/i.test(output)) return true;
+      if (scQueryShowsRunning(output)) return true;
     } catch {}
   }
   return false;
@@ -1807,7 +1836,7 @@ export async function recoverWireSockNetwork(options: { forceNetworkRestore?: bo
 function isServiceRunning(name: string): boolean {
   try {
     const out = execFileSync("sc.exe", ["query", name], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
-    return /STATE\s*:\s*\d+\s+RUNNING/i.test(out);
+    return scQueryShowsRunning(out);
   } catch {
     return false;
   }

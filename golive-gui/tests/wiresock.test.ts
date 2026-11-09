@@ -3,7 +3,7 @@ import { elevatedPowerShellFileArgs, wireSockCleanupScript, wireSockDirectScript
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { classifyWireSockActivationFailure, classifyWireSockDirectResult, findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, mayUseServiceCompatibility, parseWireSockCliExternalAddress, parseWireSockCliStatus, readWireSockResult, unwrapPowerShellErrorStream, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockExecError, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
+import { classifyWireSockActivationFailure, classifyWireSockDirectResult, findWireSockInKnownRoots, formatAllowedApps, hasWireSockAdapterTrafficIncrease, mayUseServiceCompatibility, parseWireSockCliExternalAddress, parseWireSockCliStatus, readWireSockResult, scQueryShowsRunning, unwrapPowerShellErrorStream, verifyWindowsNetworkStable, wireSockDriverQueryShowsInstalled, wireSockExecError, wireSockInstallerExitKind, wireSockSearchRoots } from "../electron/wiresock";
 
 describe("WireSock no Windows", () => {
   it("preserva caminhos Unicode nos arquivos usados pelo Windows PowerShell 5.1", () => {
@@ -166,6 +166,21 @@ describe("WireSock no Windows", () => {
     expect(wireSockDriverQueryShowsInstalled("SERVICE_NAME: ndiswg\nDISPLAY_NAME: WireSock VPN Client Filter Driver\nSTATE: 4 RUNNING")).toBe(true);
     expect(wireSockDriverQueryShowsInstalled("OpenService FAILED 1060: service does not exist")).toBe(false);
     expect(wireSockDriverQueryShowsInstalled("SERVICE_NAME: wiresock-client-service")).toBe(false);
+  });
+
+  // Windows pt-BR traduz os rotulos do `sc query` (Windows 11, SDK 3.4.8.1):
+  // ler `SERVICE_NAME`/`STATE` dava "nada instalado" com o driver carregado.
+  it("reconhece o driver com o sc query traduzido", () => {
+    const ptBr = "NOME_DO_SERVIÇO: ndiswgc \r\n    TIPO                       : 1  KERNEL_DRIVER  \r\n    ESTADO                     : 4  RUNNING ";
+    expect(wireSockDriverQueryShowsInstalled(ptBr)).toBe(true);
+    expect(wireSockDriverQueryShowsInstalled("[SC] EnumQueryServicesStatus:OpenService FALHA 1060:\r\n\r\nO serviço especificado não existe como serviço instalado.")).toBe(false);
+  });
+
+  it("lê o estado do serviço pelo código do SCM, não pelo rótulo", () => {
+    expect(scQueryShowsRunning("ESTADO                     : 4  RUNNING ")).toBe(true);
+    expect(scQueryShowsRunning("STATE : 4 RUNNING")).toBe(true);
+    expect(scQueryShowsRunning("ESTADO                     : 1  STOPPED ")).toBe(false);
+    expect(scQueryShowsRunning("[SC] EnumQueryServicesStatus:OpenService FALHA 1060:")).toBe(false);
   });
 
   it("gera AllowedApps por caminho absoluto sem duplicatas ambiguas", () => {
