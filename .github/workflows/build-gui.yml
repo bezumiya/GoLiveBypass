@@ -118,7 +118,10 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_TAG#v}"
+          # Versão da GUI sem o sufixo de prerelease: o manifesto do helper e os
+          # nomes dos assets seguem 2.0.17 em v2.0.17-beta-1 (o updater e o
+          # selecionador antigo de helpers casam por prefixo/versão base).
+          VERSION="$(printf '%s\n' "${RELEASE_TAG#v}" | sed 's/-beta-[0-9A-Za-z.]*$//')"
           MANIFEST="tools/proton-confgen/build/proton-confgen-manifest.json"
           node golive-gui/scripts/build-proton.mjs
           test "$(jq -r '.version' "$MANIFEST")" = "$VERSION"
@@ -137,7 +140,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_TAG#v}"
+          # Mesma extração da versão base do step anterior.
+          VERSION="$(printf '%s\n' "${RELEASE_TAG#v}" | sed 's/-beta-[0-9A-Za-z.]*$//')"
           MANIFEST="tools/proton-confgen/build/proton-confgen-manifest.json"
           test "$(jq -r '.version' "$MANIFEST")" = "$VERSION"
           for pair in \
