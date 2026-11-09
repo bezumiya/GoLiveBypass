@@ -29,6 +29,10 @@ export const TITLE_MAX = 200;
 export const DESCRIPTION_MAX = 8 * 1024;
 export const SESSION_MAX = 16 * 1024;
 export const LOG_MAX_BYTES = 240 * 1024;
+// Orcamento do que chega na issue (GitHub: body <= 64KB, com meta e descricao junto).
+export const LOG_ISSUE_MAX = 52 * 1024;
+const LOG_ANTERIOR_MAX = 8 * 1024;
+const byteLength = (texto: string) => Buffer.byteLength(texto, "utf8");
 export const DEDUP_WINDOW_SECONDS = 48 * 60 * 60;
 export const SIGNATURE_LENGTH = 16;
 
@@ -253,10 +257,17 @@ export function montarLog({ ring, caudaArquivo, sessao, segredos, token }: BugRe
     if (sessaoLimpa.trim()) partes.push(`=== sessao do plugin (renderer) ===\n${sessaoLimpa}`);
 
     const ringLimpo = ring.trimEnd();
-    if (ringLimpo.trim()) partes.push(`=== plugin (memoria) ===\n${ringLimpo}`);
-
     const complemento = complementoDaCauda(ringLimpo, caudaArquivo);
-    if (complemento) partes.push(`=== plugin-vpn.log (antes do ring) ===\n${complemento}`);
+    // A issue so comporta ~60KB de log e a API corta o meio para caber: com o arquivo
+    // antigo no fim, o corte levava as linhas recentes do ring (a falha). O complemento
+    // entra so pela cauda e o ring fica com o resto do orcamento (mesma regra da GUI).
+    const complementoCurto = complemento ? cortarCauda(complemento, LOG_ANTERIOR_MAX) : "";
+    if (ringLimpo.trim()) {
+        const usado = byteLength(partes.join("\n")) + byteLength(complementoCurto);
+        const cota = Math.max(8 * 1024, LOG_ISSUE_MAX - usado - 64);
+        partes.push(`=== plugin (memoria) ===\n${cortarCauda(ringLimpo, cota)}`);
+    }
+    if (complementoCurto) partes.push(`=== plugin-vpn.log (antes do ring) ===\n${complementoCurto}`);
 
     return cortarCauda(redigir(partes.join("\n"), segredos, token), LOG_MAX_BYTES);
 }

@@ -33,6 +33,15 @@ const LOG_TAIL_BYTES = 96 * 1024; // cauda do gui.log / golivebypass.log
 // Teto total do bloco de log montado — abaixo dos 256KB que o servidor aceita
 // (a API corta em 256KB, mas o JSON com escaping cresce; 240KB deixa folga).
 const LOG_TOTAL_MAX = 240 * 1024;
+// O que de fato chega na issue: o GitHub recusa body > 64KB e a API corta o log no
+// meio (cabeca + cauda) para caber. Com a sessao da GUI no comeco e os logs legados
+// no fim, o corte levava justamente as linhas mais recentes da GUI (a falha) e deixava
+// o runtime legado ocupando metade do relato (#379/#399). O log ja sai do app dentro
+// desse orcamento, com prioridade para o fim da sessao atual.
+const LOG_ISSUE_MAX = 52 * 1024;
+const LOG_GUI_ANTERIOR_MAX = 8 * 1024; // gui.log de antes do ring buffer
+const LOG_LEGADO_ARQUIVO_MAX = 4 * 1024; // cauda de cada log do runtime legado
+const LOG_LEGADO_TOTAL_MAX = 8 * 1024;
 const DESC_MAX = 8 * 1024;
 const TITLE_MAX = 200;
 
@@ -112,15 +121,12 @@ export function montarLog(
   segredos: SegredosConhecidos,
   tokenApi: string,
 ): string {
-  const partes: string[] = [];
-
   const recente = logger.getRecent();
-  partes.push("=== sessao GUI (ring buffer) ===");
-  partes.push(recente);
 
   // O gui.log complementa o ring buffer: o ring guarda as 1000 linhas mais
   // recentes; a cauda do arquivo so interessa pelo que VEIO ANTES disso.
   // Sem a dedup, o report repetia a sessao inteira duas vezes.
+  const anteriores: string[] = [];
   const guiLog = lerArquivoSeguro(path.join(logsDir.logsDir(dadosRaiz, process.platform), "gui.log"));
   if (guiLog) {
     // Uma linha repetida vem com "(xN...)", que nao existe no arquivo; sem tirar o
@@ -129,41 +135,42 @@ export function montarLog(
     const inicioDoRing = primeiraDoRing ? guiLog.indexOf(logger.semRepeticao(primeiraDoRing)) : -1;
     const complemento = inicioDoRing >= 0 ? guiLog.slice(0, inicioDoRing) : guiLog;
     if (complemento.trim()) {
-      partes.push("=== gui.log (antes do ring buffer) ===");
-      partes.push(complemento.trimEnd());
+      anteriores.push("=== gui.log (antes do ring buffer) ===");
+      anteriores.push(cortarDoFim(complemento.trimEnd(), LOG_GUI_ANTERIOR_MAX));
     }
   }
 
-  // Log do bypass — 1o o que o standalone realmente escreve no INSTALL_DIR
+  // Log do bypass legado — 1o o que o standalone realmente escreve no INSTALL_DIR
   // (<settingsDir>/golivebypass.log), depois o espelho estavel logs/bypass.log
-  // e o app.asar injetado (fallbacks).
+  // e o app.asar injetado (fallbacks). So a cauda de cada um, e com teto total:
+  // na arquitetura WireGuard isso e historico, nao a sessao que falhou.
+  const legado: string[] = [];
+  let legadoBytes = 0;
+  const addLegado = (titulo: string, arquivo: string) => {
+    if (legadoBytes >= LOG_LEGADO_TOTAL_MAX) return;
+    const cota = Math.min(LOG_LEGADO_ARQUIVO_MAX, LOG_LEGADO_TOTAL_MAX - legadoBytes);
+    const conteudo = lerArquivoSeguro(arquivo, cota);
+    if (!conteudo) return;
+    legado.push(titulo, conteudo.trimEnd());
+    legadoBytes += Buffer.byteLength(conteudo, "utf8");
+  };
   const plataforma = process.platform;
-  const bypassDireto = lerArquivoSeguro(path.join(settingsDir(dadosRaiz), "golivebypass.log"));
-  if (bypassDireto) {
-    partes.push("=== golivebypass.log (INSTALL_DIR) ===");
-    partes.push(bypassDireto);
+  addLegado("=== golivebypass.log (INSTALL_DIR) ===", path.join(settingsDir(dadosRaiz), "golivebypass.log"));
+  for (const p of logsDir.logsBypassDisponiveis(dadosRaiz, plataforma)) {
+    addLegado(`=== bypass.log (${path.basename(p)}) ===`, p);
   }
-
-  const bypassEstavel = logsDir.logsBypassDisponiveis(dadosRaiz, plataforma);
-  for (const p of bypassEstavel) {
-    const conteudo = lerArquivoSeguro(p);
-    if (conteudo) {
-      partes.push(`=== bypass.log (${path.basename(p)}) ===`);
-      partes.push(conteudo);
-    }
-  }
-
   for (const resources of installsDaSessao(settingsDir(dadosRaiz))) {
     const alvo = fs.existsSync(path.join(resources, "app.asar"))
       ? path.join(resources, "app.asar", "golivebypass.log")
       : path.join(resources, "golivebypass.log");
-    const conteudo = lerArquivoSeguro(alvo);
-    if (conteudo) {
-      partes.push(`=== golivebypass.log (${path.basename(path.dirname(resources))}) ===`);
-      partes.push(conteudo);
-    }
+    addLegado(`=== golivebypass.log (${path.basename(path.dirname(resources))}) ===`, alvo);
   }
 
+  // O ring fica com o que sobra do orcamento, guardando as linhas mais recentes.
+  const titulo = "=== sessao GUI (ring buffer) ===";
+  const resto = [...anteriores, ...legado].join("\n");
+  const cotaRing = Math.max(8 * 1024, LOG_ISSUE_MAX - Buffer.byteLength(resto, "utf8") - titulo.length - 2);
+  const partes = [titulo, cortarDoFim(recente, cotaRing), ...anteriores, ...legado];
   return redigir(partes.join("\n"), segredos, tokenApi);
 }
 
