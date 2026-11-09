@@ -52,6 +52,7 @@ import { readManualTarget } from "./linux-manual-target";
 import { sessionMarkerPaths } from "./linux-session-marker";
 import { classifyLinuxHealth } from "./linux-health";
 import { stripAnsiCodes, tailErroScript } from "./script-stderr";
+import { neutralizeLegacyInjection } from "./legacy-injection";
 import { PROTON_CAPTCHA_IPC_CHANNEL, isAllowedProtonCaptchaNavigation, parseProtonCaptchaChallenge, validateProtonCaptchaResponse } from "./proton-captcha";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1416,6 +1417,18 @@ async function executarAtivacao(event: any) {
   if (installs.length === 0) {
     discordscan.ativacaoSemDiscord("nenhum install encontrado na varredura");
     throw new Error("Nenhum Discord encontrado.");
+  }
+
+  // Injeção legada que sobrou de versões antigas roteia o gateway por SOCKS por cima do
+  // túnel. Desliga só a cópia comprovadamente nossa, sem tocar em app.asar/_app.asar; vale
+  // a partir da reabertura do Discord que a própria ativação faz.
+  if (IS_WINDOWS) {
+    for (const install of installs) {
+      const resultado = neutralizeLegacyInjection(install.resources, diskFs);
+      if (resultado !== "nao_nossa") {
+        logger.warn("ativacao", "injecao.legada", { flavour: install.flavour, resultado });
+      }
+    }
   }
 
   // Com WireSock, o estado ativo e somente tunel + Discord rodando. Reativar com a mesma
