@@ -51,6 +51,7 @@ import { clearSelectedTarget, listRunningApps, selectManualTarget, type ManualTa
 import { readManualTarget } from "./linux-manual-target";
 import { sessionMarkerPaths } from "./linux-session-marker";
 import { classifyLinuxHealth } from "./linux-health";
+import { stripAnsiCodes, tailErroScript } from "./script-stderr";
 import { PROTON_CAPTCHA_IPC_CHANNEL, isAllowedProtonCaptchaNavigation, parseProtonCaptchaChallenge, validateProtonCaptchaResponse } from "./proton-captcha";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2670,32 +2671,6 @@ function manualTargetView(preflight: LinuxPreflight): { name: string; kind: stri
   };
 }
 
-// As ultimas linhas do stderr do script viram a mensagem de erro na UI. O ruido imutavel de
-// distro imutavel (Bluefin/Bazzite preenchem LD_PRELOAD da sessao: "ERROR: ld.so: object ...
-// cannot be preloaded" em cada filho) ocupava o fim do stderr e escondia o erro de verdade
-// (issue #108) -- filtrado aqui antes de qualquer tail.
-// O standalone colore o stderr com ANSI. Em algumas sessões Wayland/Flatpak o
-// byte ESC chega ao Electron como U+FFFD, deixando sequências literais como
-// "�[36m" na mensagem. Removemos os dois formatos antes de mostrar o erro.
-function stripAnsiCodes(value: string): string {
-  return value
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/(?:\x1b|\u009b|\uFFFD)\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-function tailErroScript(stderr: string, linhas: number): string {
-  const uteis = stripAnsiCodes(stderr)
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .filter((l) => !/^ERROR: ld\.so:/.test(l))
-    // Passos informativos do teardown ocupavam as ultimas linhas e viravam a
-    // mensagem de erro da UI, escondendo o "[X] ..." que explica a falha.
-    .filter((l) => !/^\[\*\]\s*Removendo namespace de rede/i.test(l))
-    .filter((l) => !/^\[OK\]\s*Tunel WireGuard encerrado/i.test(l));
-  return uteis.slice(-linhas).join("\n");
-}
-
 // Explicit activation remains available after a skipped/failed benchmark. Call only
 // inside the lifecycle queue, so this fallback cannot overwrite an ongoing selection.
 async function ensureProtonActivationProfile() {
@@ -3146,6 +3121,9 @@ async function linuxActivateInner(
   updateSharedSettings({ routeMode: "wireguard" });
   const { code, stderr } = await elevated.run(["--yes", "--cleanup-legacy"], forwardLinuxChunk);
   if (code !== 0) {
+    // A mensagem da UI cabe em poucas linhas; o relatório precisa do trecho inteiro
+    // (falha, rollback e caminho do log do Discord) para separar causa de consequência.
+    logger.warn("linux", "ativacao.falhou", { stderr: tailErroScript(stderr, 30) });
     throw new Error(
       tailErroScript(stderr, 3) ||
         "Falha ao ativar",
