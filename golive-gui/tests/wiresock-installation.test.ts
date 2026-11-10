@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, readWireSockResult, sanitizeWireGuardConfig, wireSockExecError, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
+import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, parseWireSockUninstallLocations, readWireSockResult, sanitizeWireGuardConfig, wireSockExecError, wireSockForeignInstallLocations, wireSockForeignInstallMessage, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
 import { collectWireSockInstallerLogErrors, describeWireSockInstallerExit, installerFolderDiagnosis, wireSockInstallerFailureDetail } from "../electron/wiresock-install-diag";
 import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockNetworkRestoreScript, wireSockServiceScript } from "../electron/wiresock-service";
 
@@ -38,7 +38,7 @@ function makeInstallOfficial() {
       runWireSockInstaller, findCompatibleWireSockAsync, restoreWireSockNetwork,
       verifyWindowsNetworkStable, waitForCompatibleWireSock, windowsInstallerFolderPresent,
       describeWireSockInstallerExit, collectWireSockInstallerLogErrors, wireSockInstallerFailureDetail, logger,
-      installerFolderDiagnosis } = ctx;
+      installerFolderDiagnosis, foreignWireSockInstallLocation, wireSockForeignInstallMessage } = ctx;
     const esperar = async () => {};
     const WIRESOCK_INSTALLER_TIMEOUT_MS = 1;
     const WIRESOCK_UNINSTALL_TIMEOUT_MS = 1;
@@ -59,6 +59,7 @@ interface InstallCtxOptions {
   cancelOn?: "uninstall" | "install";
   installerFolder?: boolean | null;
   failInstallWith?: number;
+  foreignLocation?: string | null;
 }
 
 function installCtx(options: InstallCtxOptions = {}) {
@@ -97,6 +98,8 @@ function installCtx(options: InstallCtxOptions = {}) {
     wireSockInstallerFailureDetail,
     installerFolderDiagnosis,
     logger: { logEvent: () => {}, warn: () => {}, info: () => {} },
+    foreignWireSockInstallLocation: async () => options.foreignLocation ?? null,
+    wireSockForeignInstallMessage,
     restoreWireSockNetwork: async (reason: string, opts: { force?: boolean } = {}) => {
       restores.push({ reason, force: opts.force });
       return restoreOk;
@@ -481,6 +484,16 @@ describe("instalação quebrada do WireSock nunca deixa a máquina sem internet"
     expect(progress.some((message) => /Reparando a instalação/i.test(message))).toBe(true);
   });
 
+  it("SDK registrado em outra unidade diz onde está e como sair, sem executar de lá (#402)", async () => {
+    const run = makeInstallOfficial();
+    const pasta = path.win32.join("D:", "Program Files", "WireSock Secure Connect");
+    const { ctx, modes, restores } = installCtx({ state: "stale", pairAfterInstall: null, foreignLocation: pasta });
+    await expect(run(ctx, () => {})).rejects.toThrow(/O WireSock está instalado em "D:.*Program Files.*WireSock Secure Connect", fora da pasta de programas/);
+    expect(modes).toEqual(["uninstall", "install", "repair"]);
+    // A falha continua passando pela recuperação de rede, como qualquer instalação que não fechou.
+    expect(restores).toEqual([{ reason: "instalacao-falhou", force: true }]);
+  });
+
   it("falha total força a recuperação de rede e avisa que a rede voltou", async () => {
     const run = makeInstallOfficial();
     const { ctx, restores } = installCtx({ pairAfterInstall: null });
@@ -526,6 +539,26 @@ describe("instalação quebrada do WireSock nunca deixa a máquina sem internet"
     expect(parseWireSockUninstallEntries("[]")).toEqual([]);
     expect(parseWireSockUninstallEntries("")).toEqual([]);
     expect(parseWireSockUninstallEntries('[{"name":""}]')).toEqual([]);
+  });
+
+  it("instalação registrada fora das raízes aceitas vira mensagem acionável (#402)", () => {
+    const pfD = String.raw`D:\Program Files\WireSock Secure Connect`;
+    const pfC = String.raw`C:\Program Files\WireSock Secure Connect`;
+    const raw = JSON.stringify([
+      { name: "WireSock Secure Connect", location: `${pfD}/`, icon: "" },
+      { name: "WGLaunch", location: "", icon: `"${path.win32.join(pfC, "sdk", "wiresock-client.exe")}",0` },
+      { name: "WireSock antigo", location: "", icon: "" },
+    ]);
+    const locations = parseWireSockUninstallLocations(raw);
+    expect(locations).toEqual([pfD, path.win32.join(pfC, "sdk")]);
+    expect(parseWireSockUninstallLocations("")).toEqual([]);
+    const roots = [pfC, String.raw`C:\Users\u\AppData\Local\Microsoft\WinGet\Packages`];
+    expect(wireSockForeignInstallLocations(locations, roots)).toEqual([pfD]);
+    // Prefixo de nome nao e subpasta: "WireSock Secure Connect2" fica de fora.
+    expect(wireSockForeignInstallLocations([`${pfC.toLowerCase()}2`], roots)).toHaveLength(1);
+    const message = wireSockForeignInstallMessage(pfD);
+    expect(message).toContain(pfD);
+    expect(message).toContain('Desinstale o "WireSock Secure Connect"');
   });
 
   it("script de recuperação usa o reset oficial do driver e recusa com túnel vivo", () => {

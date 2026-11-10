@@ -815,6 +815,9 @@ ACTIVATION_NETNS_TOUCH_STARTED=0
 START_DISCORD_HOST_ONLY=0
 # Log do launcher da ultima abertura; a mensagem de falha da ativacao o cita.
 START_DISCORD_LOG=""
+# Unidade systemd da ultima abertura nativa: a saida do Discord vai para o journal
+# dela, nao para o log acima; a falha da ativacao copia esse trecho para o log.
+START_DISCORD_UNIT=""
 WIREGUARD_TMP_CONF=""
 # Executor escolhido uma vez por ativacao. O nome nunca vai para logs; uid/gid
 # numericos permitem usar setpriv sem interpolar identidade em um comando shell.
@@ -930,7 +933,10 @@ rollback_activation() {
     if [ -n "${ACTIVATION_ROLLBACK_TARGET:-}" ]; then
         warn "Rollback: bypass nao ativado; reabrindo o Discord sem o namespace WireGuard."
         START_DISCORD_HOST_ONLY=1
-        if start_discord "$ACTIVATION_ROLLBACK_TARGET" && wait_discord_started "$ACTIVATION_ROLLBACK_TARGET"; then
+        # wait_discord_started exige o PID dentro do namespace, que acabou de ser
+        # removido: a reabertura no host nunca seria confirmada e o aviso dizia
+        # "nao consegui reabrir" com o Discord aberto na tela (#421/#422).
+        if start_discord "$ACTIVATION_ROLLBACK_TARGET" && wait_discord_host_started "$ACTIVATION_ROLLBACK_TARGET"; then
             warn "Rollback: Discord reaberto sem bypass; a ativacao falhou e precisa ser repetida."
         else
             warn "Rollback: nao consegui reabrir o Discord automaticamente."
@@ -4229,7 +4235,8 @@ start_discord() {
         # background: o trap de fim do script apaga a senha temporaria, e o
         # processo destacado tentava le-la tarde demais, deixando o Discord
         # fechado apesar de o tunel estar ativo.
-        run_user_systemd_command "discord-vpn-$(date +%s)" \
+        START_DISCORD_UNIT="discord-vpn-$(date +%s)"
+        run_user_systemd_command "$START_DISCORD_UNIT" \
             "PATH=$PATH" "HOME=$_USER_HOME" "USER=$run_user" "LOGNAME=$run_user" "DISPLAY=${DISPLAY:-}" \
             "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}" "XAUTHORITY=${XAUTHORITY:-$_USER_HOME/.Xauthority}" \
             "XDG_RUNTIME_DIR=$runtime_dir" "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$run_uid/bus}" \
@@ -4285,6 +4292,37 @@ wait_discord_started() {
             | sed "s/^/[$(date -Is)] launch=flatpak-ps /" >>"$START_DISCORD_LOG" 2>/dev/null || true
     fi
     return 1
+}
+
+# Confirmacao da reabertura do rollback: o namespace ja foi removido, entao basta o
+# processo do alvo existir. Usar wait_discord_started aqui acusava falha sempre.
+wait_discord_host_started() {
+    local linha="${1:-}" flav="" flatpak_id="" resources="" tentativas=40
+    resources="$(printf '%s' "$linha" | cut -d'|' -f1)"
+    flav="$(printf '%s' "$linha" | cut -d'|' -f2)"
+    flatpak_id="$(printf '%s' "$linha" | cut -d'|' -f4)"
+    while [ "$tentativas" -gt 0 ]; do
+        if [ -n "$(discord_pid_flav "$flav" "$flatpak_id" "$resources" 2>/dev/null || true)" ]; then
+            return 0
+        fi
+        tentativas=$((tentativas - 1))
+        [ "$tentativas" -gt 0 ] && sleep 0.5
+    done
+    return 1
+}
+
+# O Discord nativo abre numa unidade do systemd-run: o stdout/stderr dele vai para o
+# journal da unidade, nao para o log do launcher. Sem copiar esse trecho, a falha so
+# dizia "Running as unit" e o crash real (ex.: "GPU process isn't usable", #421) ficava
+# invisivel no relatorio. So leitura, com a autorizacao ja concedida na ativacao; o
+# marcador entre colchetes deixa a ultima linha do Discord virar a saida citada na falha.
+append_discord_unit_journal() {
+    [ -n "${START_DISCORD_UNIT:-}" ] && [ -n "${START_DISCORD_LOG:-}" ] || return 0
+    have journalctl || return 0
+    local trecho
+    trecho="$(elevate journalctl -b --no-pager -o cat "_SYSTEMD_UNIT=${START_DISCORD_UNIT}.service" 2>/dev/null | tail -n 80 || true)"
+    [ -n "$trecho" ] || return 0
+    printf '%s\n' "$trecho" | sed "s/^/[journal ${START_DISCORD_UNIT}] /" >>"$START_DISCORD_LOG" 2>/dev/null || true
 }
 
 # Mensagem acionavel da ativacao quando o cliente nao apareceu no namespace. A GUI
@@ -4756,6 +4794,7 @@ if ! wait_discord_started "$(printf '%s\n' "${ACTIVATION_ROLLBACK_TARGET:-$FOUND
     # interface WireGuard sem o nome discord-vpn.
     stop_discord || true
     teardown_wireguard_netns
+    append_discord_unit_journal
     fail "$(falha_lancamento_mensagem "$(printf '%s\n' "${ACTIVATION_ROLLBACK_TARGET:-$FOUND}" | head -1)")"
 fi
 # A sessao ja esta confirmada dentro do namespace; a partir daqui o trap deve

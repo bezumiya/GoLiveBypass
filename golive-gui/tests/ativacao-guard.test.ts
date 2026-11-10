@@ -222,11 +222,15 @@ describe("guarda de ativacao duplicada", () => {
     expect(src).toContain("getWireSockConnectionStatus");
   });
 
-  it("no Windows ativa WireSock sem ler, esperar ou alterar app.asar", () => {
+  it("no Windows ativa WireSock sem ler, esperar, restaurar ou remover app.asar", () => {
     const src = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
     const activation = src.slice(src.indexOf("async function executarAtivacao"), src.indexOf("async function deactivateAll"));
     expect(activation).toContain("await startWireSockService(settingsDir(), undefined, windowsAllowedAppPaths(installs))");
     expect(src).not.toContain("apps.add(path.basename(probeExe));");
+    // Única exceção (#379/#399): desligar a cópia legada comprovadamente nossa gravando
+    // enabled:false no settings.json dela (tests/legacy-injection.test.ts). O resto da
+    // ativação continua sem tocar no asar.
+    expect(activation).toContain("neutralizeLegacyInjection(install.resources, diskFs)");
     expect(activation).not.toContain("app.asar");
     expect(activation).not.toContain("assertResourcesWritable");
     expect(activation).not.toContain("isOurInjection");

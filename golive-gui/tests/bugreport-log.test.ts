@@ -51,4 +51,26 @@ describe("montarLog", () => {
     expect(log.split("[info][app] depois").length - 1).toBe(1);
     expect(log.split("[error][net] socks.falha").length - 1).toBe(1);
   });
+
+  it("log legado grande nao empurra a falha recente da GUI para fora da issue (#379/#399)", () => {
+    const dir = logsDir(raiz, process.platform);
+    fs.mkdirSync(dir, { recursive: true });
+    logger.initLogger(dir);
+    // golivebypass.log do runtime legado no INSTALL_DIR, bem maior que a issue inteira.
+    const installDir = path.join(raiz, "GoLiveBypass");
+    fs.mkdirSync(installDir, { recursive: true });
+    const legado = Array.from({ length: 3000 }, (_, i) => `20:26:${String(i % 60).padStart(2, "0")} escolhida socks5://10.0.0.${i % 250}:1080: ${i}ms, saida em US`).join("\n");
+    fs.writeFileSync(path.join(installDir, "golivebypass.log"), `${legado}\n`);
+    for (let i = 0; i < 900; i++) logger.info("discord", `script.trace | msg=[!] trace: linha de ruido ${i} ${"x".repeat(60)}`);
+    logger.error("app", "Error occurred in handler for 'activate': FALHA-RECENTE");
+
+    const log = montarLog(raiz, [], "token-de-teste");
+    // Cabe na issue sem o corte cabeca+cauda da API (64KB menos meta e descricao).
+    expect(Buffer.byteLength(log, "utf8")).toBeLessThanOrEqual(56 * 1024);
+    expect(log.startsWith("=== sessao GUI (ring buffer) ===")).toBe(true);
+    expect(log).toContain("FALHA-RECENTE");
+    // O legado entra so pela cauda: a ultima linha do arquivo, nunca a primeira.
+    expect(log).toContain("escolhida socks5://10.0.0.249:1080: 2999ms");
+    expect(log).not.toContain("escolhida socks5://10.0.0.0:1080: 0ms");
+  });
 });

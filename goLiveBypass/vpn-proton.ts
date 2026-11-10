@@ -127,6 +127,15 @@ export interface ConfgenResult {
 // padrão até o Go Live (UDP) ser validado nessas rotas sem ela. A preferência
 // protonAvoidFreeMexico desliga a exclusão. Só o que foi medido: rota paga e Linux ficam como
 // estão, e pedir México explicitamente continua valendo.
+/**
+ * Sem país e com auto-ping desligado o helper não tem como escolher a rota e devolvia o erro
+ * cru "countries flag is required" (#398). Sem país, a escolha automática é o único caminho
+ * que funciona, então o -auto-ping vai assim mesmo; com país, a preferência é respeitada.
+ */
+export function protonNeedsAutoPing(options: { autoPing?: boolean; country?: string; }): boolean {
+    return options.autoPing !== false || !options.country?.trim();
+}
+
 export function automaticExcludedCountries(
     options: { country?: string; freeOnly?: boolean; avoidFreeMexico?: boolean; },
     platform: NodeJS.Platform = process.platform,
@@ -1381,7 +1390,7 @@ export async function generateOptimalProtonConfig(
         const output = path.join(dataDir, "wireguard.conf");
         const staging = path.join(dataDir, `.wireguard.conf.${randomUUID()}.tmp`);
         const args = ["-username", requestedUsername, "-session-file", sessionFileToUse, "-output", staging, "-json", "-ipv6", "-exclude-countries", automaticExcludedCountries(options)];
-        if (options.autoPing !== false) args.push("-auto-ping");
+        if (protonNeedsAutoPing(options)) args.push("-auto-ping");
         if (options.speedTest) {
             // A prova HTTPS do Discord é diagnóstica: não pode reprovar uma rota que já formou o túnel e mediu tráfego.
             args.push("-speed-test", "-progress-json");
@@ -1617,7 +1626,7 @@ export async function generateProtonRouteCatalog(
 
     const runCatalog = async (sessionFileToUse: string): Promise<ProtonRouteCatalogResult> => {
         const args = ["-username", requestedUsername, "-session-file", sessionFileToUse, "-route-catalog", "-json", "-exclude-countries", "BR"];
-        if (options.autoPing !== false) args.push("-auto-ping");
+        if (protonNeedsAutoPing(options)) args.push("-auto-ping");
         if (options.onProgress) args.push("-progress-json");
         if (options.country?.trim()) args.push("-countries", options.country.trim());
         if (options.freeOnly !== false) args.push("-free-only");

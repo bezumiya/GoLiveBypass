@@ -790,6 +790,51 @@ export function parseWireSockUninstallEntries(raw: string): string[] {
     }
 }
 
+/**
+ * Pastas onde o registro diz que o WireSock foi instalado. MSI nem sempre grava
+ * InstallLocation; o DisplayIcon (exe do app) supre o diretorio nesses casos.
+ */
+export function parseWireSockUninstallLocations(raw: string): string[] {
+    try {
+        const parsed = JSON.parse(raw) as unknown;
+        const rows = Array.isArray(parsed) ? parsed : [parsed];
+        const out = new Set<string>();
+        for (const row of rows) {
+            const { location, icon } = (row ?? {}) as { location?: unknown; icon?: unknown; };
+            let dir = typeof location === "string" ? location.trim().replace(/^"|"$/g, "") : "";
+            if (!dir && typeof icon === "string" && icon.trim()) {
+                const exe = icon.trim().replace(/,\s*-?\d+$/, "").replace(/^"|"$/g, "");
+                if (/\.exe$/i.test(exe)) dir = path.win32.dirname(exe);
+            }
+            if (dir) out.add(dir.replace(/[\\/]+$/, ""));
+        }
+        return [...out];
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Instalacoes registradas fora das raizes aceitas (#402: SDK em "D:\Program Files").
+ * O cliente roda elevado, entao a busca NAO se estende a essas pastas: numa unidade que
+ * nao e a do sistema a pasta costuma herdar escrita para usuarios comuns.
+ */
+export function wireSockForeignInstallLocations(locations: string[], roots: string[]): string[] {
+    const norm = (value: string) => path.win32.normalize(value).replace(/[\\/]+$/, "").toLowerCase();
+    const accepted = roots.map(norm);
+    return locations.filter(location => {
+        const current = norm(location);
+        return !accepted.some(root => current === root || current.startsWith(`${root}\\`));
+    });
+}
+
+export function wireSockForeignInstallMessage(location: string): string {
+    return `O WireSock está instalado em "${location}", fora da pasta de programas do Windows. `
+        + "Por segurança o GoLiveBypass só usa o WireSock instalado em C:\\Program Files. "
+        + "Desinstale o \"WireSock Secure Connect\" em Configurações > Aplicativos, reinicie o computador e ative de novo: "
+        + "o plugin instala a versão certa no lugar certo.";
+}
+
 export interface WireSockNetworkRestoreResult {
     ok: boolean;
     executed: boolean;
@@ -927,8 +972,8 @@ export function wireSockInstallFailureHint(restore: WireSockNetworkRestoreResult
     return `A instalação falhou e não foi possível confirmar a rede (${restore.residual.join("; ") || "sem detalhes"}). Use "Restaurar rede" do painel do plugin; se persistir, repita Reparo em Programas e Recursos do "WireSock Secure Connect".`;
 }
 
-async function hasWireSockUninstallRegistration(): Promise<{ registered: boolean; entries: string[] }> {
-    const script = "$roots=@('HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'); $found=@(); foreach($root in $roots){ try { Get-ItemProperty -Path $root -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and $_.DisplayName -match '(?i)wire\\s?sock|wglaunch' } | ForEach-Object { $found += [PSCustomObject]@{ name=[string]$_.DisplayName } } } catch {} }; ConvertTo-Json -Compress $found";
+async function hasWireSockUninstallRegistration(): Promise<{ registered: boolean; entries: string[]; locations: string[]; }> {
+    const script = "$roots=@('HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'); $found=@(); foreach($root in $roots){ try { Get-ItemProperty -Path $root -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and $_.DisplayName -match '(?i)wire\\s?sock|wglaunch' } | ForEach-Object { $found += [PSCustomObject]@{ name=[string]$_.DisplayName; location=[string]$_.InstallLocation; icon=[string]$_.DisplayIcon } } } catch {} }; ConvertTo-Json -Compress $found";
     try {
         const output = await new Promise<string>((resolve, reject) => {
             const child = execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -937,9 +982,9 @@ async function hasWireSockUninstallRegistration(): Promise<{ registered: boolean
             child.once("error", reject);
         });
         const entries = parseWireSockUninstallEntries(output);
-        return { registered: entries.length > 0, entries };
+        return { registered: entries.length > 0, entries, locations: parseWireSockUninstallLocations(output) };
     } catch {
-        return { registered: false, entries: [] };
+        return { registered: false, entries: [], locations: [] };
     }
 }
 
@@ -1016,7 +1061,17 @@ async function ensureWireSockInstalledOnce(log: WireSockLogger): Promise<string>
             }
             installed = await waitForCompatibleWireSock(WIRESOCK_SETTLE_TIMEOUT_MS);
         }
-        if (!installed) throw new Error("O instalador WireSock terminou, mas não deixou uma instalação SDK compatível.");
+        if (!installed) {
+            // O setup reinstala na pasta ja registrada; fora das raizes aceitas, repetir a
+            // ativacao nunca acha o cliente. Dizer onde esta e como sair (#402).
+            const registration = await hasWireSockUninstallRegistration();
+            const foreign = wireSockForeignInstallLocations(registration.locations, wireSockSearchRoots());
+            if (foreign.length > 0) {
+                log("warn", "instalacao WireSock fora das raizes aceitas", { pastas: foreign.join(" | ") });
+                throw new Error(wireSockForeignInstallMessage(foreign[0]));
+            }
+            throw new Error("O instalador WireSock terminou, mas não deixou uma instalação SDK compatível.");
+        }
         lastWireSockSelection = { version: WIRESOCK_VERSION, upgrade: "ok" };
         return installed;
     } catch (error) {

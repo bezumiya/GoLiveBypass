@@ -1,33 +1,8 @@
-import fs from "node:fs";
-import path from "node:path";
-import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { stripAnsiCodes, tailErroScript } from "../electron/script-stderr";
 
-// stripAnsiCodes/tailErroScript vivem no main.ts; a extracao segue o mesmo padrao
-// do gui-preflight-integration.test.ts. O que se prova aqui e o que a UI mostra
-// quando o script Linux falha, porque e essa string que vai para o usuario e para
-// o relato de bug.
-
-const mainSource = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
-
-function extractFunction(name: string): string {
-  const file = ts.createSourceFile("main.ts", mainSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const matches = file.statements.filter(
-    (statement): statement is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(statement) && statement.name?.text === name,
-  );
-  if (matches.length !== 1) throw new Error(`esperava exatamente uma funcao ${name}, achei ${matches.length}`);
-  return matches[0].getText(file);
-}
-
-const javascript = ts.transpileModule(`${extractFunction("stripAnsiCodes")}\n${extractFunction("tailErroScript")}`, {
-  compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
-}).outputText;
-
-const { stripAnsiCodes, tailErroScript } = new Function(`${javascript}; return { stripAnsiCodes, tailErroScript };`)() as {
-  stripAnsiCodes: (value: string) => string;
-  tailErroScript: (stderr: string, linhas: number) => string;
-};
+// O que se prova aqui e o que a UI mostra quando o script Linux falha, porque e essa
+// string que vai para o usuario e para o relato de bug.
 
 describe("mensagem de erro do script Linux", () => {
   it("nao come os prefixos literais [*], [OK] e [!] do script", () => {
@@ -37,7 +12,7 @@ describe("mensagem de erro do script Linux", () => {
     expect(stripAnsiCodes("  [OK] Tunel WireGuard encerrado.")).toBe("  [OK] Tunel WireGuard encerrado.");
     expect(stripAnsiCodes("  [!] sem privilegio")).toBe("  [!] sem privilegio");
     expect(stripAnsiCodes("\u001b[36m  [OK] ok\u001b[0m")).toBe("  [OK] ok");
-    expect(stripAnsiCodes("\uFFFD[36m  [X] falhou")).toBe("  [X] falhou");
+    expect(stripAnsiCodes("�[36m  [X] falhou")).toBe("  [X] falhou");
   });
 
   it("mostra a causa real em vez dos passos informativos do teardown", () => {
@@ -49,5 +24,27 @@ describe("mensagem de erro do script Linux", () => {
     expect(tailErroScript(stderr, 3)).toBe(
       "[X] Discord nao iniciou dentro do namespace WireGuard. Verifique o log em /home/u/.local/share/GoLiveBypass/logs.",
     );
+  });
+
+  it("mantem a causa na frente quando o rollback do trap escreve depois dela (#422)", () => {
+    // Ordem real: fail() imprime o [X] e sai; o trap reabre o Discord fora do tunel e
+    // as linhas dele vinham por ultimo, deixando so "Rollback: ..." na janela de erro.
+    const stderr = [
+      "  [!] O WireGuard ficou pronto, mas o processo do Discord nao iniciou.",
+      "\u001b[31m  [X]\u001b[0m Discord nao iniciou dentro do namespace WireGuard: abra o Discord fora do bypass para ver o erro; saida do launcher: GPU process isn't usable. Goodbye.; log: /home/u/.local/share/GoLiveBypass/logs/discord-vpn-1.log.",
+      "  [!] Rollback: bypass nao ativado; reabrindo o Discord sem o namespace WireGuard.",
+      "  Backend grafico: wayland | Wayland=wayland-1 | portal=ausente",
+      "  Log do Discord: /home/u/.local/share/GoLiveBypass/logs/discord-vpn-2.log",
+      "  [!] Rollback: Discord reaberto sem bypass; a ativacao falhou e precisa ser repetida.",
+    ].join("\n");
+    const mensagem = tailErroScript(stderr, 3).split("\n");
+    expect(mensagem).toHaveLength(3);
+    expect(mensagem[0]).toMatch(/^\[X\] Discord nao iniciou dentro do namespace WireGuard: .*GPU process isn't usable/);
+    expect(mensagem[2]).toBe("[!] Rollback: Discord reaberto sem bypass; a ativacao falhou e precisa ser repetida.");
+  });
+
+  it("sem [X] continua devolvendo apenas o fim do stderr", () => {
+    const stderr = ["[*] Configurando interface WireGuard 'wg-discord' no namespace 'discord-vpn'", "fopen: Permission denied", "[!] Rollback: removendo o namespace WireGuard incompleto."].join("\n");
+    expect(tailErroScript(stderr, 2)).toBe("fopen: Permission denied\n[!] Rollback: removendo o namespace WireGuard incompleto.");
   });
 });

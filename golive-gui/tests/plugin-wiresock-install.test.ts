@@ -4,6 +4,9 @@ import {
   classifyWireSockInstallState,
   parseWireSockOrphanDefaultRoutes,
   parseWireSockUninstallEntries,
+  parseWireSockUninstallLocations,
+  wireSockForeignInstallLocations,
+  wireSockForeignInstallMessage,
   wireSockInstallFailureHint,
   wireSockInstallerArguments,
   wireSockNetworkRestoreScript,
@@ -55,6 +58,26 @@ describe("instalação do WireSock no plugin nunca deixa a máquina sem internet
     expect(parseWireSockUninstallEntries('{"name":"WGLaunch"}')).toEqual(["WGLaunch"]);
     expect(parseWireSockUninstallEntries("[]")).toEqual([]);
     expect(parseWireSockUninstallEntries("")).toEqual([]);
+  });
+
+  it("instalação registrada fora das raízes aceitas vira mensagem acionável (#402)", () => {
+    const pfD = String.raw`D:\Program Files\WireSock Secure Connect`;
+    const pfC = String.raw`C:\Program Files\WireSock Secure Connect`;
+    const raw = JSON.stringify([
+      { name: "WireSock Secure Connect", location: `${pfD}/`, icon: "" },
+      { name: "WGLaunch", location: "", icon: `"${path.win32.join(pfC, "sdk", "wiresock-client.exe")}",0` },
+      { name: "WireSock antigo", location: "", icon: "" },
+    ]);
+    const locations = parseWireSockUninstallLocations(raw);
+    expect(locations).toEqual([pfD, path.win32.join(pfC, "sdk")]);
+    expect(parseWireSockUninstallLocations("")).toEqual([]);
+    const roots = [pfC, String.raw`C:\Users\u\AppData\Local\Microsoft\WinGet\Packages`];
+    expect(wireSockForeignInstallLocations(locations, roots)).toEqual([pfD]);
+    // Prefixo de nome nao e subpasta: "WireSock Secure Connect2" fica de fora.
+    expect(wireSockForeignInstallLocations([`${pfC.toLowerCase()}2`], roots)).toHaveLength(1);
+    const message = wireSockForeignInstallMessage(pfD);
+    expect(message).toContain(pfD);
+    expect(message).toContain('Desinstale o "WireSock Secure Connect"');
   });
 
   it("script de recuperação usa o reset oficial do driver e recusa com túnel vivo", () => {
