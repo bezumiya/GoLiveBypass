@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { EventEmitter } from "node:events";
 
 import * as logger from "../electron/logger";
 
@@ -148,5 +149,55 @@ describe("logger", () => {
     }
     expect(alvo.log).toBe(originalLog);
     expect(alvo.info).toBe(originalInfo);
+  });
+
+  it.each(["EPIPE", "EIO"])("isola erro %s por saida e restaura os listeners", async (code) => {
+    const saidas = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+    const outroListener = vi.fn();
+    saidas.stdout.on("error", outroListener);
+    const alvo = { log: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const originais = { ...alvo };
+    const restore = logger.patchConsole(alvo, saidas);
+    try {
+      logger.patchConsole(alvo, saidas)();
+      expect(saidas.stdout.listenerCount("error")).toBe(2);
+      expect(saidas.stderr.listenerCount("error")).toBe(1);
+      alvo.log("antes");
+      // Emissao posterior a chamada do console, fora do try/catch do tee.
+      await new Promise<void>((resolve) => setImmediate(() => {
+        saidas.stdout.emit("error", Object.assign(new Error("saida fechada"), { code }));
+        resolve();
+      }));
+      alvo.log("log depois");
+      alvo.info("info depois");
+      alvo.warn("warn saudavel");
+      alvo.error("error saudavel");
+      expect(originais.log).toHaveBeenCalledTimes(1);
+      expect(originais.info).not.toHaveBeenCalled();
+      expect(originais.warn).toHaveBeenCalledWith("warn saudavel");
+      expect(originais.error).toHaveBeenCalledWith("error saudavel");
+      expect(outroListener).toHaveBeenCalledTimes(1);
+
+      saidas.stderr.emit("error", Object.assign(new Error("saida fechada"), { code }));
+      // Erros adicionais tambem sao tratados, sem repetir o diagnostico.
+      saidas.stdout.emit("error", Object.assign(new Error("saida fechada"), { code }));
+      alvo.warn("warn depois");
+      alvo.error("error depois");
+      expect(originais.warn).toHaveBeenCalledTimes(1);
+      expect(originais.error).toHaveBeenCalledTimes(1);
+      const recent = logger.getRecent();
+      expect(recent.match(/saida do console indisponivel/g)).toHaveLength(2);
+      expect(recent).toContain(`saida=stdout codigo=${code}`);
+      expect(recent).toContain(`saida=stderr codigo=${code}`);
+      for (const msg of ["log depois", "info depois", "warn depois", "error depois"]) {
+        expect(recent).toContain(msg);
+        expect(fs.readFileSync(path.join(dir, "gui.log"), "utf8")).toContain(msg);
+      }
+    } finally {
+      restore();
+    }
+    expect(saidas.stdout.listeners("error")).toEqual([outroListener]);
+    expect(saidas.stderr.listenerCount("error")).toBe(0);
+    expect(alvo).toEqual(originais);
   });
 });
