@@ -1834,7 +1834,7 @@ function validProtonPoolReserves(manifest: ProtonRoutePoolManifest): ProtonRoute
   const excludedCountries = automaticExcludedCountries({
     countries: manifest.country,
     freeOnly: manifest.freeOnly,
-    avoidFreeMexico: (readSharedSettings() as any).protonAvoidFreeMexico !== false,
+    avoidFreeMexico: (readSharedSettings() as any).protonAvoidFreeMexico === true,
   }).split(",");
   for (const candidate of manifest.reserves) {
     const safe = safeRoutePoolPath(poolDir, candidate.confFile);
@@ -1935,7 +1935,7 @@ async function buildProtonRoutePoolNow(
       countries: typeof settings.protonCountry === "string" ? settings.protonCountry || undefined : undefined,
       freeOnly: true,
       autoPing: settings.protonAutoPing !== false,
-      avoidFreeMexico: settings.protonAvoidFreeMexico !== false,
+      avoidFreeMexico: settings.protonAvoidFreeMexico === true,
       size: Math.max(1, Math.min(3, Math.floor(count))),
       excludeServers: [...excluded],
       signal: controller?.signal,
@@ -2699,7 +2699,7 @@ async function ensureProtonActivationProfile() {
     // response can expose paid tiers to the selector.
     freeOnly: plan.status !== "premium",
     autoPing: s.protonAutoPing !== false,
-    avoidFreeMexico: s.protonAvoidFreeMexico !== false,
+    avoidFreeMexico: s.protonAvoidFreeMexico === true,
     speedTest: false,
   });
   if (!gen.success) throw new Error(gen.error || "Não foi possível preparar uma rota ProtonVPN.");
@@ -2754,7 +2754,7 @@ async function optimizeProtonRouteAtStartup(
         countries: country || undefined,
         freeOnly,
         autoPing,
-        avoidFreeMexico: settings.protonAvoidFreeMexico !== false,
+        avoidFreeMexico: settings.protonAvoidFreeMexico === true,
         speedTest: true,
         signal,
         onProgress: (progress) => {
@@ -4181,7 +4181,7 @@ ipcMain.handle("get-proton-settings", async () => {
     freeOnly: s.protonFreeOnly !== false,
     autoPing: s.protonAutoPing !== false,
     autoFailover: s.protonAutoFailover !== false,
-    avoidFreeMexico: s.protonAvoidFreeMexico !== false,
+    avoidFreeMexico: s.protonAvoidFreeMexico === true,
     routePreference: s.protonRoutePreference === "manual"
       ? "manual"
       : s.protonRoutePreference === "auto" ? "auto" : s.protonLastServer?.manual === true ? "manual" : "auto",
@@ -4606,7 +4606,7 @@ ipcMain.handle("optimize-proton-route", async (event, options?: ProtonOptimizati
       // renderers but cannot accidentally unlock paid tiers.
       const freeOnly = plan.status !== "premium";
       const autoPing = options?.autoPing !== undefined ? options.autoPing : (s.protonAutoPing !== false);
-      const avoidFreeMexico = s.protonAvoidFreeMexico !== false;
+      const avoidFreeMexico = s.protonAvoidFreeMexico === true;
 
       // A abertura/login deve confirmar a rota novamente quando o túnel está
       // inativo. O reaproveitamento continua disponível apenas para fluxos que

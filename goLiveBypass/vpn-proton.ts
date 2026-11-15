@@ -123,10 +123,10 @@ export interface ConfgenResult {
 // pacote interno a 1000 B. Nas rotas gratuitas do México isso chega como IP fragmentado, e até a
 // 3.8.1 o WireSock gravava o checksum TCP calculado só sobre o primeiro fragmento: o Windows
 // descartava o pacote e o anexo "carregava e sumia" (#373, #400). A 3.8.2.1 (WIRESOCK_VERSION em
-// vpn-windows.ts) corrige o checksum (wiresock/WireSockUI#168). A exclusão continua ligada por
-// padrão até o Go Live (UDP) ser validado nessas rotas sem ela. A preferência
-// protonAvoidFreeMexico desliga a exclusão. Só o que foi medido: rota paga e Linux ficam como
-// estão, e pedir México explicitamente continua valendo.
+// vpn-windows.ts) corrige o checksum (wiresock/WireSockUI#168), e rotas dos EUA também fragmentam
+// (US-FREE#146 e #148 nos contadores do #408). Por isso o México voltou à escolha automática: a
+// exclusão só vale com a opção protonExcludeFreeMexico ligada (protonAvoidFreeMexico aqui dentro).
+// Rota paga e Linux ficam como estão, e pedir México explicitamente continua valendo.
 /**
  * Sem país e com auto-ping desligado o helper não tem como escolher a rota e devolvia o erro
  * cru "countries flag is required" (#398). Sem país, a escolha automática é o único caminho
@@ -140,7 +140,7 @@ export function automaticExcludedCountries(
     options: { country?: string; freeOnly?: boolean; avoidFreeMexico?: boolean; },
     platform: NodeJS.Platform = process.platform,
 ): string {
-    if (platform !== "win32" || options.freeOnly === false || options.avoidFreeMexico === false) return "BR";
+    if (platform !== "win32" || options.freeOnly === false || options.avoidFreeMexico !== true) return "BR";
     const requested = (options.country ?? "").split(",").map(item => item.trim().toUpperCase());
     return requested.includes("MX") ? "BR" : "BR,MX";
 }

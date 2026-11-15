@@ -410,7 +410,9 @@ function controllerSettings(): PluginSettingsRecord {
         protonCountry: typeof stored.protonCountry === "string" ? stored.protonCountry : "",
         protonFreeOnly: stored.protonFreeOnly !== false,
         protonAutoPing: stored.protonAutoPing !== false,
-        protonAvoidFreeMexico: stored.protonAvoidFreeMexico !== false,
+        // Opção nova, desligada por padrão. O Vencord grava o padrão no settings.json quando a opção
+        // é lida, então o antigo `protonAvoidFreeMexico: true` salvo não diz se a pessoa escolheu.
+        protonAvoidFreeMexico: stored.protonExcludeFreeMexico === true,
     };
 }
 
