@@ -2136,10 +2136,10 @@ const settings = definePluginSettings({
         description: "Escolher primeiro servidores Proton com menor latência.",
         default: true
     },
-    protonAvoidFreeMexico: {
+    protonExcludeFreeMexico: {
         type: OptionType.BOOLEAN,
-        description: "Evitar rotas grátis do México na escolha automática (Windows). Precaução: o envio de imagens e arquivos nelas foi corrigido com o WireSock 3.8.2, e o Go Live ainda está em validação.",
-        default: true
+        description: "Evitar rotas grátis do México na escolha automática (Windows). Desligado por padrão desde que o WireSock 3.8.2 corrigiu o envio de arquivos nelas; ligue se essas rotas derem problema.",
+        default: false
     }
 });
 

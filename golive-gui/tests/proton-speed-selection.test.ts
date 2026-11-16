@@ -424,18 +424,28 @@ describe('medidor isolado da regra WireSock', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('tira as rotas gratuitas do México da escolha automática só no Windows e sem pedido explícito', () => {
-    expect(automaticExcludedCountries({ freeOnly: true }, 'win32')).toBe('BR,MX');
-    expect(automaticExcludedCountries({}, 'win32')).toBe('BR,MX');
-    expect(automaticExcludedCountries({ countries: 'US,NL', freeOnly: true }, 'win32')).toBe('BR,MX');
-    expect(automaticExcludedCountries({ countries: 'us, mx', freeOnly: true }, 'win32')).toBe('BR');
-    expect(automaticExcludedCountries({ freeOnly: false }, 'win32')).toBe('BR');
-    expect(automaticExcludedCountries({ freeOnly: true }, 'linux')).toBe('BR');
+  it('o México entra na escolha automática por padrão', () => {
+    expect(automaticExcludedCountries({ freeOnly: true }, 'win32')).toBe('BR');
+    expect(automaticExcludedCountries({}, 'win32')).toBe('BR');
+    expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: false }, 'win32')).toBe('BR');
   });
 
-  it('deixa desligar a exclusão das rotas gratuitas do México', () => {
-    expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: false }, 'win32')).toBe('BR');
+  it('com a preferência ligada, tira as rotas gratuitas do México só no Windows e sem pedido explícito', () => {
     expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: true }, 'win32')).toBe('BR,MX');
+    expect(automaticExcludedCountries({ avoidFreeMexico: true }, 'win32')).toBe('BR,MX');
+    expect(automaticExcludedCountries({ countries: 'US,NL', freeOnly: true, avoidFreeMexico: true }, 'win32')).toBe('BR,MX');
+    expect(automaticExcludedCountries({ countries: 'us, mx', freeOnly: true, avoidFreeMexico: true }, 'win32')).toBe('BR');
+    expect(automaticExcludedCountries({ freeOnly: false, avoidFreeMexico: true }, 'win32')).toBe('BR');
+    expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: true }, 'linux')).toBe('BR');
+  });
+
+  // A GUI só grava protonAvoidFreeMexico quando a pessoa mexe no botão: sem o valor, fica desligada.
+  it('a preferência da GUI nasce desligada', () => {
+    const main = fs.readFileSync(path.resolve(process.cwd(), 'electron/main.ts'), 'utf8');
+    const html = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf8');
+    expect(main).not.toContain('protonAvoidFreeMexico !== false');
+    expect(main.split('protonAvoidFreeMexico === true').length - 1).toBe(6);
+    expect(html).toContain('<input type="checkbox" id="avoidFreeMexicoToggle" />');
   });
 
   it('reutiliza cache somente com conta, filtros, versão, métricas e perfil compatíveis', () => {
@@ -447,8 +457,8 @@ describe('medidor isolado da regra WireSock', () => {
     expect(canReuseMeasuredProfile(dir, { ...previous, measurementCountry: 'NL' }, { username: 'test', country: 'US', freeOnly: true, autoPing: true })).toBe(false);
     expect(canReuseMeasuredProfile(dir, { ...previous, uploadMbps: 0 }, { username: 'test', country: 'US', freeOnly: true, autoPing: true })).toBe(false);
     if (process.platform === 'win32') {
-      expect(canReuseMeasuredProfile(dir, { ...previous, country: 'MX', measurementCountry: '' }, { username: 'test', country: '', freeOnly: true, autoPing: true })).toBe(false);
-      expect(canReuseMeasuredProfile(dir, { ...previous, country: 'MX', measurementCountry: '' }, { username: 'test', country: '', freeOnly: true, autoPing: true, avoidFreeMexico: false })).toBe(true);
+      expect(canReuseMeasuredProfile(dir, { ...previous, country: 'MX', measurementCountry: '' }, { username: 'test', country: '', freeOnly: true, autoPing: true })).toBe(true);
+      expect(canReuseMeasuredProfile(dir, { ...previous, country: 'MX', measurementCountry: '' }, { username: 'test', country: '', freeOnly: true, autoPing: true, avoidFreeMexico: true })).toBe(false);
     }
     fs.rmSync(dir, { recursive: true, force: true });
   });

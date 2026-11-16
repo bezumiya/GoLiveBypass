@@ -39,8 +39,9 @@ describe("contratos da VPN do plugin", () => {
       protonCountry: "US,NL",
       protonFreeOnly: true,
       protonAutoPing: true,
-      protonAvoidFreeMexico: true,
+      protonAvoidFreeMexico: false,
     });
+    expect(normalizeVpnSettings({ protonAvoidFreeMexico: true }).protonAvoidFreeMexico).toBe(true);
     expect(normalizeVpnSettings({ protonAvoidFreeMexico: false }).protonAvoidFreeMexico).toBe(false);
   });
 

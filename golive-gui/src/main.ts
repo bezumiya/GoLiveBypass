@@ -802,7 +802,7 @@ async function refreshAutoFailover() {
   try {
     const settings = await window.api.getProtonSettings();
     if (autoFailoverToggle) autoFailoverToggle.checked = settings.autoFailover !== false;
-    if (avoidFreeMexicoToggle) avoidFreeMexicoToggle.checked = settings.avoidFreeMexico !== false;
+    if (avoidFreeMexicoToggle) avoidFreeMexicoToggle.checked = settings.avoidFreeMexico === true;
   } catch (err) {
     console.error(err);
   }
@@ -1576,7 +1576,7 @@ async function refreshProtonState(forcePlan = false) {
       ? { server: rememberedServer, pingMs: Number.isFinite(rememberedPing) && rememberedPing > 0 ? rememberedPing : undefined }
       : null;
     if (autoFailoverToggle) autoFailoverToggle.checked = s.autoFailover !== false;
-    if (avoidFreeMexicoToggle) avoidFreeMexicoToggle.checked = s.avoidFreeMexico !== false;
+    if (avoidFreeMexicoToggle) avoidFreeMexicoToggle.checked = s.avoidFreeMexico === true;
     if (protonCountrySelect) renderProtonMeasuredRouteOptions();
     protonProfileReady = s.profileReady === true;
 

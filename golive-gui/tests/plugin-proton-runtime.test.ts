@@ -7,6 +7,8 @@ import { EventEmitter } from "events";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import vm from "node:vm";
+import ts from "typescript";
 
 const state = vi.hoisted(() => ({
   code: 0,
@@ -64,14 +66,49 @@ import {
   type ProtonOptimizationProgress,
 } from "../../goLiveBypass/vpn-proton";
 
+// controllerSettings() de native.ts, carregado por AST como em plugin-proton-routing.test.ts,
+// sobre um settings.json do Vencord de mentira.
+function settingsDoPlugin(salvo: Record<string, unknown>) {
+  const source = fs.readFileSync(path.resolve(process.cwd(), "../goLiveBypass/native.ts"), "utf8");
+  const parsed = ts.createSourceFile("native.ts", source, ts.ScriptTarget.Latest, true);
+  const names = new Set(["pluginSettings", "controllerSettings"]);
+  const functions = parsed.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""));
+  const code = ts.transpileModule(functions.map(node => node.getText(parsed)).join("\n") + "\nexports.controllerSettings = controllerSettings;", {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const exports: Record<string, any> = {};
+  vm.runInNewContext(code, { exports, RendererSettings: { plain: { plugins: { GoLiveBypass: salvo } } } });
+  return exports.controllerSettings();
+}
+
 describe("países fora da escolha automática do plugin", () => {
-  it("tira as rotas gratuitas do México só no Windows e sem pedido explícito", () => {
-    expect(automaticExcludedCountries({ freeOnly: true }, "win32")).toBe("BR,MX");
-    expect(automaticExcludedCountries({ country: "US,NL", freeOnly: true }, "win32")).toBe("BR,MX");
-    expect(automaticExcludedCountries({ country: "mx", freeOnly: true }, "win32")).toBe("BR");
-    expect(automaticExcludedCountries({ freeOnly: false }, "win32")).toBe("BR");
-    expect(automaticExcludedCountries({ freeOnly: true }, "linux")).toBe("BR");
+  it("o México entra na escolha automática por padrão", () => {
+    expect(automaticExcludedCountries({ freeOnly: true }, "win32")).toBe("BR");
+    expect(automaticExcludedCountries({ country: "US,NL", freeOnly: true }, "win32")).toBe("BR");
     expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: false }, "win32")).toBe("BR");
+  });
+
+  it("com a opção ligada, tira as rotas gratuitas do México só no Windows e sem pedido explícito", () => {
+    expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: true }, "win32")).toBe("BR,MX");
+    expect(automaticExcludedCountries({ country: "US,NL", freeOnly: true, avoidFreeMexico: true }, "win32")).toBe("BR,MX");
+    expect(automaticExcludedCountries({ country: "mx", freeOnly: true, avoidFreeMexico: true }, "win32")).toBe("BR");
+    expect(automaticExcludedCountries({ freeOnly: false, avoidFreeMexico: true }, "win32")).toBe("BR");
+    expect(automaticExcludedCountries({ freeOnly: true, avoidFreeMexico: true }, "linux")).toBe("BR");
+  });
+
+  // O Vencord grava o padrão no settings.json quando a opção é lida: o `true` da opção antiga
+  // está salvo em quem nunca escolheu nada e não pode continuar valendo.
+  it("ignora o protonAvoidFreeMexico salvo e só exclui com a opção nova", () => {
+    expect(settingsDoPlugin({}).protonAvoidFreeMexico).toBe(false);
+    expect(settingsDoPlugin({ protonAvoidFreeMexico: true }).protonAvoidFreeMexico).toBe(false);
+    expect(settingsDoPlugin({ protonExcludeFreeMexico: true }).protonAvoidFreeMexico).toBe(true);
+    expect(settingsDoPlugin({ protonExcludeFreeMexico: false }).protonAvoidFreeMexico).toBe(false);
+  });
+
+  it("a opção do plugin nasce desligada e a antiga sai da tela", () => {
+    const index = fs.readFileSync(path.resolve(process.cwd(), "../goLiveBypass/index.tsx"), "utf8");
+    expect(index).toMatch(/protonExcludeFreeMexico: \{[^}]*default: false\s*\}/);
+    expect(index).not.toContain("protonAvoidFreeMexico");
   });
 });
 

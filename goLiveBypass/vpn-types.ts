@@ -144,7 +144,7 @@ export const DEFAULT_VPN_SETTINGS: Readonly<VpnSettings> = Object.freeze({
     protonCountry: "",
     protonFreeOnly: true,
     protonAutoPing: true,
-    protonAvoidFreeMexico: true,
+    protonAvoidFreeMexico: false,
 });
 
 export function normalizeVpnSettings(raw: unknown): VpnSettings {
@@ -167,7 +167,7 @@ export function normalizeVpnSettings(raw: unknown): VpnSettings {
         protonCountry: country,
         protonFreeOnly: value.protonFreeOnly !== false,
         protonAutoPing: value.protonAutoPing !== false,
-        protonAvoidFreeMexico: value.protonAvoidFreeMexico !== false,
+        protonAvoidFreeMexico: value.protonAvoidFreeMexico === true,
     };
 }
 
