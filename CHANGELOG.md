@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.17-beta-2] - 2026-11-15
+
 ### Alterado
 
 - **Windows (GUI e plugin): as rotas grátis do México voltam à escolha automática.** Elas saíram na 2.0.14 porque o WireSock gravava errado o checksum dos pacotes que chegavam fragmentados por dentro do túnel, e o anexo "carregava e sumia" (#373, #400). A 2.0.16 passou a exigir o WireSock 3.8.2.1, que corrige isso, e os contadores do #408 mostram que a fragmentação não é só do México: num Windows com o 3.8.2.1, a US-FREE#148 recebeu de 100 a 170 fragmentos a cada 5 minutos e a US-FREE#146, escolhida pela seleção automática, 710 em 5 minutos, sem falha de remontagem e com os anexos subindo. Excluir só o México deixou de proteger.

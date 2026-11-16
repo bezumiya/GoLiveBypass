@@ -25,6 +25,11 @@ fi
 
 umask 077
 work="$(mktemp -d)"
+STANDALONE_SRC="$work/standalone.sh"
+WG_GO_SRC="$work/wireguard-go"
+cp "$ROOT/standalone/golivebypass-standalone.sh" "$STANDALONE_SRC"
+cp "$BINARY" "$WG_GO_SRC"
+chmod +x "$WG_GO_SRC"
 server=''; peer=''
 cleanup() {
     trap - EXIT
@@ -50,7 +55,7 @@ ip route > "$work/uplink-routes-before"
 uplink_ns="$(readlink /proc/self/ns/net)"
 
 # Carrega a implementacao mantida, sem executar o instalador/Discord.
-python3 - "$ROOT/standalone/golivebypass-standalone.sh" "$work/helper.sh" <<'PY'
+python3 - "$STANDALONE_SRC" "$work/helper.sh" <<'PY'
 import sys
 from pathlib import Path
 s = Path(sys.argv[1]).read_text()
@@ -71,15 +76,15 @@ Endpoint = 127.0.0.1:51998
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 1
 EOF
-export GOLIVE_GUI=1 XDG_DATA_HOME="$work/data" SCRIPT_PATH="$ROOT/standalone/golivebypass-standalone.sh"
-source "$work/helper.sh" --real-home "$work" --yes --wg-conf "$work/client.conf" --wireguard-go "$BINARY"
+export GOLIVE_GUI=1 XDG_DATA_HOME="$work/data" SCRIPT_PATH="$STANDALONE_SRC"
+source "$work/helper.sh" --real-home "$work" --yes --wg-conf "$work/client.conf" --wireguard-go "$WG_GO_SRC"
 # So a selecao da capacidade do kernel e mascarada. Daemon, TUN, namespace,
 # wg/UAPI, peer e HTTP sao reais, mesmo se o modulo do host estiver carregado.
 wireguard_module_loaded() { return 1; }
 MODPROBE_BINARY=/usr/bin/false
 trap cleanup EXIT
 
-"$BINARY" -f wg-peer > "$work/peer.log" 2>&1 &
+"$WG_GO_SRC" -f wg-peer > "$work/peer.log" 2>&1 &
 peer=$!
 for _ in {1..50}; do
     [[ -S /run/wireguard/wg-peer.sock ]] && break

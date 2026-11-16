@@ -25,20 +25,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Carrega a implementacao do standalone antes de cobrir /run com tmpfs (o repo pode
+# viver sob /run/media e o helper precisa continuar acessivel no mount namespace).
+STANDALONE_SRC="$work/standalone.sh"
+cp "$root/standalone/golivebypass-standalone.sh" "$STANDALONE_SRC"
+
 # ip netns usa este caminho fixo; o mount namespace mantém a operação isolada do host.
 mount --make-rprivate /
-mount -t tmpfs golive-netns-test /run/netns
+mount -t tmpfs golive-netns-test /run
+mkdir -p /run/netns /etc/netns
+mount -t tmpfs golive-netns-test-ns /run/netns
 mount -t tmpfs golive-netns-config /etc/netns
 
 # Carrega exatamente o helper do standalone, sem executar o restante do instalador.
 awk '/^netns_exists\(\) \{/{capture=1} capture {print} capture && /^}/{exit}' \
-  "$root/standalone/golivebypass-standalone.sh" > "$work/helper.sh"
+  "$STANDALONE_SRC" > "$work/helper.sh"
 # O teardown real passou a encerrar tambem o daemon do WireGuard de usuario: o bloco inteiro
 # entra no helper (as funcoes que dependem de resolve_binary nao sao chamadas aqui).
 sed -n '/^# ======================= WireGuard de usuario (wireguard-go)/,/^# O preflight nao carrega o modulo:/p' \
-  "$root/standalone/golivebypass-standalone.sh" | sed '$d' >> "$work/helper.sh"
+  "$STANDALONE_SRC" | sed '$d' >> "$work/helper.sh"
 awk '/^teardown_wireguard_netns\(\) \{/{capture=1} capture {print} capture && /^}/{exit}' \
-  "$root/standalone/golivebypass-standalone.sh" >> "$work/helper.sh"
+  "$STANDALONE_SRC" >> "$work/helper.sh"
 source "$work/helper.sh"
 step() { :; }
 ok() { :; }
