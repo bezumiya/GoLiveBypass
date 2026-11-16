@@ -34,6 +34,7 @@ import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapter
 import { guiEnvironmentSnapshot } from "./env-snapshot";
 import { installerFolderDiagnosis } from "./wiresock-install-diag";
 import { classifyWgReadiness, getWgStats, getWgStatsAsync, iniciarWgStatsWatchdog, pararWgStatsWatchdog, type WgTunnelStats } from "./wgstats";
+import { caminhoLogWireSock, lerResumoLogWireSock, respostaNaSessaoAtual, servidorSemResposta } from "./wiresock-log";
 import { automaticExcludedCountries, classifyFailoverHealth, FailoverHealthTracker, FAILOVER_ROUTE_TIMEOUT_MS, FAILOVER_SAMPLE_INTERVAL_MS, routeCandidateUsable, routePoolDirectory, readRoutePoolManifest, makeRoutePoolManifest, routePoolMatches, ROUTE_POOL_RESERVE_COUNT, ROUTE_POOL_TOTAL, safeRoutePoolPath, writeRoutePoolManifest, type ProtonRouteMetadata, type ProtonRoutePoolManifest } from "./route-failover";
 import { validateWgConfContent } from "./wg-validator";
 import * as proton from "./proton";
@@ -1877,6 +1878,14 @@ function notifyProtonFailover(message: string): void {
   }
 }
 
+// Troca automatica concluida: a tela recarrega o cartao da rota, sem aviso novo. Sem isto ele
+// seguia mostrando a rota de antes da troca ate a GUI reabrir.
+function notifyProtonRouteChanged(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send("proton-route-changed"); } catch {}
+  }
+}
+
 function routePoolManifestForCurrent(
   settings: Record<string, unknown>,
   username: string,
@@ -2316,6 +2325,7 @@ async function attemptProtonFailover(generation: number): Promise<void> {
           updatedAt: new Date().toISOString(),
         },
       });
+      notifyProtonRouteChanged();
       protonFailoverTracker?.reset();
       scheduleProtonRoutePoolBuild(generation, Math.max(0, ROUTE_POOL_RESERVE_COUNT - manifest.reserves.length));
       return;
@@ -2343,6 +2353,7 @@ async function collectProtonFailoverSample(generation: number): Promise<void> {
   if (settings.vpnMode === "custom" || settings.protonAutoFailover === false) return;
 
   let sample;
+  let semRespostaSeguidos: number | undefined;
   if (IS_LINUX) {
     const status = await linuxStatus();
     const stats = await linuxWgStats();
@@ -2369,6 +2380,11 @@ async function collectProtonFailoverSample(generation: number): Promise<void> {
     const wireSock = await getWireSockConnectionStatusAsync({ activeHint: tunnelActive });
     const trafficIncreasing = hasWireSockAdapterTrafficIncrease(protonFailoverPreviousAdapterTraffic, traffic);
     protonFailoverPreviousAdapterTraffic = traffic;
+    // No modo direto (o normal) nao ha wg.exe nem CLI de status: so o log do wiresock-client
+    // mostra o servidor deixando de responder ao handshake (#411). Le so o fim do arquivo.
+    const caminhoLog = caminhoLogWireSock();
+    const logWireSock = caminhoLog ? lerResumoLogWireSock(caminhoLog) : null;
+    if (logWireSock?.ok) semRespostaSeguidos = logWireSock.semRespostaSeguidos;
     sample = {
       discordRunning,
       // Se uma leitura assíncrona do processo falhar, o estado WireSock ainda
@@ -2380,6 +2396,7 @@ async function collectProtonFailoverSample(generation: number): Promise<void> {
       stats,
       wireSock,
       trafficIncreasing,
+      wireSockHandshakeUnanswered: logWireSock ? servidorSemResposta(logWireSock) : false,
     };
   } else {
     return;
@@ -2392,6 +2409,7 @@ async function collectProtonFailoverSample(generation: number): Promise<void> {
       health,
       consecutive_failures: observation.consecutiveFailures,
       grace: observation.inGracePeriod,
+      ...(semRespostaSeguidos !== undefined ? { wiresock_sem_resposta_seguidos: semRespostaSeguidos } : {}),
     });
   }
   if (!observation.trigger || generation !== protonFailoverGeneration) return;
@@ -2457,7 +2475,7 @@ function startProtonFailoverMonitor(): void {
 export type WindowsRouteReadiness = {
   verified: boolean;
   state: "connected" | "unverified" | "disconnected";
-  source: WireSockConnectionStatus["source"] | "wg" | "functional" | "none";
+  source: WireSockConnectionStatus["source"] | "wg" | "functional" | "log" | "none";
   detail?: string;
 }
 
@@ -2510,6 +2528,14 @@ async function waitForWindowsWgReady(timeoutMs = 20_000): Promise<WindowsRouteRe
     const readiness = classifyWgReadiness(last, true);
     if (readiness.ready) {
       return finish({ verified: true, state: "connected", source: "wg", detail: "handshake recente e tráfego WireGuard bidirecional confirmados" });
+    }
+    // Sem wg.exe nem CLI (o modo direto normal), a resposta de handshake no log do
+    // wiresock-client e a prova de que o servidor atendeu. A troca de rota abre um log novo, e
+    // so conta resposta depois do inicio do tunel atual. O primeiro handshake costuma vir antes
+    // desta espera comecar, entao "resposta desde agora" recusaria uma reserva boa.
+    const caminhoLog = caminhoLogWireSock();
+    if (caminhoLog && respostaNaSessaoAtual(lerResumoLogWireSock(caminhoLog))) {
+      return finish({ verified: true, state: "connected", source: "log", detail: "resposta de handshake no log do WireSock" });
     }
     // Instalações oficiais nem sempre incluem wg.exe. Dois estados Connected
     // consecutivos com endereço externo são a confirmação funcional da CLI;

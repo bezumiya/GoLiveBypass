@@ -81,4 +81,5 @@ import type { TunnelStats } from './wiresock';
   setProtonSettings: (settings: any) => ipcRenderer.invoke('set-proton-settings', settings),
   onProtonFailoverNotice: (callback: (notice: { message: string }) => void) =>
     ipcRenderer.on('proton-failover-notice', (_event, notice: { message: string }) => callback(notice)),
+  onProtonRouteChanged: (callback: () => void) => ipcRenderer.on('proton-route-changed', () => callback()),
 };

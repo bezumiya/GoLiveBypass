@@ -38,6 +38,51 @@ describe("failover Proton", () => {
     })).toBe("unknown");
   });
 
+  it("no Windows, handshakes sem resposta no log do WireSock são falha mesmo com CLI ou tráfego dizendo o contrário (#411)", () => {
+    const semWg = {
+      discordRunning: true,
+      tunnelActive: true,
+      stats: { ok: false, handshakeAgoS: null, rxBytes: null, txBytes: null, error: "wg.exe indisponível" },
+    };
+    const servico = { state: "unknown" as const, source: "service" as const };
+    expect(classifyFailoverHealth({ ...semWg, wireSock: servico, wireSockHandshakeUnanswered: true })).toBe("failed");
+    expect(classifyFailoverHealth({ ...semWg, wireSock: { state: "connected", source: "cli" }, wireSockHandshakeUnanswered: true })).toBe("failed");
+    expect(classifyFailoverHealth({ ...semWg, wireSock: servico, trafficIncreasing: true, wireSockHandshakeUnanswered: true })).toBe("failed");
+    // Sem a evidência nova, nada muda.
+    expect(classifyFailoverHealth({ ...semWg, wireSock: servico, wireSockHandshakeUnanswered: false })).toBe("unknown");
+    expect(classifyFailoverHealth({ ...semWg, wireSock: { state: "connected", source: "cli" } })).toBe("healthy");
+    // Discord fechado continua sem decisão, e o wg.exe com handshake recente continua mandando.
+    expect(classifyFailoverHealth({ ...semWg, discordRunning: false, wireSockHandshakeUnanswered: true })).toBe("unknown");
+    expect(classifyFailoverHealth({
+      ...semWg,
+      stats: { ok: true, handshakeAgoS: 10, rxBytes: 1, txBytes: 1 },
+      wireSockHandshakeUnanswered: true,
+    })).toBe("healthy");
+
+    const tracker = new FailoverHealthTracker(FAILOVER_FAILURE_THRESHOLD, FAILOVER_INITIAL_GRACE_MS);
+    tracker.reset(0);
+    const saude = classifyFailoverHealth({ ...semWg, wireSock: servico, wireSockHandshakeUnanswered: true });
+    const disparos = [6_000, 9_000, 12_000, 15_000].map((t) => tracker.observe(saude, t).trigger);
+    expect(disparos).toEqual([false, false, false, true]);
+  });
+
+  it("a amostra do Windows e a prontidão usam o log do WireSock", () => {
+    const main = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    expect(main).toContain("wireSockHandshakeUnanswered: logWireSock ? servidorSemResposta(logWireSock) : false");
+    expect(main).toMatch(/respostaNaSessaoAtual\(lerResumoLogWireSock\(caminhoLog\)\)\)\s*\{\s*return finish\(\{ verified: true, state: "connected", source: "log"/);
+  });
+
+  it("depois da troca automática, a tela recarrega o cartão da rota", () => {
+    const main = fs.readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const preload = fs.readFileSync(path.resolve(process.cwd(), "electron/preload.ts"), "utf8");
+    const renderer = fs.readFileSync(path.resolve(process.cwd(), "src/main.ts"), "utf8");
+    const sucesso = main.slice(main.indexOf("async function attemptProtonFailover"), main.indexOf("failedNames.add(candidate.server)"));
+    expect(sucesso).toMatch(/protonLastServer:[\s\S]*notifyProtonRouteChanged\(\);[\s\S]*return;/);
+    expect(main).toContain('mainWindow.webContents.send("proton-route-changed")');
+    expect(preload).toContain("ipcRenderer.on('proton-route-changed'");
+    expect(renderer).toMatch(/onProtonRouteChanged\?\.\(\(\) => \{\s*setProtonFeedback\(''\);\s*void refreshProtonState\(\);/);
+  });
+
   it("exige falha sustentada fora da janela inicial", () => {
     const tracker = new FailoverHealthTracker(FAILOVER_FAILURE_THRESHOLD, FAILOVER_INITIAL_GRACE_MS);
     tracker.reset(0);

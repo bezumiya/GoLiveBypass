@@ -6,6 +6,17 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **Windows: a troca automática de rota passa a reagir a servidor que não responde (#411).** No #411 o servidor da rota respondeu só 2 de 22 handshakes em 4 minutos, o Discord ficou preso em "checking for updates" e a troca automática não fez nada. Na instalação comum (WireSock em modo direto, sem `wg.exe` nem CLI de status), ela não tinha como ver a rota morta: toda amostra saía "indeterminada", e a troca só acontecia se o processo do WireSock morresse. E mesmo que disparasse, a reserva só era aceita com o handshake "verificado", o que nessa instalação nunca acontecia, então todas seriam recusadas. Agora as duas pontas leem o log do próprio `wiresock-client`, que a GUI já lia para o diagnóstico:
+  - **detecção:** 6 tentativas seguidas de handshake sem resposta (cerca de 30 s, já que o WireGuard repete a cada 5 s), com o log vivo, contam como falha da rota. A contagem zera a cada resposta, ao contrário do `sem_resposta` do diagnóstico, que soma 10 minutos e acusaria uma rota que já voltou;
+  - **validação:** a reserva vale quando o servidor responde ao handshake depois do início do túnel novo (cada troca abre um log novo, e resposta da sessão anterior não conta). A prontidão da ativação passa a registrar `source=log verified=true` pelo mesmo caminho, só no log;
+  - **tela:** depois da troca, o cartão da rota recarrega e mostra a rota em uso, e a mensagem "Rota X selecionada!" da rota anterior some. Antes ele seguia mostrando a rota de antes da troca até a GUI reabrir. Nenhum aviso novo.
+
+  **Testado no Windows, com o WireSock em modo direto:** com o servidor da MX-FREE#10 bloqueado no firewall do Windows, a sexta tentativa sem resposta veio 32 s depois da última resposta, e a troca para a US-FREE#28 (com a reserva validada pelo log) terminou 52 s depois, sem fechar o Discord. Em 10 minutos de uso normal depois disso, nenhuma troca falsa.
+
+  Continuam valendo as travas que já existiam: falha sustentada fora da janela inicial, uma única renovação das reservas por ativação, quarentena de quem falha e desligamento da troca na sessão quando nada responde. **Limites:** se a internet da própria pessoa cair, os handshakes também ficam sem resposta, as reservas falham e a troca se desliga na sessão com o aviso que já existia. Do servidor mudo até a troca leva perto de 1 minuto. O plugin não tem troca automática de rota, então não há o que portar; Linux já usa os dados do `wg`.
+
 ## [2.0.17-beta-2] - 2026-11-15
 
 ### Alterado
