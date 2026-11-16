@@ -195,6 +195,7 @@ export function _resetForTests() {
 // ---------------------------------------------------------------------------
 
 type ConsoleMethod = (...a: unknown[]) => void;
+type ConsoleOutput = Pick<NodeJS.WritableStream, "on" | "removeListener">;
 let consolaOriginal: {
   log: ConsoleMethod;
   info: ConsoleMethod;
@@ -225,8 +226,30 @@ export function patchConsole(alvo: {
   info: ConsoleMethod;
   warn: ConsoleMethod;
   error: ConsoleMethod;
-} = console): () => void {
+} = console, saidas: { stdout: ConsoleOutput; stderr: ConsoleOutput } = process): () => void {
   if (consolaOriginal) return () => {};
+
+  // Em pipes, write() pode emitir "error" depois de retornar: try/catch nao
+  // cobre esse caso. Nunca use console neste handler (evita recursao no tee).
+  const protegerSaida = (nome: "stdout" | "stderr") => {
+    const stream = saidas[nome];
+    let disponivel = true;
+    const onError = (erro: NodeJS.ErrnoException) => {
+      if (!disponivel) return;
+      disponivel = false;
+      escrever("warn", "logger", "saida do console indisponivel; logs seguem em arquivo/memoria", {
+        saida: nome,
+        codigo: erro.code ?? "desconhecido",
+      });
+    };
+    stream.on("error", onError);
+    return {
+      disponivel: () => disponivel,
+      restaurar: () => stream.removeListener("error", onError),
+    };
+  };
+  const stdout = protegerSaida("stdout");
+  const stderr = protegerSaida("stderr");
   consolaOriginal = {
     log: alvo.log,
     info: alvo.info,
@@ -235,11 +258,11 @@ export function patchConsole(alvo: {
   };
 
   const interceptar =
-    (nivel: Nivel, original: ConsoleMethod) => {
+    (nivel: Nivel, original: ConsoleMethod, saida: typeof stdout) => {
       const chamadaOriginal = original.bind(alvo);
       return (...args: unknown[]) => {
         try {
-          chamadaOriginal(...args);
+          if (saida.disponivel()) chamadaOriginal(...args);
         } catch {
           // A saida original pode falhar (por exemplo, EIO/EPIPE); o tee segue.
         }
@@ -254,10 +277,10 @@ export function patchConsole(alvo: {
       };
     };
 
-  alvo.log = interceptar("info", consolaOriginal.log);
-  alvo.info = interceptar("info", consolaOriginal.info);
-  alvo.warn = interceptar("warn", consolaOriginal.warn);
-  alvo.error = interceptar("error", consolaOriginal.error);
+  alvo.log = interceptar("info", consolaOriginal.log, stdout);
+  alvo.info = interceptar("info", consolaOriginal.info, stdout);
+  alvo.warn = interceptar("warn", consolaOriginal.warn, stderr);
+  alvo.error = interceptar("error", consolaOriginal.error, stderr);
 
   return () => {
     if (!consolaOriginal) return;
@@ -265,6 +288,8 @@ export function patchConsole(alvo: {
     alvo.info = consolaOriginal.info;
     alvo.warn = consolaOriginal.warn;
     alvo.error = consolaOriginal.error;
+    stdout.restaurar();
+    stderr.restaurar();
     consolaOriginal = null;
   };
 }
