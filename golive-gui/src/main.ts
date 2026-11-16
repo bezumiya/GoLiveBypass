@@ -206,6 +206,7 @@ declare global {
       }>;
       setProtonSettings: (settings: any) => Promise<boolean>;
       onProtonFailoverNotice?: (callback: (notice: { message: string }) => void) => unknown;
+      onProtonRouteChanged?: (callback: () => void) => unknown;
     }
   }
 }
@@ -2323,6 +2324,12 @@ updateChannelToggle?.addEventListener('change', async () => {
 window.api.onRefreshAutoUpdate?.(refreshAutoUpdate);
 window.api.onProtonFailoverNotice?.((notice) => {
   if (notice?.message) setProtonFeedback(notice.message, 'err');
+});
+// A troca automatica de rota deu certo: o cartao recarrega a rota em uso, e a mensagem da rota
+// anterior ("Rota X selecionada!") deixa de valer.
+window.api.onProtonRouteChanged?.(() => {
+  setProtonFeedback('');
+  void refreshProtonState();
 });
 
 // ---------------------------------------------------------------------------

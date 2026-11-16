@@ -25,6 +25,8 @@ export interface FailoverHealthSample {
   trafficIncreasing?: boolean;
   /** A Linux status error naming a missing namespace/interface is evidence of failure. */
   statsFailureEvidence?: boolean;
+  /** Windows: the wiresock-client log shows the latest handshake attempts went unanswered. */
+  wireSockHandshakeUnanswered?: boolean;
 }
 
 // PersistentKeepalive=10 in profiles generated for the managed Proton path gives us a
@@ -56,8 +58,10 @@ export function classifyFailoverHealth(
 
   // A missing wg.exe, or an unprivileged diagnostic read, is not enough evidence
   // to switch a live route. Linux callers can explicitly mark a missing namespace
-  // or interface as evidence; Windows falls back to CLI/adapter observations.
-  if (sample.statsFailureEvidence) return "failed";
+  // or interface as evidence. On Windows the WireSock log is that evidence: with the
+  // usual direct mode there is neither wg.exe nor a status CLI, and a "connected"
+  // CLI or a traffic sample must not hide a server that stopped answering handshakes.
+  if (sample.statsFailureEvidence || sample.wireSockHandshakeUnanswered) return "failed";
   if (sample.wireSock?.state === "connected") return "healthy";
   if (sample.trafficIncreasing) return "healthy";
   return "unknown";

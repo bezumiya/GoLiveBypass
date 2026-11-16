@@ -32,6 +32,8 @@ export interface WireSockLogSummary {
   handshakesRespondidos: number;
   /** Handshakes enviados ha mais de alguns segundos que nao tiveram resposta na janela. */
   semResposta: number;
+  /** Handshakes enviados depois da ultima resposta (e ha mais de alguns segundos); zera a cada resposta. */
+  semRespostaSeguidos: number;
   keepaliveOk: number;
   keepaliveFalhas: number;
   /** Maior espaco entre keepalives (e entre o ultimo e agora); null sem keepalive na janela. */
@@ -120,6 +122,7 @@ export function resumirLogWireSock(
     handshakesEnviados: 0,
     handshakesRespondidos: 0,
     semResposta: 0,
+    semRespostaSeguidos: 0,
     keepaliveOk: 0,
     keepaliveFalhas: 0,
     keepaliveMaiorIntervaloS: null,
@@ -138,6 +141,7 @@ export function resumirLogWireSock(
   let avisos = 0;
   let ultimoAviso: string | undefined;
   const keepalives: number[] = [];
+  const envios: number[] = [];
 
   // O comeco do arquivo so serve para achar "Tunnel has started" numa sessao longa; contar as
   // suas linhas aqui duplicaria as do trecho recente quando os dois se sobrepoem.
@@ -163,6 +167,7 @@ export function resumirLogWireSock(
       continue;
     }
     if (RE_ENVIO.test(msg)) {
+      envios.push(quando);
       if (quando >= limiteJanela) {
         enviados++;
         if (quando <= limitePendente) enviadosAntigos++;
@@ -193,6 +198,11 @@ export function resumirLogWireSock(
     maiorIntervaloMs = Math.max(maiorIntervaloMs ?? 0, agoraMs - keepalives[keepalives.length - 1]);
   }
   const idadeS = (ms: number | null) => (ms === null ? null : Math.max(0, Math.round((agoraMs - ms) / 1000)));
+  // Ao contrario do semResposta (janela de 10 min, diagnostico), so conta o que veio depois da
+  // ultima resposta: um servidor que voltou a responder deixa de parecer mudo na hora.
+  const semRespostaSeguidos = envios
+    .filter((quando) => (ultimaRespostaMs === null || quando > ultimaRespostaMs) && quando <= limitePendente)
+    .length;
 
   return {
     ok: true,
@@ -203,6 +213,7 @@ export function resumirLogWireSock(
     handshakesEnviados: enviados,
     handshakesRespondidos: respondidos,
     semResposta: Math.max(0, enviadosAntigos - respondidos),
+    semRespostaSeguidos,
     keepaliveOk: keepalives.length,
     keepaliveFalhas,
     keepaliveMaiorIntervaloS: maiorIntervaloMs === null ? null : Math.round(maiorIntervaloMs / 1000),
@@ -241,6 +252,30 @@ export function lerResumoLogWireSock(caminho: string, agoraMs = Date.now()): Wir
       try { fs.closeSync(fd); } catch { /* nada a fazer */ }
     }
   }
+}
+
+// O WireGuard repete o handshake a cada 5 s sem resposta: 6 tentativas sao cerca de 30 s com o
+// servidor mudo. Menos que isso pegaria um soluco da rede e trocaria uma rota que funciona.
+export const FAILOVER_HANDSHAKES_SEM_RESPOSTA = 6;
+
+/**
+ * O servidor da rota parou de responder? Evidencia para a troca automatica de rota no Windows,
+ * onde o normal e nao ter wg.exe nem CLI de status: o log esta vivo e as ultimas tentativas de
+ * handshake ficaram todas sem resposta.
+ */
+export function servidorSemResposta(r: WireSockLogSummary): boolean {
+  return r.ok && r.ultimaLinhaHaS !== null && r.ultimaLinhaHaS <= WIRESOCK_LOG_PARADO_S &&
+    r.semRespostaSeguidos >= FAILOVER_HANDSHAKES_SEM_RESPOSTA;
+}
+
+/**
+ * O servidor respondeu ao handshake depois que o tunel atual comecou? Prova de rota viva sem
+ * wg.exe nem CLI. Vale a ultima linha "Tunnel has started" do log, e a troca de rota abre um log
+ * novo: uma resposta da sessao anterior nao conta. Sem a linha de inicio, nao ha prova.
+ */
+export function respostaNaSessaoAtual(r: WireSockLogSummary): boolean {
+  return r.ok && r.handshakeRespostaHaS !== null && r.tunelAtivoHaS !== null &&
+    r.handshakeRespostaHaS <= r.tunelAtivoHaS;
 }
 
 /** Decide o que registrar. So um evento por leitura, do mais grave ao menos grave. */

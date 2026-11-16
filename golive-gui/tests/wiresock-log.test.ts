@@ -5,10 +5,13 @@ import path from "path";
 
 import {
   avaliarSaudeWireSock,
+  FAILOVER_HANDSHAKES_SEM_RESPOSTA,
   ipv6NoPerfil,
   lerResumoLogWireSock,
   metaDoLogWireSock,
+  respostaNaSessaoAtual,
   resumirLogWireSock,
+  servidorSemResposta,
 } from "../electron/wiresock-log";
 
 // Horario fixo e o log no formato real do wiresock-client 3.4.8:
@@ -253,6 +256,81 @@ describe("metaDoLogWireSock (campos do relatorio)", () => {
     fs.writeFileSync(arquivo, [linha(20_000, "[TUN]: send failed", "error"), linha(10_000, KEEPALIVE)].join("\n") + "\n");
     const meta = metaDoLogWireSock(arquivo, true, AGORA);
     expect(meta.wiresock_avisos).toBe("1");
+  });
+});
+
+describe("evidencia para a troca automatica de rota (#411)", () => {
+  // Ordem real do wiresock-client: o handshake forcado vem antes de "Tunnel has started".
+  const FORCADO = "[TUN]: force_handshake: Handshake initiation sent to WireGuard server";
+
+  it("servidor mudo desde o inicio: todas as tentativas contam", () => {
+    const linhas = [linha(60_000, FORCADO), linha(60_000, INICIO)];
+    for (let s = 55; s >= 5; s -= 5) linhas.push(linha(s * 1000, ENVIO));
+    const r = resumirLogWireSock(linhas.join("\n"), AGORA);
+    expect(r.semRespostaSeguidos).toBe(12);
+    expect(servidorSemResposta(r)).toBe(true);
+    expect(respostaNaSessaoAtual(r)).toBe(false);
+  });
+
+  it("uma resposta zera a contagem; so contam as tentativas depois dela", () => {
+    const linhas = [
+      linha(120_000, INICIO), linha(120_000, RESPOSTA),
+      linha(40_000, ENVIO), linha(35_000, ENVIO), linha(30_000, ENVIO),
+      linha(25_000, RESPOSTA),
+      linha(20_000, ENVIO), linha(15_000, ENVIO), linha(10_000, ENVIO), linha(3_000, ENVIO),
+    ];
+    const r = resumirLogWireSock(linhas.join("\n"), AGORA);
+    expect(r.semRespostaSeguidos).toBe(3); // a de 3 s ainda pode estar esperando a resposta
+    expect(servidorSemResposta(r)).toBe(false);
+    expect(respostaNaSessaoAtual(r)).toBe(true);
+  });
+
+  it("tunel saudavel, com troca de chave a cada 2 min, nunca acumula tentativas", () => {
+    const r = resumirLogWireSock([linha(600_000, INICIO), ...logSaudavel()].join("\n"), AGORA);
+    expect(r.semRespostaSeguidos).toBe(0);
+    expect(servidorSemResposta(r)).toBe(false);
+    expect(respostaNaSessaoAtual(r)).toBe(true);
+  });
+
+  it("queda que ja passou: a contagem da troca zera, o diagnostico de 10 min continua acusando", () => {
+    const linhas = [linha(300_000, INICIO), linha(300_000, RESPOSTA)];
+    for (let s = 240; s >= 180; s -= 5) linhas.push(linha(s * 1000, ENVIO));
+    linhas.push(linha(175_000, RESPOSTA), linha(60_000, ENVIO), linha(60_000, RESPOSTA), linha(5_000, KEEPALIVE));
+    const r = resumirLogWireSock(linhas.join("\n"), AGORA);
+    expect(r.semResposta).toBeGreaterThan(0);
+    expect(avaliarSaudeWireSock(r).evento).toBe("handshake.sem_resposta");
+    expect(r.semRespostaSeguidos).toBe(0);
+    expect(servidorSemResposta(r)).toBe(false);
+  });
+
+  it("o limite da troca e de 6 tentativas seguidas sem resposta", () => {
+    const comTentativas = (n: number) => {
+      const linhas = [linha(300_000, INICIO), linha(300_000, RESPOSTA)];
+      for (let i = n; i >= 1; i--) linhas.push(linha((5 + i * 5) * 1000, ENVIO));
+      linhas.push(linha(2_000, KEEPALIVE));
+      return resumirLogWireSock(linhas.join("\n"), AGORA);
+    };
+    expect(FAILOVER_HANDSHAKES_SEM_RESPOSTA).toBe(6);
+    expect(comTentativas(5).semRespostaSeguidos).toBe(5);
+    expect(servidorSemResposta(comTentativas(5))).toBe(false);
+    expect(servidorSemResposta(comTentativas(6))).toBe(true);
+  });
+
+  it("log parado ou ilegivel nao prova servidor mudo", () => {
+    const parado = [linha(400_000, INICIO)];
+    for (let s = 390; s >= 100; s -= 5) parado.push(linha(s * 1000, ENVIO));
+    const r = resumirLogWireSock(parado.join("\n"), AGORA);
+    expect(r.semRespostaSeguidos).toBeGreaterThanOrEqual(FAILOVER_HANDSHAKES_SEM_RESPOSTA);
+    expect(servidorSemResposta(r)).toBe(false);
+    expect(servidorSemResposta(resumirLogWireSock("", AGORA))).toBe(false);
+  });
+
+  it("resposta so prova a rota se veio depois do inicio do tunel atual", () => {
+    const real = [linha(30_000, FORCADO), linha(30_000, INICIO), linha(30_000, RESPOSTA), linha(5_000, KEEPALIVE)];
+    expect(respostaNaSessaoAtual(resumirLogWireSock(real.join("\n"), AGORA))).toBe(true);
+    const daSessaoAnterior = [linha(200_000, INICIO), linha(200_000, RESPOSTA), linha(30_000, INICIO), linha(25_000, ENVIO), linha(20_000, ENVIO)];
+    expect(respostaNaSessaoAtual(resumirLogWireSock(daSessaoAnterior.join("\n"), AGORA))).toBe(false);
+    expect(respostaNaSessaoAtual(resumirLogWireSock(linha(10_000, RESPOSTA), AGORA))).toBe(false);
   });
 });
 
