@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.17-beta-3] - 2026-11-16
+
 ### Corrigido
 
 - **Windows: a troca automática de rota passa a reagir a servidor que não responde (#411).** No #411 o servidor da rota respondeu só 2 de 22 handshakes em 4 minutos, o Discord ficou preso em "checking for updates" e a troca automática não fez nada. Na instalação comum (WireSock em modo direto, sem `wg.exe` nem CLI de status), ela não tinha como ver a rota morta: toda amostra saía "indeterminada", e a troca só acontecia se o processo do WireSock morresse. E mesmo que disparasse, a reserva só era aceita com o handshake "verificado", o que nessa instalação nunca acontecia, então todas seriam recusadas. Agora as duas pontas leem o log do próprio `wiresock-client`, que a GUI já lia para o diagnóstico:
