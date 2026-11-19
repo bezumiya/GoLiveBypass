@@ -1,9 +1,14 @@
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import {
   formatProtonRoutePing,
   isProtonRouteSelectable,
   mergeProtonRouteCatalog,
+  PROTON_APP_VERSION_UNSUPPORTED_MESSAGE,
   protonLoginPresentation,
   protonRouteStateLabel,
   recommendProtonRoute,
@@ -199,5 +204,75 @@ describe("apresentação compartilhada dos erros de login", () => {
     expect(rejection).toEqual(canonicalRejection);
     expect(protonLoginPresentation({ code: "UNKNOWN", error: "rejeição desconhecida\ndo Proton" }).message).toBe("rejeição desconhecida do Proton");
     expect(protonLoginPresentation({ code: "CONFIGURATION_ERROR", error: "configuração inválida" }).message).toBe("configuração inválida");
+  });
+
+  it("versão recusada pela Proton pede atualização, sem culpar nem focar a senha", () => {
+    const outdated = protonLoginPresentation({
+      code: "APP_VERSION_UNSUPPORTED",
+      error: "authentication failed: failed to get auth info: authentication failed with code: 5003",
+    });
+    expect(outdated).toEqual({
+      message: "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.",
+      focusPassword: false,
+    });
+    expect(outdated.message).not.toBe(protonLoginPresentation({ code: "INVALID_CREDENTIALS" }).message);
+  });
+});
+
+type SessionCheck = { valid: boolean; code?: string; error?: string };
+
+// index.tsx importa Vencord e não roda fora do Discord: as funções puras do status
+// da sessão são carregadas por AST, como controllerSettings() em plugin-proton-runtime.
+function sessionStatusFunctions() {
+  const source = fs.readFileSync(path.resolve(process.cwd(), "../goLiveBypass/index.tsx"), "utf8");
+  const parsed = ts.createSourceFile("index.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const names = new Set(["protonSessionStatusTitle", "protonSessionStatusDetail", "protonMissingPasswordMessage"]);
+  const functions = parsed.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""));
+  const code = ts.transpileModule(`${functions.map(node => node.getText(parsed)).join("\n")}
+exports.title = protonSessionStatusTitle;
+exports.detail = protonSessionStatusDetail;
+exports.missingPassword = protonMissingPasswordMessage;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const exports: Record<string, any> = {};
+  vm.runInNewContext(code, { exports, PROTON_APP_VERSION_UNSUPPORTED_MESSAGE });
+  return {
+    source,
+    found: functions.length,
+    title: exports.title as (code?: string) => string,
+    detail: exports.detail as (session: SessionCheck) => string,
+    missingPassword: exports.missingPassword as (session: SessionCheck | null) => string,
+  };
+}
+
+describe("status da sessão Proton no painel do plugin", () => {
+  const VERSAO_RECUSADA = "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.";
+  const recusada: SessionCheck = { valid: false, code: "APP_VERSION_UNSUPPORTED", error: VERSAO_RECUSADA };
+
+  it("versão recusada mostra só a mensagem de atualização, sem título genérico nem pedido de senha", () => {
+    const { found, title, detail, missingPassword } = sessionStatusFunctions();
+    expect(found).toBe(3);
+    expect(PROTON_APP_VERSION_UNSUPPORTED_MESSAGE).toBe(VERSAO_RECUSADA);
+    expect(`${title(recusada.code)}${detail(recusada)}`).toBe(VERSAO_RECUSADA);
+    expect(missingPassword(recusada)).toBe(VERSAO_RECUSADA);
+  });
+
+  it("os outros motivos continuam com título, detalhe e pedido de senha como antes", () => {
+    const { title, detail, missingPassword } = sessionStatusFunctions();
+    const semRede: SessionCheck = { valid: false, code: "NETWORK_ERROR", error: "Sem rede." };
+    expect(`${title(semRede.code)}${detail(semRede)}`).toBe("Rede indisponível para verificar a sessão · Sem rede.");
+    expect(title("UNKNOWN")).toBe("Não foi possível verificar a sessão");
+    expect(missingPassword(semRede)).toBe("Sem rede. Informe a senha para entrar novamente.");
+    expect(missingPassword({ valid: false, code: "INVALID_SESSION", error: "Sessão Proton não encontrada." }))
+      .toBe("Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
+    expect(missingPassword(null)).toBe("Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
+  });
+
+  it("as três telas do status e o continuar sem senha usam essas funções", () => {
+    const { source } = sessionStatusFunctions();
+    expect(source.match(/\{protonSessionStatusTitle\(session\.code\)\}<\/strong>\{protonSessionStatusDetail\(session\)\}/g)).toHaveLength(2);
+    expect(source).toContain("`${protonSessionStatusTitle(session.code)}${protonSessionStatusDetail(session)}`");
+    expect(source).toContain("setError(protonMissingPasswordMessage(session));");
+    expect(source).not.toMatch(/session\.error \? ` · \$\{session\.error\}`/);
   });
 });

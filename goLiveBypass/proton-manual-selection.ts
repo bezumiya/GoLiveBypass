@@ -323,6 +323,7 @@ export type ProtonLoginPresentationCode =
     | "SESSION_PERSISTENCE"
     | "HELPER_ERROR"
     | "CONFIGURATION_ERROR"
+    | "APP_VERSION_UNSUPPORTED"
     | "UNKNOWN";
 
 export interface ProtonLoginPresentation {
@@ -330,6 +331,12 @@ export interface ProtonLoginPresentation {
     /** Só a credencial explicitamente rejeitada devolve o foco ao campo de senha. */
     focusPassword: boolean;
 }
+
+/**
+ * A Proton recusou a versão do app (código 5003): nem a senha nem uma nova
+ * tentativa resolvem. Mesma frase no login e no status da sessão guardada.
+ */
+export const PROTON_APP_VERSION_UNSUPPORTED_MESSAGE = "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.";
 
 const PROTON_LOGIN_MESSAGES: Record<ProtonLoginPresentationCode, string> = {
     INVALID_CREDENTIALS: "Usuário ou senha incorretos. Confira os dados e tente novamente.",
@@ -345,6 +352,7 @@ const PROTON_LOGIN_MESSAGES: Record<ProtonLoginPresentationCode, string> = {
     SESSION_PERSISTENCE: "O login foi processado, mas o plugin não conseguiu acessar o armazenamento seguro da sessão.",
     HELPER_ERROR: "O componente ProtonVPN falhou antes de concluir o login. Reinicie o Discord e tente novamente.",
     CONFIGURATION_ERROR: "A configuração do plugin está incompleta ou em estado incompatível.",
+    APP_VERSION_UNSUPPORTED: PROTON_APP_VERSION_UNSUPPORTED_MESSAGE,
     UNKNOWN: "O Proton recusou ou não concluiu o login por um motivo não reconhecido.",
 };
 

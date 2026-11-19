@@ -56,8 +56,10 @@ vi.mock("child_process", () => ({
   }),
 }));
 
+import { protonLoginPresentation } from "../../goLiveBypass/proton-manual-selection";
 import {
   automaticExcludedCountries,
+  checkProtonSession,
   classifyProtonError,
   generateManualProtonConfig,
   generateOptimalProtonConfig,
@@ -116,6 +118,8 @@ const PROFILE_CONTENT = "# - Name: US#8\nEndpoint = 192.0.2.8:51820\n";
 /** Texto claro da sessão: nunca pode aparecer em resultado, erro ou log. */
 const SESSION_PLAINTEXT = '{"UID":"uid-de-teste","AccessToken":"token-de-teste"}';
 const PREVIOUS_PROFILE = "perfil anterior preservado\n";
+/** O que o usuário lê quando a Proton recusa a versão do app (código 5003). */
+const VERSAO_RECUSADA = "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.";
 
 // O plugin injeta o armazenamento seguro do Electron neste global quando ele
 // existe; aqui a substituição prova que a sessão cifrada é aberta por operação.
@@ -483,6 +487,68 @@ describe("rota manual do plugin", () => {
   });
 });
 
+describe("versão do app recusada nas operações de rota do plugin", () => {
+  const RECUSA_NOVA = { success: false, error: "failed to load servers: Proton no longer accepts this app version (code 5003); update GoLiveBypass", code: "APP_VERSION_UNSUPPORTED", retryable: false };
+
+  it("catálogo troca o texto cru pela mensagem de atualização, com código ou só com o texto antigo", async () => {
+    const dir = dataDirWithSession();
+    state.code = 1;
+    state.json = RECUSA_NOVA;
+    expect(await generateProtonRouteCatalog(dir, { username: "conta" })).toEqual({ success: false, error: VERSAO_RECUSADA });
+
+    state.json = { success: false, error: "failed to get logicals: authentication failed with code: 5003" };
+    expect(await generateProtonRouteCatalog(dir, { username: "conta" })).toEqual({ success: false, error: VERSAO_RECUSADA });
+
+    state.json = undefined;
+    state.stderr = ["Error: API error 422: This version of the app is no longer supported\n"];
+    expect(await generateProtonRouteCatalog(dir, { username: "conta" })).toEqual({ success: false, error: VERSAO_RECUSADA });
+  });
+
+  it("otimização devolve a mensagem de atualização, sem sonda estendida e sem tocar no perfil", async () => {
+    const dir = dataDirWithSession();
+    const output = path.join(dir, "wireguard.conf");
+    fs.writeFileSync(output, PREVIOUS_PROFILE);
+    state.code = 1;
+    state.json = RECUSA_NOVA;
+    expect(await generateOptimalProtonConfig(dir, { username: "conta" })).toEqual({ success: false, error: VERSAO_RECUSADA });
+
+    state.json = { success: false, error: "failed to get logicals: authentication failed with code: 5003" };
+    state.stderr = ['GOLIVE_PROGRESS {"phase":"preparing","total":12,"tested":1,"succeeded":0,"server":"US-FREE#56","status":"failed"}\n'];
+    state.calls = [];
+    expect(await generateOptimalProtonConfig(dir, { username: "conta", speedTest: true })).toEqual({ success: false, error: VERSAO_RECUSADA });
+    expect(state.calls).toHaveLength(1);
+    expect(fs.readFileSync(output, "utf8")).toBe(PREVIOUS_PROFILE);
+  });
+
+  it("rota manual devolve a mensagem de atualização e preserva o perfil anterior", async () => {
+    const dir = dataDirWithSession();
+    const output = path.join(dir, "wireguard.conf");
+    fs.writeFileSync(output, PREVIOUS_PROFILE);
+    state.code = 1;
+    state.json = RECUSA_NOVA;
+
+    expect(await generateManualProtonConfig(dir, { username: "conta", server: "US#8" })).toEqual({ success: false, error: VERSAO_RECUSADA });
+    expect(fs.readFileSync(output, "utf8")).toBe(PREVIOUS_PROFILE);
+    expect(fs.readdirSync(dir).filter(name => name.startsWith(".wireguard.conf."))).toEqual([]);
+  });
+
+  it("outros erros do helper continuam como vieram", async () => {
+    const dir = dataDirWithSession();
+    state.code = 1;
+    state.json = { success: false, error: "dial tcp: lookup vpn-api.proton.me: no such host", code: "NETWORK_ERROR", retryable: true };
+    expect(await generateProtonRouteCatalog(dir, { username: "conta" }))
+      .toEqual({ success: false, error: "dial tcp: lookup vpn-api.proton.me: no such host" });
+
+    state.json = { success: false, error: "manual route preflight failed: dial tcp4 192.0.2.8:443: i/o timeout" };
+    expect(await generateManualProtonConfig(dir, { username: "conta", server: "US#8" }))
+      .toEqual({ success: false, error: "manual route preflight failed: dial tcp4 192.0.2.8:443: i/o timeout" });
+
+    state.json = { success: false, error: "authentication failed: Proton session verification returned an invalid HTTP status (200)" };
+    expect(await generateOptimalProtonConfig(dir, { username: "conta" }))
+      .toEqual({ success: false, error: "authentication failed: Proton session verification returned an invalid HTTP status (200)" });
+  });
+});
+
 describe("classificação dos erros de login do plugin", () => {
   it("não acusa senha incorreta pelo prefixo genérico do helper", () => {
     expect(classifyProtonError("authentication failed: protocol error").code).not.toBe("INVALID_CREDENTIALS");
@@ -514,6 +580,21 @@ describe("classificação dos erros de login do plugin", () => {
     expect(classifyProtonError("Cannot write session file: permission denied").code).toBe("SESSION_PERSISTENCE");
     expect(classifyProtonError("connection reset by peer").code).toBe("NETWORK_ERROR");
     expect(classifyProtonError("9100").code).toBe("TWO_FACTOR_REQUIRED");
+  });
+
+  it("separa a versão do app recusada pela Proton (5003) da senha incorreta", () => {
+    expect(classifyProtonError("APP_VERSION_UNSUPPORTED")).toEqual({ code: "APP_VERSION_UNSUPPORTED", message: VERSAO_RECUSADA, retryable: false });
+    // Helper antigo: só o texto, que começa com o prefixo genérico "authentication failed".
+    expect(classifyProtonError("authentication failed: failed to get auth info: authentication failed with code: 5003"))
+      .toEqual({ code: "APP_VERSION_UNSUPPORTED", message: VERSAO_RECUSADA, retryable: false });
+    expect(classifyProtonError("This version of the app is no longer supported").code).toBe("APP_VERSION_UNSUPPORTED");
+    expect(classifyProtonError("Proton no longer accepts this app version (code 5003); update GoLiveBypass").code).toBe("APP_VERSION_UNSUPPORTED");
+    expect(classifyProtonError("authentication failed with code: 5001").code).toBe("APP_VERSION_UNSUPPORTED");
+    expect(classifyProtonError("authentication failed with code: 5005").code).toBe("APP_VERSION_UNSUPPORTED");
+    // Outros códigos não viram versão recusada, e senha errada continua senha errada.
+    expect(classifyProtonError("authentication failed with code: 50031").code).toBe("UNKNOWN");
+    expect(classifyProtonError("authentication failed with code: 5002").code).toBe("UNKNOWN");
+    expect(classifyProtonError("authentication failed: incorrect username or password").code).toBe("INVALID_CREDENTIALS");
   });
 });
 
@@ -572,5 +653,69 @@ describe("login Proton através do helper", () => {
     state.json = { success: false, error: "authentication failed: two factor required", code: "TWO_FACTOR_REQUIRED", retryable: false };
     const twoFactor = await loginProton(dir, "conta", "senha");
     expect(twoFactor).toMatchObject({ success: false, code: "TWO_FACTOR_REQUIRED" });
+  });
+
+  it("pede atualização quando o helper responde APP_VERSION_UNSUPPORTED", async () => {
+    const dir = temporaryRoot("golive-plugin-login-version-");
+    state.code = 1;
+    state.json = {
+      success: false,
+      error: "authentication failed: failed to get auth info: Proton no longer accepts this app version (code 5003); update GoLiveBypass",
+      code: "APP_VERSION_UNSUPPORTED",
+      retryable: false,
+    };
+
+    const result = await loginProton(dir, "conta", "senha");
+
+    expect(result).toMatchObject({ success: false, code: "APP_VERSION_UNSUPPORTED", message: VERSAO_RECUSADA, error: VERSAO_RECUSADA, retryable: false });
+    expect(protonLoginPresentation(result)).toEqual({ message: VERSAO_RECUSADA, focusPassword: false });
+  });
+
+  it("reconhece o texto 5003 do helper antigo, que não traz código estruturado", async () => {
+    const dir = temporaryRoot("golive-plugin-login-version-old-");
+    state.code = 1;
+    state.json = { success: false, error: "authentication failed: failed to get auth info: authentication failed with code: 5003" };
+
+    const result = await loginProton(dir, "conta", "senha");
+
+    expect(result).toMatchObject({ success: false, code: "APP_VERSION_UNSUPPORTED", message: VERSAO_RECUSADA, retryable: false });
+    expect(protonLoginPresentation(result)).toEqual({ message: VERSAO_RECUSADA, focusPassword: false });
+  });
+});
+
+describe("verificação da sessão Proton do plugin", () => {
+  it("versão recusada não invalida a sessão guardada", async () => {
+    const dir = dataDirWithSession();
+    state.code = 0;
+    state.json = { success: false, valid: false, error: "A Proton não aceita mais esta versão do GoLiveBypass", code: "APP_VERSION_UNSUPPORTED", retryable: true };
+
+    const result = await checkProtonSession(dir, "conta");
+
+    expect(result).toEqual({ valid: false, code: "APP_VERSION_UNSUPPORTED", error: VERSAO_RECUSADA });
+    expect(state.args).toContain("-check-session");
+    expect(fs.existsSync(path.join(dir, "proton-session.json"))).toBe(true);
+  });
+
+  it("o texto 5003 do helper antigo não vira sessão inválida", async () => {
+    const dir = dataDirWithSession();
+    state.code = 1;
+    state.json = undefined;
+    state.stderr = ["Error: authentication failed: failed to get auth info: authentication failed with code: 5003\n"];
+
+    const result = await checkProtonSession(dir, "conta");
+
+    expect(result).toMatchObject({ valid: false, code: "APP_VERSION_UNSUPPORTED", error: VERSAO_RECUSADA });
+    expect(fs.existsSync(path.join(dir, "proton-session.json"))).toBe(true);
+  });
+
+  it("sessão de fato rejeitada continua INVALID_SESSION", async () => {
+    const dir = dataDirWithSession();
+    state.code = 1;
+    state.json = undefined;
+    state.stderr = ["Error: session refresh failed: invalid refresh token\n"];
+
+    const result = await checkProtonSession(dir, "conta");
+
+    expect(result).toMatchObject({ valid: false, code: "INVALID_SESSION" });
   });
 });

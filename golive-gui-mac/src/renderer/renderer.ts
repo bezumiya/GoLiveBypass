@@ -276,6 +276,7 @@ function describeChosen(c: Route | undefined, prefix: string): string {
 
 const errMsgs: Record<string, string> = {
   auth_failed:    'Usuário ou senha incorretos.',
+  app_outdated:   'A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.',
   no_servers:     'Nenhum servidor free disponível agora.',
   busy:           'Já existe uma busca em andamento.',
   binary_missing: 'proton-confgen não encontrado nos recursos.',
@@ -582,6 +583,7 @@ const phoneErrMsgs: Record<string, string> = {
   no_routes:    'Nenhum servidor respondeu ao ping agora. Tente de novo em instantes.',
   probe_failed: 'O servidor escolhido não passou no teste. Tente gerar de novo.',
   auth_failed:  'A sessão Proton expirou. Entre de novo em Proton Otimizado.',
+  app_outdated: errMsgs.app_outdated,
   timeout:      errMsgs.timeout,
   invalid_conf: 'A conf gerada veio incompleta. Tente de novo.',
   unknown:      'Não deu para gerar a conf. Tente de novo.',

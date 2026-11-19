@@ -29,9 +29,10 @@ export type ProtonLoginErrorCode =
     | "SESSION_PERSISTENCE"
     | "HELPER_ERROR"
     | "CONFIGURATION_ERROR"
+    | "APP_VERSION_UNSUPPORTED"
     | "UNKNOWN";
 
-export type ProtonSessionCheckCode = "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "SESSION_PERSISTENCE" | "UNKNOWN";
+export type ProtonSessionCheckCode = "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "SESSION_PERSISTENCE" | "APP_VERSION_UNSUPPORTED" | "UNKNOWN";
 
 export interface ProtonSessionCheckResult {
     valid: boolean;
@@ -154,6 +155,11 @@ const ACCOUNT_MISMATCH_ERROR = "A resposta do Proton não corresponde ao usuári
 const LOGIN_CANCELLED_ERROR = "O login Proton foi cancelado.";
 const HELPER_ERROR_MESSAGE = "O componente ProtonVPN falhou antes de concluir o login. Reinicie o Discord e tente novamente.";
 const MISSING_EXECUTABLE_MESSAGE = "O componente ProtonVPN não foi encontrado nesta instalação.";
+// A Proton recusa o identificador de cliente desatualizado (HTTP 422, código 5003). O helper novo
+// responde APP_VERSION_UNSUPPORTED; o antigo só o texto "authentication failed with code: 5003".
+// Não é senha nem sessão: só atualizar o GoLiveBypass resolve.
+const APP_VERSION_UNSUPPORTED_MESSAGE = "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.";
+const APP_VERSION_UNSUPPORTED_RE = /app_version_unsupported|with code: 50(01|03|05)\b|no longer (supported|accepts)/i;
 const INVALID_CATALOG_ERROR = "O catálogo de rotas ProtonVPN retornou dados inválidos.";
 const EMPTY_CATALOG_ERROR = "Nenhuma rota ProtonVPN está disponível para esta conta.";
 const MANUAL_ROUTE_FAILURE_ERROR = "Não foi possível validar a rota ProtonVPN selecionada.";
@@ -716,6 +722,9 @@ export function classifyProtonError(error: unknown, stderr = "", stdout = ""): {
     const structured = classifyStructuredProtonCode(error);
     if (structured) return structured;
     const raw = `${error instanceof Error ? error.message : String(error)} ${stderr} ${stdout}`.toLowerCase();
+    // Antes dos padrões genéricos: o texto do helper antigo começa com
+    // "authentication failed" e não pode virar credencial nem erro desconhecido.
+    if (APP_VERSION_UNSUPPORTED_RE.test(raw)) return { code: "APP_VERSION_UNSUPPORTED", message: APP_VERSION_UNSUPPORTED_MESSAGE, retryable: false };
     if (/captcha[_\s-]*(?:cancelled|canceled)|human verification.*cancel/.test(raw)) return { code: "CAPTCHA_CANCELLED", message: "A verificação Proton foi cancelada.", retryable: true };
     if (/captcha_invalid|captcha.*expired|human verification.*(invalid|expired)/.test(raw)) return { code: "CAPTCHA_INVALID", message: "A verificação de segurança expirou ou foi recusada.", retryable: true };
     if (/captcha_required|captcha verification required|human verification required|code 9001/.test(raw)) return { code: "CAPTCHA_REQUIRED", message: "O Proton solicitou uma verificação de segurança.", retryable: true };
@@ -753,9 +762,23 @@ function classifyStructuredProtonCode(value: unknown): { code: ProtonLoginErrorC
         case "SESSION_PERSISTENCE": return { code: "SESSION_PERSISTENCE", message: "Não foi possível acessar o armazenamento local da sessão Proton.", retryable: true };
         case "HELPER_ERROR": return { code: "HELPER_ERROR", message: HELPER_ERROR_MESSAGE, retryable: true };
         case "CONFIGURATION_ERROR": return { code: "CONFIGURATION_ERROR", message: "A configuração da conta Proton está incompleta.", retryable: false };
+        case "APP_VERSION_UNSUPPORTED": return { code: "APP_VERSION_UNSUPPORTED", message: APP_VERSION_UNSUPPORTED_MESSAGE, retryable: false };
         case "UNKNOWN": return { code: "UNKNOWN", message: "Não foi possível concluir a operação ProtonVPN.", retryable: true };
         default: return null;
     }
+}
+
+/**
+ * Otimização, catálogo e rota manual mostram o erro cru do helper. Só a versão
+ * recusada pela Proton vira a mensagem em português: pelo código do helper novo
+ * ou, sem código, pelo texto 5003 do antigo. Qualquer outro erro segue como está.
+ */
+function appVersionRejection(result: ConfgenResult): string | null {
+    const structured = classifyStructuredProtonCode(result.json?.code);
+    if (structured) return structured.code === "APP_VERSION_UNSUPPORTED" ? structured.message : null;
+    const detail = [result.json?.error, result.stderr, result.stdout].filter(value => typeof value === "string" && value.length > 0).join(" ");
+    const classified = classifyProtonError(detail);
+    return classified.code === "APP_VERSION_UNSUPPORTED" ? classified.message : null;
 }
 
 export function protonSessionFile(dataDir: string): string {
@@ -1147,8 +1170,12 @@ function deleteSessionArtifacts(dataDir: string): boolean {
     } catch { return false; }
 }
 
-function sessionCheckFailure(rawValue: unknown): { code: ProtonSessionCheckCode; error: string } {
+function sessionCheckFailure(rawValue: unknown, structuredCode?: unknown): { code: ProtonSessionCheckCode; error: string } {
     const raw = safeDiagnosticDetail(rawValue, 600).toLowerCase();
+    // A versão recusada não invalida a sessão guardada: ela volta a servir depois
+    // da atualização. Vem antes do padrão "authentication" de INVALID_SESSION.
+    if (classifyStructuredProtonCode(structuredCode)?.code === "APP_VERSION_UNSUPPORTED" || APP_VERSION_UNSUPPORTED_RE.test(raw))
+        return { code: "APP_VERSION_UNSUPPORTED", error: APP_VERSION_UNSUPPORTED_MESSAGE };
     if (/timeout|tempo limite|timed out/.test(raw)) return { code: "TIMEOUT", error: "A verificação da sessão Proton demorou demais." };
     if (/not found|enoent|spawn|não foi encontrado/.test(raw)) return { code: "MISSING_EXECUTABLE", error: "O componente ProtonVPN não foi encontrado nesta instalação." };
     if (/secret[\s_-]*service|libsecret|safestorage|eacces|eperm|eexist|enotdir|not a directory|permission denied|access denied|read[- ]only|no space left|disk full|session.{0,80}(?:save|write|persistence|protect|decrypt|migrat|remove|delete)|(?:save|write|protect|decrypt|migrat|remove|delete).{0,80}session/.test(raw)) return { code: "SESSION_PERSISTENCE", error: "Não foi possível acessar o armazenamento local da sessão Proton." };
@@ -1229,7 +1256,7 @@ export async function checkProtonSession(dataDir: string, username: string): Pro
                 commitIfUpdated();
                 return { valid: true, username: returnedUsername, expiresIn: typeof result.json.expiresIn === "string" ? result.json.expiresIn : undefined };
             }
-            const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.");
+            const failure = sessionCheckFailure(result.json?.error || result.stderr || "Sessão Proton inválida ou não encontrada.", result.json?.code);
             return { valid: false, ...failure };
         });
     } catch (error) {
@@ -1437,6 +1464,8 @@ export async function generateOptimalProtonConfig(
                     confFile: output,
                 };
             }
+            const outdated = appVersionRejection(result);
+            if (outdated) return { success: false, error: outdated };
             const helperError = result.json && typeof result.json.error === "string" ? result.json.error : "";
             let failure = safeDiagnosticDetail(helperError || result.stderr || "Falha ao gerar a configuração Proton.");
             if (options.speedTest && !options.signal?.aborted && probedServers.length > 0 &&
@@ -1637,7 +1666,7 @@ export async function generateProtonRouteCatalog(
             const result = await runConfgen({ args, timeoutMs: 60_000, signal: options.signal, runtimeDirectory: dataDir, onProgress: options.onProgress, log: options.log });
             const json = result.json;
             if (result.code !== 0 || json?.success !== true) {
-                return { success: false, error: safeDiagnosticDetail(json?.error || result.stderr || result.stdout || "Não foi possível carregar o catálogo de rotas ProtonVPN.") };
+                return { success: false, error: appVersionRejection(result) ?? safeDiagnosticDetail(json?.error || result.stderr || result.stdout || "Não foi possível carregar o catálogo de rotas ProtonVPN.") };
             }
             const routes = parseProtonRouteCatalog(json?.routes);
             if (routes === null) return { success: false, error: INVALID_CATALOG_ERROR };
@@ -1688,7 +1717,7 @@ export async function generateManualProtonConfig(
                 fs.existsSync(staging);
             if (!validated) {
                 options.log?.("warn", "rota ProtonVPN manual rejeitada", { servidor: requestedServer, codigoSaida: result.code, respostaJson: Boolean(json) });
-                return { success: false, error: safeDiagnosticDetail(json?.error || result.stderr || result.stdout || MANUAL_ROUTE_FAILURE_ERROR) };
+                return { success: false, error: appVersionRejection(result) ?? safeDiagnosticDetail(json?.error || result.stderr || result.stdout || MANUAL_ROUTE_FAILURE_ERROR) };
             }
             if (options.signal?.aborted) throw abortError();
             fs.renameSync(staging, output);

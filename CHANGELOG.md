@@ -14,6 +14,20 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   **A correção chega com uma release nova.** O CI recompila o helper da GUI (e refaz o manifesto e os SHA-256) e o do macOS; o helper Linux embutido em `goLiveBypass/vpn-proton.ts` foi regerado nesta mudança com o mesmo build determinístico (`GOOS=linux GOARCH=amd64`, `-buildvcs=false -trimpath -ldflags='-s -w -buildid='`). O helper do Windows do plugin sai do build da release.
 
+- **Quando a Proton recusa a versão do app, o GoLiveBypass diz isso e não perde a sessão salva.** A Proton responde com o código 5003 ("This version of the app is no longer supported") quando sobe a versão mínima aceita. Foi isso que derrubou o login em 19/11 (#437 a #442). Até aqui, o erro aparecia como "Não foi possível concluir o login ProtonVPN" na GUI, como "Não foi possível concluir a operação ProtonVPN" no plugin e, no macOS, como "Usuário ou senha incorretos". Pior: na renovação ou na verificação da sessão salva, o helper tratava a recusa como sessão inválida, apagava a sessão e tentava entrar de novo com a senha, que também era recusada. Agora:
+  - o `proton-confgen` reporta 5001, 5003 e 5005 como `APP_VERSION_UNSUPPORTED` e mantém a sessão salva em todos os caminhos, na renovação e na verificação, com qualquer status HTTP;
+  - a GUI, o plugin e o macOS, inclusive o painel do celular, mostram "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.", tanto no login quanto nas operações de rota;
+  - na verificação da sessão, a GUI e o plugin mantêm a conta conectada.
+
+  **Testado no Windows** com um `.exe` desta branch, cujo helper ainda manda a versão recusada e por isso recebeu um 5003 de verdade da Proton:
+  - a conta continuou conectada, com a mensagem nova;
+  - a sessão salva ficou intacta, com o mesmo tamanho e o mesmo horário antes e depois de três verificações recusadas;
+  - a ativação com a rota já preparada funcionou (`verified=true`).
+
+  Isto não corrige a versão em si, que é o #443. Serve para a próxima vez que a Proton subir o mínimo.
+
+  No plugin no Linux, o helper embutido em `goLiveBypass/vpn-proton.ts` precisa ser regenerado de novo, como no #444, para levar a preservação da sessão. A mensagem já aparece com o helper atual, porque o plugin também reconhece o texto antigo do 5003.
+
 ## [2.0.17-beta-4] - 2026-11-18
 
 ### Corrigido

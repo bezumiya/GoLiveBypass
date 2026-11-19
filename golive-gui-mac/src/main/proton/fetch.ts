@@ -41,7 +41,7 @@ export interface CatalogRoute { server: string; country: string; city: string; l
 
 export interface ProtonFetchResult {
   ok: boolean;
-  error?: 'captcha' | 'auth_failed' | 'no_servers' | 'binary_missing' | 'binary_integrity' | 'timeout' | 'unknown';
+  error?: 'captcha' | 'auth_failed' | 'app_outdated' | 'no_servers' | 'binary_missing' | 'binary_integrity' | 'timeout' | 'unknown';
   detail?: string;
   /** Validade do certificado emitido (Unix, segundos). */
   expiresAt?: number;
@@ -122,7 +122,15 @@ export function chosenFromJson(j: any): ChosenServer | null {
   };
 }
 
-function classifyFailure(combined: string): ProtonFetchResult {
+// A Proton recusa o identificador de cliente desatualizado (HTTP 422, código 5003).
+// O helper novo responde com o código APP_VERSION_UNSUPPORTED; o antigo, só com o
+// texto "authentication failed with code: 5003", que o `auth.*fail` lia como senha errada.
+const APP_OUTDATED_RE = /app_version_unsupported|with code: 50(01|03|05)\b|no longer (supported|accepts)/i;
+
+export function classifyFailure(combined: string): ProtonFetchResult {
+  if (lastJson(combined)?.code === 'APP_VERSION_UNSUPPORTED' || APP_OUTDATED_RE.test(combined)) {
+    return { ok: false, error: 'app_outdated' };
+  }
   if (/captcha|human.?verif|hv.?token|recaptcha|9001/i.test(combined)) {
     return { ok: false, error: 'captcha', captchaUrl: combined.match(/https?:\/\/\S+captcha\S*/i)?.[0] };
   }

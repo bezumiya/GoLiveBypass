@@ -30,6 +30,7 @@ export type ProtonLoginErrorCode =
   | 'MISSING_EXECUTABLE'
   | 'SESSION_PERSISTENCE'
   | 'CONFIGURATION_ERROR'
+  | 'APP_VERSION_UNSUPPORTED'
   | 'UNKNOWN';
 
 export interface ProtonLoginResult {
@@ -347,8 +348,16 @@ export async function runRouteProbeFrom(exePath: string | undefined, timeoutMs =
   };
 }
 
+// A Proton recusa o identificador de versao do cliente (HTTP 422, codigo 5003).
+// Nenhuma nova tentativa resolve: so uma versao nova do GoLiveBypass.
+const APP_VERSION_UNSUPPORTED_MESSAGE = 'A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.';
+
 export function classifyProtonError(error: unknown, stderr = '', stdout = ''): { code: ProtonLoginErrorCode; message: string; retryable: boolean } {
   const raw = `${error instanceof Error ? error.message : String(error)} ${stderr} ${stdout}`.toLowerCase();
+  // Antes de todos os outros padroes: helpers antigos so imprimem o codigo
+  // numerico ("authentication failed with code: 5003"), e credencial, rede ou o
+  // generico nao podem engolir uma versao recusada.
+  if (/app_version_unsupported|with code: 50(01|03|05)\b|no longer (supported|accepts)/i.test(raw)) return { code: 'APP_VERSION_UNSUPPORTED', message: APP_VERSION_UNSUPPORTED_MESSAGE, retryable: false };
   if (/captcha_invalid|captcha.*expired|human verification.*(invalid|expired)/.test(raw)) return { code: 'CAPTCHA_INVALID', message: 'A verificação de segurança expirou ou foi recusada. Abra um novo CAPTCHA e tente novamente.', retryable: true };
   if (/captcha_required|captcha verification required|human verification required|code 9001/.test(raw)) return { code: 'CAPTCHA_REQUIRED', message: 'O Proton solicitou uma verificação de segurança. Abra o CAPTCHA e tente novamente.', retryable: true };
   if (/2fa_required|two.?factor|required.*2fa/.test(raw)) return { code: 'TWO_FACTOR_REQUIRED', message: 'Esta conta exige autenticação em duas etapas.', retryable: false };
@@ -442,10 +451,11 @@ function ensureInstallDir(installDir: string) {
 
 /**
  * Contrato de `-check-session`. `retryable` marca falha de verificacao (rede,
- * timeout, helper ausente) que NAO invalida a sessao: a GUI mantem o usuario
- * autenticado e a ativacao continua disponivel com o perfil ja gerado.
+ * timeout, helper ausente, versao do app recusada pela Proton) que NAO invalida
+ * a sessao: a GUI mantem o usuario autenticado e a ativacao continua disponivel
+ * com o perfil ja gerado.
  */
-export type ProtonSessionCheckCode = 'INVALID_SESSION' | 'NETWORK_ERROR' | 'TIMEOUT' | 'MISSING_EXECUTABLE' | 'SESSION_PERSISTENCE' | 'UNKNOWN';
+export type ProtonSessionCheckCode = 'INVALID_SESSION' | 'NETWORK_ERROR' | 'TIMEOUT' | 'MISSING_EXECUTABLE' | 'SESSION_PERSISTENCE' | 'APP_VERSION_UNSUPPORTED' | 'UNKNOWN';
 
 export interface ProtonSessionCheckResult {
   valid: boolean;
@@ -462,6 +472,7 @@ const PROTON_SESSION_CODES: Record<ProtonSessionCheckCode, true> = {
   TIMEOUT: true,
   MISSING_EXECUTABLE: true,
   SESSION_PERSISTENCE: true,
+  APP_VERSION_UNSUPPORTED: true,
   UNKNOWN: true,
 };
 
@@ -472,6 +483,7 @@ const RETRYABLE_SESSION_CODES: Record<ProtonSessionCheckCode, boolean> = {
   TIMEOUT: true,
   MISSING_EXECUTABLE: true,
   SESSION_PERSISTENCE: true,
+  APP_VERSION_UNSUPPORTED: true,
   UNKNOWN: false,
 };
 
@@ -741,9 +753,23 @@ function structuredProtonError(code: string): { message: string; retryable: bool
         message: 'A sessão Proton já salva não pôde ser atualizada neste computador. Sua senha não foi verificada e a sessão anterior foi preservada. Feche outras versões do aplicativo e tente novamente.',
         retryable: true,
       };
+    case 'APP_VERSION_UNSUPPORTED':
+      return { message: APP_VERSION_UNSUPPORTED_MESSAGE, retryable: false };
     default:
       return undefined;
   }
+}
+
+/**
+ * O renderer mostra o `error` das operacoes de rota (otimizacao, catalogo, rota
+ * manual) como chega. A versao do app recusada pela Proton (codigo do helper ou
+ * texto de helpers antigos) ja sai traduzida; qualquer outro erro segue intacto.
+ */
+function appVersionRouteError(json: any, rawError: unknown): string | undefined {
+  if (json?.code === 'APP_VERSION_UNSUPPORTED' || classifyProtonError(rawError).code === 'APP_VERSION_UNSUPPORTED') {
+    return APP_VERSION_UNSUPPORTED_MESSAGE;
+  }
+  return undefined;
 }
 
 export async function generateOptimalProtonConfig(
@@ -882,7 +908,7 @@ export async function generateOptimalProtonConfig(
     medicao_valida: options.speedTest ? measuredResultValid : undefined,
     erro: errMsg.replace(/\s+/g, ' ').trim().slice(0, 300),
   });
-  return { success: false, error: errMsg };
+  return { success: false, error: appVersionRouteError(res.json, errMsg) ?? errMsg };
 }
 
 export interface ProtonManualRouteOptions {
@@ -1020,7 +1046,7 @@ export async function generateManualProtonConfig(
     codigo_saida: res.code,
     resposta_json: Boolean(json),
   });
-  return { success: false, error: redactManualRouteError(rawError, username) };
+  return { success: false, error: appVersionRouteError(json, rawError) ?? redactManualRouteError(rawError, username) };
 }
 
 export function removeStagedProtonConfig(stagedFile: string | undefined): void {
@@ -1146,7 +1172,7 @@ export async function generateProtonRouteCatalog(
       'Não foi possível carregar o catálogo de rotas ProtonVPN.';
     return {
       success: false,
-      error: redactManualRouteError(rawError, username),
+      error: appVersionRouteError(res.json, rawError) ?? redactManualRouteError(rawError, username),
     };
   }
   return { success: true, routes };

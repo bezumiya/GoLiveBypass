@@ -27,6 +27,7 @@ import {
     formatProtonRoutePing,
     isProtonRouteSelectable,
     mergeProtonRouteCatalog,
+    PROTON_APP_VERSION_UNSUPPORTED_MESSAGE,
     protonLoginPresentation,
     protonRouteLocation,
     protonRouteStateLabel,
@@ -516,7 +517,7 @@ interface ProtonSessionCheck {
     valid: boolean;
     username?: string;
     expiresIn?: string;
-    code?: "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "SESSION_PERSISTENCE" | "UNKNOWN";
+    code?: "INVALID_SESSION" | "NETWORK_ERROR" | "TIMEOUT" | "MISSING_EXECUTABLE" | "SESSION_PERSISTENCE" | "APP_VERSION_UNSUPPORTED" | "UNKNOWN";
     error?: string;
 }
 
@@ -546,9 +547,32 @@ function protonSessionStatusTitle(code: ProtonSessionCheck["code"]): string {
             return "Armazenamento da sessão indisponível";
         case "INVALID_SESSION":
             return "Sessão precisa ser renovada";
+        // A sessão continua guardada; a mensagem de atualização já é o status inteiro.
+        case "APP_VERSION_UNSUPPORTED":
+            return PROTON_APP_VERSION_UNSUPPORTED_MESSAGE;
         default:
             return "Não foi possível verificar a sessão";
     }
+}
+
+/** Complemento do título: o detalhe da verificação, salvo quando o título já diz tudo. */
+function protonSessionStatusDetail(session: ProtonSessionCheck): string {
+    return session.error && session.code !== "APP_VERSION_UNSUPPORTED" ? ` · ${session.error}` : "";
+}
+
+/**
+ * Sem senha não há o que tentar. O motivo pelo qual a sessão guardada não serve
+ * entra na mensagem, sem chamá-la de expirada: pode ser armazenamento local, rede
+ * ou helper. A versão recusada pela Proton não se resolve com senha.
+ */
+function protonMissingPasswordMessage(session: ProtonSessionCheck | null): string {
+    if (session && !session.valid && session.code === "APP_VERSION_UNSUPPORTED") return PROTON_APP_VERSION_UNSUPPORTED_MESSAGE;
+    const detail = session && !session.valid && session.code && session.code !== "INVALID_SESSION"
+        ? (session.error || protonSessionStatusTitle(session.code))
+        : null;
+    return detail
+        ? `${detail} Informe a senha para entrar novamente.`
+        : "Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.";
 }
 
 type OnboardingPage = "account" | "route" | "ready";
@@ -1387,15 +1411,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
             let verified = session?.valid && typeof session.username === "string" && protonUsernamesMatch(session.username, username) ? session : null;
             if (!verified) {
                 if (!password) {
-                    // Sem senha não há o que tentar. O motivo pelo qual a sessão
-                    // guardada não serve entra na mensagem, sem chamá-la de
-                    // expirada: pode ser armazenamento local, rede ou helper.
-                    const detail = session && !session.valid && session.code && session.code !== "INVALID_SESSION"
-                        ? (session.error || protonSessionStatusTitle(session.code))
-                        : null;
-                    setError(detail
-                        ? `${detail} Informe a senha para entrar novamente.`
-                        : "Informe a senha para iniciar uma nova sessão ou renovar a sessão atual.");
+                    setError(protonMissingPasswordMessage(session));
                     return;
                 }
                 const loginRequestId = `plugin-onboarding-login-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1693,7 +1709,7 @@ function PluginOnboardingModal({ modalProps, onClosed }: { modalProps: RenderMod
                             <TextInput value={twoFactorCode} onChange={setTwoFactorCode} placeholder="Código 2FA (se solicitado)" aria-label="Código 2FA (se solicitado)" disabled={busy} />
                             {sessionLoading && <Paragraph>Verificando a sessão salva…</Paragraph>}
                             {!sessionLoading && session?.valid && <Paragraph><strong>Sessão válida</strong>{session.expiresIn ? ` · expira ${session.expiresIn}` : ""}. Você pode continuar sem digitar a senha.</Paragraph>}
-                            {!sessionLoading && session && !session.valid && <Paragraph><strong>{protonSessionStatusTitle(session.code)}</strong>{session.error ? ` · ${session.error}` : ""}</Paragraph>}
+                            {!sessionLoading && session && !session.valid && <Paragraph><strong>{protonSessionStatusTitle(session.code)}</strong>{protonSessionStatusDetail(session)}</Paragraph>}
                             {error && <Paragraph role="alert" aria-live="assertive"><strong>{error}</strong></Paragraph>}
                             {!!username.trim() && !sessionLoading && <Button onClick={() => void checkSession(username)} disabled={busy}>Verificar sessão novamente</Button>}
                             <Button onClick={() => switchVpnMode("custom")} disabled={busy || sessionLoading}>
@@ -2518,7 +2534,7 @@ function VpnPanel() {
                         {loginError && <Paragraph role="alert" aria-live="assertive"><strong>{loginError}</strong></Paragraph>}
                         {!session && !loginError && !!username.trim() && <Paragraph role="status" aria-live="polite">Verificando a sessão Proton…</Paragraph>}
                         {session?.valid === true && <Paragraph><strong>Sessão válida</strong>{session.expiresIn ? ` · expira ${session.expiresIn}` : ""}. A lista de rotas abaixo já usa esta conta.</Paragraph>}
-                        {session && !session.valid && <Paragraph role="status" aria-live="polite"><strong>{protonSessionStatusTitle(session.code)}</strong>{session.error ? ` · ${session.error}` : ""}</Paragraph>}
+                        {session && !session.valid && <Paragraph role="status" aria-live="polite"><strong>{protonSessionStatusTitle(session.code)}</strong>{protonSessionStatusDetail(session)}</Paragraph>}
                         <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
                             {loginActive ? <Button onClick={cancelLogin} disabled={loginCancelRequested}>{loginCancelRequested ? "Cancelando…" : "Cancelar login"}</Button> : <Button onClick={() => void login()} disabled={busy || optimizing || !username.trim()}>Entrar no Proton</Button>}{" "}
                             <Button onClick={() => void call(async () => {
@@ -2545,7 +2561,7 @@ function VpnPanel() {
                             lockedReason={routeSelectionActive
                                 ? null
                                 : session && !session.valid
-                                    ? `${protonSessionStatusTitle(session.code)}${session.error ? ` · ${session.error}` : ""}`
+                                    ? `${protonSessionStatusTitle(session.code)}${protonSessionStatusDetail(session)}`
                                     : "Entre na sua conta Proton para listar as rotas."}
                             emptyMessage={routeSelection.discovery.active
                                 ? "Buscando rotas Proton e medindo ping…"
