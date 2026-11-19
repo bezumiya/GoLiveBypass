@@ -4,7 +4,7 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
-## [Unreleased]
+## [2.0.17] - 2026-11-19
 
 ### Corrigido
 
@@ -12,7 +12,7 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   Agora o helper se identifica como o cliente oficial do Linux faz: `linux-vpn-gui@<versão da python-proton-vpn-api-core>+<arquitetura>` (hoje `linux-vpn-gui@6.1.2+x86-64`) e `ProtonVPN/6.1.2 (Linux; ubuntu/26.04)`. É o mesmo formato que o projeto de origem, `hatemosphere/protonvpn-wg-confgen`, adotou em 18/11. Na API, em `GET /vpn/v2/clientconfig`, `linux-vpn@4.17.2` recebe 422/5003 e `linux-vpn-gui@6.1.2+x86-64` recebe 200/1000. Quando a Proton subir o mínimo de novo, basta trocar `ClientVersion` em `tools/proton-confgen/internal/constants/api.go`, ou passar `-X …/internal/constants.ClientVersion=` no build, pela versão de `python-proton-vpn-api-core/stable/versions.yml`.
 
-  **A correção chega com uma release nova.** O CI recompila o helper da GUI (e refaz o manifesto e os SHA-256) e o do macOS; o helper Linux embutido em `goLiveBypass/vpn-proton.ts` foi regerado nesta mudança com o mesmo build determinístico (`GOOS=linux GOARCH=amd64`, `-buildvcs=false -trimpath -ldflags='-s -w -buildid='`). O helper do Windows do plugin sai do build da release.
+  **A correção chega nesta versão hotfix (2.0.17).** O CI recompila o helper da GUI (e refaz o manifesto e os SHA-256) e o do macOS; o helper Linux embutido em `goLiveBypass/vpn-proton.ts` foi regerado nesta árvore com o mesmo build determinístico (`GOOS=linux GOARCH=amd64`, `-buildvcs=false -trimpath -ldflags='-s -w -buildid='`). O helper do Windows do plugin sai do build da release.
 
 - **Quando a Proton recusa a versão do app, o GoLiveBypass diz isso e não perde a sessão salva.** A Proton responde com o código 5003 ("This version of the app is no longer supported") quando sobe a versão mínima aceita. Foi isso que derrubou o login em 19/11 (#437 a #442). Até aqui, o erro aparecia como "Não foi possível concluir o login ProtonVPN" na GUI, como "Não foi possível concluir a operação ProtonVPN" no plugin e, no macOS, como "Usuário ou senha incorretos". Pior: na renovação ou na verificação da sessão salva, o helper tratava a recusa como sessão inválida, apagava a sessão e tentava entrar de novo com a senha, que também era recusada. Agora:
   - o `proton-confgen` reporta 5001, 5003 e 5005 como `APP_VERSION_UNSUPPORTED` e mantém a sessão salva em todos os caminhos, na renovação e na verificação, com qualquer status HTTP;
