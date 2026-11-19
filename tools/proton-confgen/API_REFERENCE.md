@@ -19,7 +19,8 @@ This project's API integration was developed by reverse-engineering ProtonVPN's 
 
 ## Client Version
 - **[ProtonVPN/proton-vpn-gtk-app](https://github.com/ProtonVPN/proton-vpn-gtk-app)** - Official Linux client
-  - Source for `x-pm-appversion` header value (fetched dynamically at build time)
+  - Sends python-proton-vpn-api-core's version in `x-pm-appversion` and `User-Agent`, not its own (both headers are built by `SessionHolder` in api-core's `proton/vpn/core/session_holder.py`)
+- **[python-proton-vpn-api-core `versions.yml`](https://raw.githubusercontent.com/ProtonVPN/python-proton-vpn-api-core/stable/versions.yml)** - Source for that version (`ClientVersion`, fetched dynamically by `make build`)
 
 ## API Endpoints Used
 
@@ -114,6 +115,8 @@ Note that the "the API does not allow intervals shorter than 1 day" comment in `
 | 5005 | API_VERSION_INVALID | API version invalid |
 | 5099 | APP_VERSION_NOT_SUPPORTED_FOR_EXTERNAL_ACCOUNTS | App version not supported for external accounts |
 
+5003 comes back as HTTP 422 with `This version of the app is no longer supported` once Proton stops accepting the `x-pm-appversion` sent. Observed 2026-11-19 on `GET /vpn/v2/clientconfig`: `linux-vpn@4.17.2`, which this tool sent until then, gets 5003, while `linux-vpn-gui@6.1.2+x86-64` gets 1000. The fix is to bump `ClientVersion` to the latest python-proton-vpn-api-core version (see [Required Headers](#required-headers)).
+
 ### Other Errors
 | Code | Constant | Meaning |
 |------|----------|---------|
@@ -136,12 +139,14 @@ All authenticated requests require these headers:
 ```
 Authorization: Bearer <access_token>
 x-pm-uid: <session_uid>
-x-pm-appversion: linux-vpn@X.Y.Z
-User-Agent: ProtonVPN/X.Y.Z (Linux; Ubuntu)
+x-pm-appversion: linux-vpn-gui@X.Y.Z+<arch>
+User-Agent: ProtonVPN/X.Y.Z (Linux; ubuntu/26.04)
 Content-Type: application/json
 ```
 
-**Important**: Using a web client version (like `web-vpn-settings@X.Y.Z`) may trigger CAPTCHA challenges. Always use the Linux client version format.
+`X.Y.Z` is the python-proton-vpn-api-core version in `ClientVersion` (`internal/constants/api.go`), and `<arch>` is the CPU architecture the way the official client spells it (Python's `platform.machine()` with `_` turned into `-`), mapped from `GOARCH`: `amd64` -> `x86-64`, `arm64` -> `aarch64`, `arm` -> `armv7l`, anything else as-is. On x86-64 that is `linux-vpn-gui@6.1.2+x86-64` and `ProtonVPN/6.1.2 (Linux; ubuntu/26.04)`; the official client puts its own distribution there, this tool always sends `ubuntu/26.04`. Both values are derived from `ClientVersion` at startup. `AppVersion` and `UserAgent` can still be overridden whole with `-X`, but the normal way is to override only `ClientVersion`.
+
+**Important**: Using a web client version (like `web-vpn-settings@X.Y.Z`) may trigger CAPTCHA challenges. Always use the Linux client version format. `linux-vpn@4.17.2`, which this tool sent until 2026-11-19, is now rejected with code 5003.
 
 ## Token Refresh
 

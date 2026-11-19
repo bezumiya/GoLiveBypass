@@ -37,7 +37,9 @@ cd protonvpn-wg-confgen
 make build          # produces ./build/protonvpn-wg-confgen
 ```
 
-`make build` stamps the binary with the current ProtonVPN Linux client version, fetched from upstream at build time. A plain `go build` falls back to the version compiled into `internal/constants`. Advertising an outdated client version gets rejected by the API with code 5003, so prefer `make build`.
+The helper identifies itself as the official ProtonVPN Linux client: `x-pm-appversion: linux-vpn-gui@<version>+<arch>` and `User-Agent: ProtonVPN/<version> (Linux; ubuntu/26.04)`, where `<version>` is the version of [python-proton-vpn-api-core](https://github.com/ProtonVPN/python-proton-vpn-api-core) (the official client sends that library's version, not the GTK app's) and `<arch>` is the CPU architecture as that client spells it, e.g. `linux-vpn-gui@6.1.2+x86-64`. The default compiled into `ClientVersion` (`internal/constants/api.go`) matches the current client, so a plain `go build` works, and it is how GoLiveBypass builds the helper; `make build` stamps the newest version instead, fetched from upstream at build time.
+
+If the API answers code 5003 ("This version of the app is no longer supported") again, bump `ClientVersion` to the latest version in python-proton-vpn-api-core's [versions.yml](https://raw.githubusercontent.com/ProtonVPN/python-proton-vpn-api-core/stable/versions.yml), or pass it at build time with `-ldflags "-X protonvpn-wg-confgen/internal/constants.ClientVersion=X.Y.Z"`.
 
 You will need a ProtonVPN account; a free one works, with the tier caveats noted below.
 

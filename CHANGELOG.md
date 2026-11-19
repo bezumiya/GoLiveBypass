@@ -6,6 +6,14 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **Login da Proton recusado com o código 5003 em todas as versões (#437, #438, #439, #440, #441, #442).** Desde 19/11, a Proton recusa a identificação que o `proton-confgen` manda (`x-pm-appversion: linux-vpn@4.17.2`). A resposta é HTTP 422 com o código 5003, "This version of the app is no longer supported", logo no primeiro passo do login, antes de olhar a senha. Isso afetava a GUI no Windows e no Linux, o plugin e o macOS, na 2.0.16 e na 2.0.17-beta-4. Quem tinha sessão salva também a perdia: com o 5003, a renovação é tratada como sessão recusada e o helper apaga a sessão.
+
+  Agora o helper se identifica como o cliente oficial do Linux faz: `linux-vpn-gui@<versão da python-proton-vpn-api-core>+<arquitetura>` (hoje `linux-vpn-gui@6.1.2+x86-64`) e `ProtonVPN/6.1.2 (Linux; ubuntu/26.04)`. É o mesmo formato que o projeto de origem, `hatemosphere/protonvpn-wg-confgen`, adotou em 18/11. Na API, em `GET /vpn/v2/clientconfig`, `linux-vpn@4.17.2` recebe 422/5003 e `linux-vpn-gui@6.1.2+x86-64` recebe 200/1000. Quando a Proton subir o mínimo de novo, basta trocar `ClientVersion` em `tools/proton-confgen/internal/constants/api.go`, ou passar `-X …/internal/constants.ClientVersion=` no build, pela versão de `python-proton-vpn-api-core/stable/versions.yml`.
+
+  **A correção só chega com release nova.** É preciso gerar a GUI (o CI recompila o helper e refaz o manifesto e os SHA-256) e o macOS, e regenerar o helper do plugin no Linux, que fica embutido em `goLiveBypass/vpn-proton.ts`. Sem isso, o plugin no Linux continua mandando a 4.17.2.
+
 ## [2.0.17-beta-4] - 2026-11-18
 
 ### Corrigido
