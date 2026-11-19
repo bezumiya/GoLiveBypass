@@ -99,7 +99,7 @@ vi.mock('child_process', () => ({
 // O produto exige um helper existente; o stub evita depender do proton-confgen compilado.
 vi.mock('../electron/proton-runtime', async (original) =>
   (await import('./helpers/confgen-runtime-stub')).stubProtonRuntime(await original<object>()));
-import { removeConfgenStub } from './helpers/confgen-runtime-stub';
+import { caminhoDoConfgenStub, removeConfgenStub, simularHelperEmbutidoAusente } from './helpers/confgen-runtime-stub';
 
 import { automaticExcludedCountries } from '../electron/route-failover';
 import { canReuseMeasuredProfile, generateManualProtonConfig, generateOptimalProtonConfig, generateProtonRouteCatalog, generateProtonRoutePool, findProtonConfgenExe, MEASUREMENT_CRITERION_VERSION, removeStagedProtonConfig, runConfgen } from '../electron/proton';
@@ -321,6 +321,29 @@ describe('medidor isolado da regra WireSock', () => {
       fs.rmSync(result.stagingDir!, { recursive: true, force: true });
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
+  it('prepara as reservas com o helper do caminho de reparo quando o pacote perdeu o embutido', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-pool-reparo-'));
+    simularHelperEmbutidoAusente(true);
+    try {
+      expect(() => findProtonConfgenExe()).toThrow(/não foi encontrado/);
+      const result = await generateProtonRoutePool(dir, { username: 'test', size: 2, countries: 'US,NL' });
+      expect(result.success).toBe(true);
+      expect(state.executable).toBe(caminhoDoConfgenStub());
+      expect(state.existed).toBe(true);
+      fs.rmSync(result.stagingDir!, { recursive: true, force: true });
+    } finally {
+      simularHelperEmbutidoAusente(false);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('toda chamada do helper em proton.ts passa o caminho consertado', () => {
+    const fonte = fs.readFileSync(path.resolve(process.cwd(), 'electron/proton.ts'), 'utf8');
+    const chamadas = [...fonte.matchAll(/runConfgen\(\{[\s\S]*?\}\)/g)].map((m) => m[0]);
+    expect(chamadas.length).toBeGreaterThanOrEqual(10);
+    for (const chamada of chamadas) expect(chamada).toContain('exePath');
+  });
+
   it('propaga progresso de ping enquanto prepara reservas', async () => {
     state.progressChunks = [
       'GOLIVE_PROGRESS {"phase":"ping","total":24,"tested":1,"succeeded":1,"server":"NL#12","pingMs":42,"status":"success"}\n',

@@ -1208,11 +1208,14 @@ export async function generateProtonRoutePool(
   if (excluded.length > 0) args.push('-exclude-servers', excluded.join(','));
 
   try {
+    // O helper do caminho de reparo: sem exePath o runConfgen volta a procurar só o embutido, e as
+    // reservas falhavam no pacote que perdeu o helper (antivírus, extração incompleta).
     const res = await runConfgen({
       args,
       timeoutMs: 120_000,
       signal: options.signal,
       onProgress: options.onProgress,
+      exePath,
     });
     const rawRoutes = Array.isArray(res.json?.routes) ? res.json.routes : [];
     const routes: ProtonRouteMetadata[] = [];
