@@ -6,6 +6,10 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **GUI: as reservas da troca automática não falham mais quando o pacote perdeu o helper Proton embutido.** Quando o `proton-confgen` some do pacote (antivírus, extração incompleta, cópia portátil ruim), a GUI baixa o helper oficial da release e confere o SHA-256. A escolha da rota já usava esse helper consertado, mas a preparação das reservas não: o caminho era calculado e não chegava ao helper, que voltava a procurar só o embutido. A rota ativava, as reservas falhavam com `pool.background.failed … proton-confgen.exe não foi encontrado`, e a troca automática, que desde o #433 funciona no Windows, ficava sem reserva e desistia na sessão. Agora as reservas usam o mesmo helper consertado. Visto no teste do #433, com um `.exe` de teste sem o helper embutido. No build oficial íntegro nada muda. Vale para a GUI no Windows e no Linux; o plugin não tem conjunto de reservas.
+
 ## [2.0.17-beta-3] - 2026-11-16
 
 ### Corrigido
