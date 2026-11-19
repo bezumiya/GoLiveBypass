@@ -79,9 +79,19 @@ describe('saídas do proton-confgen', () => {
   });
 });
 
+import { classifyFailure } from '../../src/main/proton/fetch';
+
+/** Resposta do helper novo quando a Proton recusa a versão do app (HTTP 422, código 5003). */
+const VERSAO_RECUSADA_JSON = {
+  success: false,
+  error: 'authentication failed: failed to get auth info: Proton no longer accepts this app version (code 5003); update GoLiveBypass',
+  code: 'APP_VERSION_UNSUPPORTED',
+  retryable: false,
+};
+
 describe('ProtonFetcher.fetch com binário falso', () => {
   // Monta binDir/../extra/proton-confgen com um script e o manifesto do seu hash.
-  const fake = (json: object, writeConf = true) => {
+  const fake = (json: object, writeConf = true, exitCode = 0) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glb-fake-'));
     const dir = path.join(root, 'extra', 'proton-confgen');
     fs.mkdirSync(dir, { recursive: true });
@@ -91,6 +101,7 @@ describe('ProtonFetcher.fetch com binário falso', () => {
       `echo "$@" > "${path.join(root, 'args')}"`,
       writeConf ? 'while [ $# -gt 0 ]; do [ "$1" = "-output" ] && echo "[Interface]" > "$2"; shift; done' : '',
       `echo '${JSON.stringify(json)}'`,
+      ...(exitCode ? [`exit ${exitCode}`] : []),
     ].join('\n');
     const bin = path.join(dir, 'proton-confgen');
     fs.writeFileSync(bin, script, { mode: 0o755 });
@@ -144,5 +155,46 @@ describe('ProtonFetcher.fetch com binário falso', () => {
     const semMedida = fake({ success: true, server: 'US-FREE#7', country: 'US', city: 'NY' });
     expect(await run(new ProtonFetcher(), { ...semMedida.opts, mode: 'speed' }))
       .toEqual({ ok: false, error: 'unknown', detail: 'A medição não retornou velocidades válidas de download e upload.' });
+  });
+
+  it('login recusado pela versão do app chega como app_outdated; senha errada continua auth_failed', async () => {
+    const outdated = fake(VERSAO_RECUSADA_JSON, false, 1);
+    expect(await run(new ProtonFetcher(), { ...outdated.opts, password: 'senha' })).toEqual({ ok: false, error: 'app_outdated' });
+    expect(outdated.args()).toMatch(/-route-catalog/);
+
+    const wrong = fake({ success: false, error: 'authentication failed: incorrect username or password', code: 'INVALID_CREDENTIALS', retryable: false }, false, 1);
+    expect(await run(new ProtonFetcher(), { ...wrong.opts, password: 'errada' })).toEqual({ ok: false, error: 'auth_failed' });
+  });
+});
+
+describe('classificação das falhas do proton-confgen', () => {
+  it('versão do app recusada vira app_outdated, antes da regra de senha', () => {
+    expect(classifyFailure(`${JSON.stringify(VERSAO_RECUSADA_JSON)}\n`)).toEqual({ ok: false, error: 'app_outdated' });
+    // O código estruturado basta, mesmo sem o texto em inglês.
+    expect(classifyFailure('{"success":false,"error":"falhou","code":"APP_VERSION_UNSUPPORTED","retryable":false}\n'))
+      .toEqual({ ok: false, error: 'app_outdated' });
+    // Helper antigo: só o texto, que o `auth.*fail` lia como senha errada.
+    expect(classifyFailure('{"success":false,"error":"authentication failed: failed to get auth info: authentication failed with code: 5003"}\n'))
+      .toEqual({ ok: false, error: 'app_outdated' });
+    expect(classifyFailure('Error: authentication failed: failed to get auth info: authentication failed with code: 5003\n'))
+      .toEqual({ ok: false, error: 'app_outdated' });
+    expect(classifyFailure('This version of the app is no longer supported')).toEqual({ ok: false, error: 'app_outdated' });
+    expect(classifyFailure('authentication failed with code: 5001').error).toBe('app_outdated');
+    expect(classifyFailure('authentication failed with code: 5005').error).toBe('app_outdated');
+  });
+
+  it('senha errada e outros códigos continuam como antes', () => {
+    expect(classifyFailure('{"success":false,"error":"authentication failed: incorrect username or password","code":"INVALID_CREDENTIALS","retryable":false}\n'))
+      .toEqual({ ok: false, error: 'auth_failed' });
+    expect(classifyFailure('Error: authentication failed: incorrect username or password\n')).toEqual({ ok: false, error: 'auth_failed' });
+    expect(classifyFailure('authentication failed with code: 50031').error).toBe('auth_failed');
+    expect(classifyFailure('{"success":false,"error":"CAPTCHA verification required","code":"CAPTCHA_REQUIRED"}\n').error).toBe('captcha');
+  });
+
+  it('a tela tem a mensagem de atualização para app_outdated e mantém a de senha', () => {
+    const renderer = fs.readFileSync('src/renderer/renderer.ts', 'utf8');
+    expect(renderer).toMatch(/app_outdated:\s*'A Proton deixou de aceitar esta versão do GoLiveBypass\. Atualize o GoLiveBypass para continuar\.'/);
+    expect(renderer).toMatch(/auth_failed:\s*'Usuário ou senha incorretos\.'/);
+    expect(renderer).toMatch(/app_outdated:\s*errMsgs\.app_outdated/);
   });
 });

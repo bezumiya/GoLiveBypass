@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -17,6 +18,9 @@ var ErrTwoFactorRequired = errors.New("2FA_REQUIRED")
 // See API_REFERENCE.md for full documentation.
 const (
 	CodeSuccess              = constants.APICodeSuccess
+	CodeAppVersionMissing    = 5001  // x-pm-appversion missing; AppVersionMissingCode in go-proton-api (absent from ResponseCodes.kt)
+	CodeAppVersionBad        = 5003  // APP_VERSION_BAD: app version no longer supported (FORCE_UPDATE)
+	CodeAPIVersionInvalid    = 5005  // API_VERSION_INVALID: API version invalid (FORCE_UPDATE)
 	CodeWrongPassword        = 8002  // PASSWORD_WRONG: Incorrect password
 	CodeWrongPasswordFormat  = 8004  // Password format is incorrect (observed)
 	CodeCaptchaRequired      = 9001  // HUMAN_VERIFICATION_REQUIRED: CAPTCHA needed
@@ -114,6 +118,38 @@ func IsSessionInvalid(err error) bool {
 	return errors.As(err, &target)
 }
 
+// AppVersionError reports that Proton refused the client version sent in
+// x-pm-appversion (codes 5001, 5003 and 5005, usually with HTTP 422). It says
+// nothing about the account or the saved session: the cache must be kept, and
+// neither a refresh nor a password login can succeed until GoLiveBypass ships a
+// version Proton accepts.
+type AppVersionError struct {
+	Code int
+}
+
+func (e *AppVersionError) Error() string {
+	if e == nil {
+		return "Proton no longer accepts this app version; update GoLiveBypass"
+	}
+	return fmt.Sprintf("Proton no longer accepts this app version (code %d); update GoLiveBypass", e.Code)
+}
+
+// IsAppVersionError reports whether Proton rejected this build of the helper
+// rather than the credentials or the cached session.
+func IsAppVersionError(err error) bool {
+	var target *AppVersionError
+	return errors.As(err, &target)
+}
+
+func isAppVersionCode(code int) bool {
+	switch code {
+	case CodeAppVersionMissing, CodeAppVersionBad, CodeAPIVersionInvalid:
+		return true
+	default:
+		return false
+	}
+}
+
 // ProtocolError represents an unusable response shape/status. It never
 // includes the response body, which may contain credentials or challenge
 // material supplied by an intermediary.
@@ -159,12 +195,38 @@ func IsSessionPersistenceError(err error) bool {
 }
 
 func newAuthenticationError(code int) error {
+	if isAppVersionCode(code) {
+		return &AppVersionError{Code: code}
+	}
 	switch code {
 	case CodeWrongPassword, CodeWrongPasswordFormat:
 		return &InvalidCredentialsError{Code: code}
 	default:
 		return NewError(code)
 	}
+}
+
+// newTwoFactorError keeps an app-version rejection from /auth/2fa from being
+// reported as a wrong TOTP code, which no new code could fix.
+func newTwoFactorError(code int) error {
+	if isAppVersionCode(code) {
+		return &AppVersionError{Code: code}
+	}
+	return &TwoFactorError{Code: code}
+}
+
+// appVersionRejection returns an *AppVersionError when a Proton response body
+// carries an app-version code, whatever the HTTP status, and nil otherwise.
+// Callers check it before classifying the status: Proton answers with HTTP 422,
+// which would otherwise read as a rejected session or a generic failure.
+func appVersionRejection(body []byte) error {
+	var envelope struct {
+		Code int `json:"Code"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || !isAppVersionCode(envelope.Code) {
+		return nil
+	}
+	return &AppVersionError{Code: envelope.Code}
 }
 
 // getErrorMessage returns a human-readable error message for a given error code

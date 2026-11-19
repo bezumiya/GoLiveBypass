@@ -117,6 +117,8 @@ Note that the "the API does not allow intervals shorter than 1 day" comment in `
 
 5003 comes back as HTTP 422 with `This version of the app is no longer supported` once Proton stops accepting the `x-pm-appversion` sent. Observed 2026-11-19 on `GET /vpn/v2/clientconfig`: `linux-vpn@4.17.2`, which this tool sent until then, gets 5003, while `linux-vpn-gui@6.1.2+x86-64` gets 1000. The fix is to bump `ClientVersion` to the latest python-proton-vpn-api-core version (see [Required Headers](#required-headers)).
 
+protoncore_android groups 5003 and 5005 as `ResponseCodes.FORCE_UPDATE`. [go-proton-api](https://github.com/ProtonMail/go-proton-api/blob/master/response.go) also defines 5001 (`AppVersionMissingCode`) for a missing `x-pm-appversion`. The helper reports 5001, 5003 and 5005 as `AppVersionError` (JSON `code` `APP_VERSION_UNSUPPORTED`; 5003 has been observed with HTTP 422) and never deletes the saved session because of them: they reject the client version, not the session.
+
 ### Other Errors
 | Code | Constant | Meaning |
 |------|----------|---------|

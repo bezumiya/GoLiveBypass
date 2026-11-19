@@ -496,7 +496,7 @@ func RefreshSession(httpClient *http.Client, apiURL string, oldSession *api.Sess
 
 // RefreshSessionContext is the cancellable refresh operation. Only an
 // explicit Proton rejection is considered evidence that the cached session is
-// invalid; transport, timeout and malformed responses preserve it.
+// invalid; transport, timeout, malformed and app-version responses preserve it.
 func RefreshSessionContext(ctx context.Context, httpClient *http.Client, apiURL string, oldSession *api.Session) (*api.Session, error) {
 	ctx, err := normalizeAuthContext(ctx)
 	if err != nil {
@@ -536,6 +536,13 @@ func RefreshSessionContext(ctx context.Context, httpClient *http.Client, apiURL 
 		return nil, &ProtocolError{Operation: "session refresh", StatusCode: resp.StatusCode}
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// An app-version rejection (HTTP 422 in practice) concerns this build, not
+	// the refresh token, so it must never reach the SessionInvalidError branches
+	// below: the cache stays on disk and works again after the update.
+	if err := appVersionRejection(body); err != nil {
 		return nil, err
 	}
 
@@ -622,14 +629,23 @@ func VerifySessionStatusContext(ctx context.Context, httpClient *http.Client, ap
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// If we get a 401/403, the session is invalid. Other non-2xx responses are
-	// kept as temporary failures because a gateway or rate limiter can produce
-	// them without saying anything about the token.
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return false, &SessionInvalidError{StatusCode: resp.StatusCode}
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// An error envelope is small, unlike the catalog served on success, so
+		// a bounded read is enough to recognize an app-version rejection (HTTP
+		// 422 in practice). It wins over the status because it says nothing
+		// about the token. An unreadable body keeps the status classification.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBytes))
+		rejection := appVersionRejection(body)
+		clear(body)
+		if rejection != nil {
+			return false, rejection
+		}
+		// If we get a 401/403, the session is invalid. Other non-2xx responses
+		// are kept as temporary failures because a gateway or rate limiter can
+		// produce them without saying anything about the token.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return false, &SessionInvalidError{StatusCode: resp.StatusCode}
+		}
 		return false, &TemporarySessionError{Err: fmt.Errorf("HTTP %d", resp.StatusCode), Operation: "session verification"}
 	}
 
@@ -682,6 +698,9 @@ func VerifySessionStatusContext(ctx context.Context, httpClient *http.Client, ap
 			}
 			if constants.IsSuccessCode(code) {
 				return true, nil
+			}
+			if isAppVersionCode(code) {
+				return false, &AppVersionError{Code: code}
 			}
 			return false, &SessionInvalidError{Code: code, StatusCode: resp.StatusCode}
 		}

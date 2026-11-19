@@ -486,3 +486,51 @@ describe('medidor isolado da regra WireSock', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('versão do app recusada nas operações de rota', () => {
+  const VERSAO_RECUSADA = 'A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.';
+  const TEXTO_HELPER_NOVO = 'failed to load session: Proton no longer accepts this app version (code 5003); update GoLiveBypass';
+
+  // O renderer mostra o `error` destas três operações como chega.
+  const operacoes: Array<[string, (dir: string) => Promise<{ success: boolean; error?: string }>]> = [
+    ['otimização', (dir) => generateOptimalProtonConfig(dir, { username: 'test@example.test', speedTest: true })],
+    ['catálogo', (dir) => generateProtonRouteCatalog(dir, { username: 'test@example.test' })],
+    ['rota manual', (dir) => generateManualProtonConfig(dir, { username: 'test@example.test', server: 'US#8' })],
+  ];
+  const resultadoDe = async (operacao: (dir: string) => Promise<{ success: boolean; error?: string }>) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'golive-route-version-'));
+    try { return await operacao(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  };
+
+  beforeEach(() => {
+    state.success = false; state.json = undefined; state.error = ''; state.code = 1; state.closeDelay = 0; state.createOutput = false;
+    state.progressChunks = []; state.killAt = 0; state.downloadMbps = 30; state.uploadMbps = 10;
+  });
+
+  it.each(operacoes)('%s traduz o código APP_VERSION_UNSUPPORTED do helper', async (_nome, operacao) => {
+    state.json = { success: false, error: TEXTO_HELPER_NOVO, code: 'APP_VERSION_UNSUPPORTED', retryable: false };
+    expect(await resultadoDe(operacao)).toEqual({ success: false, error: VERSAO_RECUSADA });
+  });
+
+  it.each(operacoes)('%s traduz o texto 5003 de helpers antigos', async (_nome, operacao) => {
+    state.json = { success: false, error: 'authentication failed: failed to get auth info: authentication failed with code: 5003' };
+    expect(await resultadoDe(operacao)).toEqual({ success: false, error: VERSAO_RECUSADA });
+  });
+
+  it('mantém os demais erros como vinham', async () => {
+    state.json = { success: false, error: 'nenhum servidor respondeu para test@example.test', code: 'NETWORK_ERROR', retryable: true };
+    const [otimizacao, catalogo, manual] = operacoes.map(([, operacao]) => operacao);
+    expect(await resultadoDe(otimizacao)).toEqual({ success: false, error: 'nenhum servidor respondeu para test@example.test' });
+    expect(await resultadoDe(catalogo)).toEqual({ success: false, error: 'nenhum servidor respondeu para [account]' });
+    expect(await resultadoDe(manual)).toEqual({ success: false, error: 'nenhum servidor respondeu para [account]' });
+  });
+
+  it('o log da otimização guarda o texto original do helper', async () => {
+    state.json = { success: false, error: TEXTO_HELPER_NOVO, code: 'APP_VERSION_UNSUPPORTED', retryable: false };
+    logger._resetForTests();
+    expect((await resultadoDe(operacoes[0][1])).error).toBe(VERSAO_RECUSADA);
+    const recent = logger.getRecent();
+    expect(recent).toContain(TEXTO_HELPER_NOVO);
+    expect(recent).toContain('APP_VERSION_UNSUPPORTED');
+  });
+});

@@ -1,12 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"protonvpn-wg-confgen/internal/api"
 	"protonvpn-wg-confgen/internal/auth"
+	"protonvpn-wg-confgen/internal/config"
 )
 
 // A GUI decidia "deslogado" a partir de valid=false, entao uma falha temporaria
@@ -40,6 +46,55 @@ func TestSessionCheckResponseSeparatesTemporaryFailureFromInvalidSession(t *test
 	missing := sessionCheckResponse(nil, nil, "conta_teste", 0)
 	if missing["code"] != "INVALID_SESSION" || missing["retryable"] != false {
 		t.Fatalf("sessao ausente = %v, want INVALID_SESSION retryable=false", missing)
+	}
+}
+
+// A Proton deixou de aceitar a versao do app (HTTP 422, Code 5003). Isso nao diz
+// nada sobre o token: o -check-session precisa manter a sessao salva e marcar a
+// falha como retryable, para a GUI nao deslogar o usuario nem bloquear a
+// ativacao com o perfil ja gerado.
+func TestCheckSessionReportsUnsupportedAppVersionAndKeepsSession(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "proton-session.json")
+	saved := &api.Session{AccessToken: "access-teste", RefreshToken: "refresh-teste", UID: "uid-teste", ExpiresIn: 30 * 24 * 60 * 60}
+	if err := auth.NewSessionStore(file).Save(saved, "conta_teste", 30*24*time.Hour); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = fmt.Fprint(w, `{"Code":5003,"Error":"This version of the app is no longer supported"}`)
+	}))
+	defer server.Close()
+
+	client := auth.NewClient(&config.Config{
+		APIURL:       server.URL,
+		Username:     "conta_teste",
+		SessionFile:  file,
+		CheckSession: true,
+		JSONOutput:   true,
+	})
+	session, timeUntilExpiry, err := client.CheckSession()
+	payload := sessionCheckResponse(session, err, "conta_teste", timeUntilExpiry)
+	data, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		t.Fatalf("json.Marshal() error = %v", marshalErr)
+	}
+	t.Logf("-check-session JSON: %s", data)
+
+	const want = `{"code":"APP_VERSION_UNSUPPORTED","error":"A Proton não aceita mais esta versão do GoLiveBypass","retryable":true,"success":false,"valid":false}`
+	if string(data) != want {
+		t.Fatalf("-check-session JSON = %s; want %s", data, want)
+	}
+	loaded, _, loadErr := auth.NewSessionStore(file).Load("conta_teste")
+	if loadErr != nil || loaded == nil || loaded.AccessToken != "access-teste" || loaded.RefreshToken != "refresh-teste" {
+		t.Fatalf("sessao salva depois da recusa = %#v, %v; want preservada", loaded, loadErr)
+	}
+
+	// O mesmo contrato vale para o erro embrulhado, sem afetar a classificacao
+	// das outras falhas.
+	wrapped := sessionCheckResponse(nil, fmt.Errorf("check: %w", &auth.AppVersionError{Code: auth.CodeAPIVersionInvalid}), "conta_teste", 0)
+	if wrapped["code"] != "APP_VERSION_UNSUPPORTED" || wrapped["retryable"] != true || wrapped["valid"] != false {
+		t.Fatalf("erro embrulhado = %v; want APP_VERSION_UNSUPPORTED retryable=true", wrapped)
 	}
 }
 

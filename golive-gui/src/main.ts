@@ -6,7 +6,7 @@ import {
   type ManualTargetKind,
 } from './manual-target-selection';
 import { protonMeasurementText } from './proton-measurement';
-import { decideProtonSession, type ProtonSessionVerdict } from './proton-session';
+import { decideProtonSession, protonSessionUnverifiedMessage, type ProtonSessionVerdict } from './proton-session';
 import { renderProtonCountryFlag } from './proton-flags';
 import { ProtonRouteSelect, type ProtonRouteOption } from './proton-route-select';
 import {
@@ -1326,6 +1326,7 @@ function protonLoginMessage(res: { code?: string; message?: string; error?: stri
     case 'TIMEOUT': return 'O ProtonVPN demorou demais para responder. Tente novamente em alguns instantes.';
     case 'MISSING_EXECUTABLE': return 'O componente de conexão ProtonVPN não foi encontrado. Reinstale o GoLiveBypass ou atualize para a versão mais recente.';
     case 'SESSION_PERSISTENCE': return 'Login concluído, mas a sessão não pôde ser salva neste computador. Verifique as permissões da pasta de dados.';
+    case 'APP_VERSION_UNSUPPORTED': return 'A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.';
     default: return 'Não foi possível concluir o login ProtonVPN. Tente novamente ou envie um relatório de diagnóstico.';
   }
 }
@@ -1589,10 +1590,11 @@ async function refreshProtonState(forcePlan = false) {
         if (generation !== protonStateGeneration) return;
         verdict = decideProtonSession(chk);
         if (verdict === 'unverified') {
-          // Verificacao indisponivel agora (rede/helper): a conta e o perfil seguem
-          // como estavam e o botao de ativar nao e bloqueado por isso (#312/#316/#317).
+          // Verificacao indisponivel agora (rede/helper) ou versao do app recusada pela
+          // Proton: a conta e o perfil seguem como estavam e o botao de ativar nao e
+          // bloqueado por isso (#312/#316/#317).
           scheduleProtonSessionRetry();
-          setProtonFeedback('Não consegui confirmar sua sessão Proton agora. A ativação com a rota já preparada continua disponível.', 'busy');
+          setProtonFeedback(protonSessionUnverifiedMessage(chk), 'busy');
         }
       } catch (error) {
         if (generation !== protonStateGeneration) return;

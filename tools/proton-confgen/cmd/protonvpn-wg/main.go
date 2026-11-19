@@ -50,6 +50,12 @@ func jsonErrorResponse(err error) map[string]any {
 		"success": false,
 		"error":   err.Error(),
 	}
+	if auth.IsAppVersionError(err) {
+		// Repetir nao adianta: so uma versao nova do GoLiveBypass resolve.
+		response["code"] = "APP_VERSION_UNSUPPORTED"
+		response["retryable"] = false
+		return response
+	}
 	var hvErr auth.HumanVerificationError
 	if errors.As(err, &hvErr) {
 		response["code"] = hvErr.Code
@@ -103,8 +109,11 @@ func sessionCheckResponse(session *api.Session, err error, username string, time
 		// Sessao ausente sem erro tipado: invalida, nunca temporaria.
 		err = errors.New("session unavailable")
 	}
+	appVersion := auth.IsAppVersionError(err)
 	errorMessage := "Sessão expirada ou não encontrada"
-	if auth.IsTemporarySessionError(err) {
+	if appVersion {
+		errorMessage = "A Proton não aceita mais esta versão do GoLiveBypass"
+	} else if auth.IsTemporarySessionError(err) {
 		errorMessage = "Não foi possível verificar a sessão Proton temporariamente"
 	}
 	classified := jsonErrorResponse(err)
@@ -121,6 +130,12 @@ func sessionCheckResponse(session *api.Session, err error, username string, time
 	retryable, ok := classified["retryable"]
 	if !ok {
 		retryable = false
+	}
+	if appVersion {
+		// A Proton recusou esta versao do app, nao o token: a sessao salva
+		// continua valida e a ativacao com o perfil ja gerado segue disponivel.
+		// retryable=true e o que mantem a GUI autenticada nesse caso.
+		retryable = true
 	}
 	response["retryable"] = retryable
 	return response
@@ -192,7 +207,9 @@ func run() error {
 		session, _, sessionErr := authClient.CheckSession()
 		if sessionErr != nil || session == nil {
 			errorMessage := "Sessão Proton expirada ou não encontrada."
-			if auth.IsTemporarySessionError(sessionErr) {
+			if auth.IsAppVersionError(sessionErr) {
+				errorMessage = "A Proton não aceita mais esta versão do GoLiveBypass."
+			} else if auth.IsTemporarySessionError(sessionErr) {
 				errorMessage = "Não foi possível verificar a sessão Proton temporariamente."
 			}
 			if cfg.JSONOutput {

@@ -168,6 +168,25 @@ describe("ProtonVPN Integration & Sidecar", () => {
       .toMatchObject({ valid: false, retryable: true });
   });
 
+  it("trata a versao do app recusada pela Proton como falha de verificacao, nao sessao invalida", () => {
+    // Contrato do helper para -check-session.
+    expect(normalizeProtonSessionResult({
+      success: false,
+      valid: false,
+      error: "A Proton não aceita mais esta versão do GoLiveBypass",
+      code: "APP_VERSION_UNSUPPORTED",
+      retryable: true,
+    }, "conta_teste")).toEqual({
+      valid: false,
+      code: "APP_VERSION_UNSUPPORTED",
+      retryable: true,
+      error: "A Proton não aceita mais esta versão do GoLiveBypass",
+    });
+    // Sem o campo retryable, o proprio codigo ja e retryable.
+    expect(normalizeProtonSessionResult({ success: false, valid: false, code: "APP_VERSION_UNSUPPORTED" }))
+      .toMatchObject({ valid: false, code: "APP_VERSION_UNSUPPORTED", retryable: true });
+  });
+
   itConfgen("cria a pasta de dados antes de executar o login", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "proton-test-"));
     const nested = path.join(root, "nested", "data");

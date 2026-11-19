@@ -5,7 +5,7 @@ import type { PhoneMeta } from '../../shared/types';
 
 export type { PhoneMeta };
 
-export type PhoneError = 'busy' | 'no_routes' | 'probe_failed' | 'auth_failed' | 'timeout' | 'invalid_conf' | 'unknown';
+export type PhoneError = 'busy' | 'no_routes' | 'probe_failed' | 'auth_failed' | 'app_outdated' | 'timeout' | 'invalid_conf' | 'unknown';
 
 export interface PhoneDeps {
   fetch(opts: { mode: 'catalog' | 'manual'; server?: string; deviceName?: string; confOut: string }): Promise<ProtonFetchResult>;
@@ -61,12 +61,13 @@ export class PhoneConfService {
       for (let attempt = 0; best && attempt < PROBE_ATTEMPTS; attempt++) {
         gen = await this.d.fetch({ mode: 'manual', server: best.server, deviceName: PHONE_DEVICE_NAME, confOut: tmp });
         if (run !== this.run) return { ok: false, error: 'unknown' };
-        if (gen.ok || gen.error === 'auth_failed' || gen.error === 'timeout') break;
+        // Conta, versão do app recusada e demora não dependem do servidor: trocar de rota não ajuda
+        if (gen.ok || isServerIndependent(gen.error)) break;
         const failed = best.server;
         left = left.filter(r => r.server !== failed);
         best = pickLowestPing(left);
       }
-      if (!gen.ok) return { ok: false, error: gen.error === 'auth_failed' || gen.error === 'timeout' ? gen.error : 'probe_failed' };
+      if (!gen.ok) return { ok: false, error: isServerIndependent(gen.error) ? gen.error : 'probe_failed' };
       if (!best) return { ok: false, error: 'probe_failed' };
 
       const built = buildPhoneConf(this.d.readFile(tmp));
@@ -125,6 +126,11 @@ export class PhoneConfService {
   }
 }
 
+/** Falhas que não dependem do servidor escolhido e chegam ao painel como vieram. */
+function isServerIndependent(e: ProtonFetchResult['error']): e is 'auth_failed' | 'app_outdated' | 'timeout' {
+  return e === 'auth_failed' || e === 'app_outdated' || e === 'timeout';
+}
+
 function passThrough(e: ProtonFetchResult['error']): PhoneError {
-  return e === 'auth_failed' || e === 'timeout' ? e : 'unknown';
+  return isServerIndependent(e) ? e : 'unknown';
 }

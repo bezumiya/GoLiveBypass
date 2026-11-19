@@ -308,6 +308,12 @@ func (c *Client) handleSessionRefreshWithGeneration(ctx context.Context, generat
 			fmt.Println("Could not refresh the saved Proton session temporarily; keeping it for a later retry.")
 			return nil, err
 		}
+		if IsAppVersionError(err) {
+			// Proton refused this build, not the refresh token. Keep the cache
+			// and skip the password login, which would be refused the same way.
+			fmt.Println("Proton no longer accepts this app version; keeping the saved session until GoLiveBypass is updated.")
+			return nil, err
+		}
 		if !IsSessionInvalid(err) {
 			// A malformed local cache or protocol response is not proof that the
 			// refresh token was revoked. Preserve the cache for diagnosis/retry.
@@ -374,6 +380,12 @@ func (c *Client) tryExistingSessionWithGeneration(ctx context.Context, generatio
 
 	valid, verifyErr := VerifySessionStatusContext(ctx, c.httpClient, c.config.APIURL, savedSession)
 	if verifyErr != nil {
+		if IsAppVersionError(verifyErr) {
+			// Checked before the deletion below: an app-version rejection
+			// never proves that the saved session was revoked.
+			fmt.Println("Proton no longer accepts this app version; keeping the saved session until GoLiveBypass is updated.")
+			return nil, verifyErr
+		}
 		if IsSessionInvalid(verifyErr) {
 			fmt.Println("Saved session invalid, re-authenticating...")
 			if err := c.deleteSessionIfCurrent(ctx, generation, savedSession); err != nil {
@@ -924,7 +936,7 @@ func (c *Client) submit2FAContext(ctx context.Context, session *api.Session, cod
 	}
 	if status < 200 || status >= 300 {
 		if twoFAResp.Code != 0 && !constants.IsSuccessCode(twoFAResp.Code) {
-			return nil, &TwoFactorError{Code: twoFAResp.Code}
+			return nil, newTwoFactorError(twoFAResp.Code)
 		}
 		return nil, &ProtocolError{Operation: "2FA", StatusCode: status}
 	}
@@ -933,7 +945,7 @@ func (c *Client) submit2FAContext(ctx context.Context, session *api.Session, cod
 		if twoFAResp.Code == 0 {
 			return nil, &ProtocolError{Operation: "2FA", StatusCode: status}
 		}
-		return nil, &TwoFactorError{Code: twoFAResp.Code}
+		return nil, newTwoFactorError(twoFAResp.Code)
 	}
 	if !hasScope(twoFAResp.Scopes, "vpn") {
 		return nil, &ProtocolError{Operation: "2FA scope upgrade", StatusCode: status}

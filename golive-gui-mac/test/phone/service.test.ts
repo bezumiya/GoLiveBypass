@@ -157,6 +157,23 @@ describe('PhoneConfService.generate', () => {
     expect(await slow.svc.generate('qr')).toEqual({ ok: false, error: 'timeout' });
   });
 
+  it('versão do app recusada passa direto, no catálogo e no teste, sem tentar outras rotas', async () => {
+    const catalog = setup({ fetch: vi.fn(async () => ({ ok: false, error: 'app_outdated' })) });
+    expect(await catalog.svc.generate('qr')).toEqual({ ok: false, error: 'app_outdated' });
+
+    // A recusa vale para qualquer servidor: trocar de rota só gastaria mais duas tentativas
+    const tried: string[] = [];
+    const probe = setup({
+      fetch: vi.fn(async (o: any) => {
+        if (o.mode === 'catalog') return { ok: true, routes: ROUTES };
+        tried.push(o.server);
+        return { ok: false, error: 'app_outdated' };
+      }),
+    });
+    expect(await probe.svc.generate('qr')).toEqual({ ok: false, error: 'app_outdated' });
+    expect(tried).toEqual(['MX-FREE#16']);
+  });
+
   it('busy quando o Mac já busca rota ou outra geração está em andamento', async () => {
     const mac = setup({ isBusy: () => true });
     expect(await mac.svc.generate('qr')).toEqual({ ok: false, error: 'busy' });
