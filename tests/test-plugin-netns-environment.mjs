@@ -137,19 +137,26 @@ globalThis.relaunch = spawnRelaunchDetached("pkexec", ["launcher"], { DISPLAY: "
     assert.equal(removed[0].path, "/run/user/1000/golive/.relaunch-stderr-uuid-de-teste.log");
 });
 
-test("helper embutido é ELF x64 com SHA-256 válido", () => {
+test("helpers embutidos são ELF x64 com SHA-256 válido", () => {
     const source = readFileSync(new URL("../goLiveBypass/vpn-proton.ts", import.meta.url), "utf8");
-    const start = source.indexOf('"netns-launcher": {');
-    const end = source.indexOf("\n    },", start);
-    assert.ok(start >= 0 && end > start);
-    const block = source.slice(start, end);
-    const hash = block.match(/sha256: "([a-f0-9]{64})"/)[1];
-    const array = block.split("gzipBase64: [")[1].split("].join")[0];
-    const encoded = [...array.matchAll(/"([^"]+)"/g)].map(match => match[1]).join("");
-    const binary = gunzipSync(Buffer.from(encoded, "base64"));
-    assert.equal(createHash("sha256").update(binary).digest("hex"), hash);
-    assert.equal(binary.subarray(0, 4).toString("hex"), "7f454c46");
-    assert.equal(binary[4], 2); // ELF64
-    assert.equal(binary[5], 1); // little-endian
-    assert.equal(binary.readUInt16LE(18), 62); // x86-64
+    for (const name of ["proton-confgen", "netns-launcher"]) {
+        const start = source.indexOf(`"${name}": {`);
+        const end = source.indexOf("\n    },", start);
+        assert.ok(start >= 0 && end > start, `bloco ${name} ausente`);
+        const block = source.slice(start, end);
+        const hash = block.match(/sha256: "([a-f0-9]{64})"/)[1];
+        const array = block.split("gzipBase64: [")[1].split("].join")[0];
+        const encoded = [...array.matchAll(/"([^"]+)"/g)].map(match => match[1]).join("");
+        const binary = gunzipSync(Buffer.from(encoded, "base64"));
+        assert.equal(createHash("sha256").update(binary).digest("hex"), hash, `${name}: SHA-256`);
+        assert.equal(binary.subarray(0, 4).toString("hex"), "7f454c46", `${name}: ELF`);
+        assert.equal(binary[4], 2, `${name}: ELF64`);
+        assert.equal(binary[5], 1, `${name}: little-endian`);
+        assert.equal(binary.readUInt16LE(18), 62, `${name}: x86-64`);
+        if (name === "proton-confgen") {
+            // A 4.17.2 do identificador antigo tomava 5003; o helper precisa ser o build novo.
+            assert.ok(binary.includes("linux-vpn-gui@"), "helper Proton sem o identificador oficial");
+            assert.ok(!binary.includes("linux-vpn@4.17.2"), "helper Proton ainda anuncia a 4.17.2");
+        }
+    }
 });
