@@ -4,6 +4,32 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [Não lançado]
+
+### Alterado
+
+- **Relato de bug com log enxuto e um resumo no topo que nunca é cortado (GUI Windows/Linux e plugin).** Numa revisão das 327 issues de produção, o log chegava no teto (mediana de 64,5 KB para ~65 KB) e 127 dos 216 relatos com log vieram cortados. Na mediana, 57% dos bytes eram eventos repetitivos. A ativação saía do relato e cada issue virava pergunta (#431: duas buscas de rota encheram o ring do plugin e só sobrou progresso).
+  - **Menos ruído:**
+    - O plugin registra a busca de rota pela troca de fase e um resumo no fim, com contagem e servidores testados e o resultado de cada um, em vez de uma linha por servidor (`helper.progress_sampled` vira `helper.phase`). A tela continua recebendo todo o progresso.
+    - A GUI grava uma linha por chamada do `proton-confgen`, sem o par start/complete e sem a cauda do stderr quando dá certo.
+    - A varredura do Discord registra só as pastas que existem, mais uma linha `scan.raizes testadas=N achadas=M`.
+    - As linhas `script.*` do `--status` do Linux só entram de novo quando mudam (falha sempre entra).
+    - Na saúde do túnel, o aviso igual ao anterior e a leitura `wg stats` saudável entram no máximo a cada 5 minutos, e a volta ao normal entra na hora.
+    - Os IDs de operação da GUI passam de 36 para 8 caracteres.
+    - Nos relatos reais da 2.0.15 em diante, essas regras reduzem o log em cerca de 44%.
+  - **Estrutura:**
+    - As linhas da GUI ganham a data (`[MM-DD HH:MM:SS]`), porque o relato junta sessões de dias diferentes.
+    - O fim de cada operação serializada traz o resultado e a duração.
+    - Os logs do proxy legado só entram no relato da GUI se foram escritos nas últimas 24 h (estado misto, como no #277).
+  - **Resumo `=== resumo ===` no topo do log:**
+    - o que mostra: as últimas operações com resultado e duração, a ativação e o relaunch, o servidor escolhido, o último aviso ou erro de cada tipo e o horário do envio;
+    - o erro que a tela mostrou: na GUI, a falha devolvida à janela nas ações do usuário vira `ui erro.exibido`; no plugin, ele já vem no `operation.*.failed`;
+    - de onde sai: na GUI, de uma cauda maior do `gui.log`; no plugin, de uma fila própria de marcos que o ruído não consegue esvaziar.
+  - **Lacunas:**
+    - O cliente macOS não tem log nem relato, então não recebe nada disto por enquanto.
+    - O standalone segue pausado e não muda.
+    - As informações novas (handshake no Linux, erro do Discord no namespace, agente polkit, outras VPNs, versão desatualizada, sintoma obrigatório) ficam para a próxima etapa.
+
 ## [2.0.17] - 2026-11-19
 
 ### Corrigido

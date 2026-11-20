@@ -46,10 +46,12 @@ describe("montarLog", () => {
     logger.info("app", "depois");
 
     const log = montarLog(raiz, [], "token-de-teste");
-    expect(log).toContain("[12:00:00] [error][net] socks.falha (x3, ate 12:00:02)");
+    expect(log).toContain("[10-28 12:00:00] [error][net] socks.falha (x3, ate 12:00:02)");
     expect(log).toContain("=== gui.log (antes do ring buffer) ===\n[11:00:00] [info][app] sessao.anterior");
-    expect(log.split("[info][app] depois").length - 1).toBe(1);
-    expect(log.split("[error][net] socks.falha").length - 1).toBe(1);
+    // O resumo do topo repete o erro de proposito; a sessao em si nao pode vir duas vezes.
+    const corpo = log.slice(log.indexOf("=== sessao GUI (ring buffer) ==="));
+    expect(corpo.split("[info][app] depois").length - 1).toBe(1);
+    expect(corpo.split("[error][net] socks.falha").length - 1).toBe(1);
   });
 
   it("log legado grande nao empurra a falha recente da GUI para fora da issue (#379/#399)", () => {
@@ -67,10 +69,51 @@ describe("montarLog", () => {
     const log = montarLog(raiz, [], "token-de-teste");
     // Cabe na issue sem o corte cabeca+cauda da API (64KB menos meta e descricao).
     expect(Buffer.byteLength(log, "utf8")).toBeLessThanOrEqual(56 * 1024);
-    expect(log.startsWith("=== sessao GUI (ring buffer) ===")).toBe(true);
+    expect(log.startsWith("=== resumo ===")).toBe(true);
+    expect(log).toContain("\n=== sessao GUI (ring buffer) ===\n");
     expect(log).toContain("FALHA-RECENTE");
     // O legado entra so pela cauda: a ultima linha do arquivo, nunca a primeira.
     expect(log).toContain("escolhida socks5://10.0.0.249:1080: 2999ms");
     expect(log).not.toContain("escolhida socks5://10.0.0.0:1080: 0ms");
+  });
+
+  it("log legado parado ha mais de um dia fica fora do relato", () => {
+    const dir = logsDir(raiz, process.platform);
+    fs.mkdirSync(dir, { recursive: true });
+    logger.initLogger(dir);
+    const installDir = path.join(raiz, "GoLiveBypass");
+    fs.mkdirSync(installDir, { recursive: true });
+    const arquivo = path.join(installDir, "golivebypass.log");
+    fs.writeFileSync(arquivo, "escolhida socks5://10.0.0.1:1080: 12ms, saida em US\n");
+    const doisDiasAtras = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(arquivo, doisDiasAtras, doisDiasAtras);
+    logger.info("app", "sessao.atual");
+
+    const log = montarLog(raiz, [], "token-de-teste");
+    expect(log).toContain("sessao.atual");
+    expect(log).not.toContain("golivebypass.log");
+    expect(log).not.toContain("socks5://");
+  });
+
+  it("resumo sobrevive a uma sessao longa: ativacao, erro da tela e servidor no topo", () => {
+    const dir = logsDir(raiz, process.platform);
+    fs.mkdirSync(dir, { recursive: true });
+    logger.initLogger(dir);
+    logger.info("wiresock", "inicio de operacao serializada", { operation: "ativacao" });
+    logger.info("proton", "servidor ótimo selecionado com sucesso", { server: "US-FREE#75", ping: 142 });
+    logger.error("wiresock", "ativacao.falhou_revertida", { erro: "FALHA-DA-ATIVACAO", rollback: "ok" });
+    logger.info("wiresock", "fim de operacao serializada", { operation: "ativacao", resultado: "erro", duracao_ms: 12345 });
+    logger.warn("ui", "erro.exibido", { canal: "activate", mensagem: "MENSAGEM-DA-TELA" });
+    // Ruido suficiente para o trecho acima sair do orcamento do ring na issue.
+    for (let i = 0; i < 900; i++) logger.info("discord", `script.trace | msg=ruido ${i} ${"x".repeat(80)}`);
+
+    const log = montarLog(raiz, [], "token-de-teste");
+    const resumo = log.slice(0, log.indexOf("=== sessao GUI (ring buffer) ==="));
+    expect(Buffer.byteLength(log, "utf8")).toBeLessThanOrEqual(56 * 1024);
+    expect(resumo).toMatch(/\] ativacao erro em 12\.3s/);
+    expect(resumo).toContain("FALHA-DA-ATIVACAO");
+    expect(resumo).toContain("servidor escolhido: US-FREE#75 (ping 142ms)");
+    expect(resumo).toContain("MENSAGEM-DA-TELA");
+    expect(resumo).toMatch(/relato enviado em \d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
   });
 });

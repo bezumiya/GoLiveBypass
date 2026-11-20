@@ -129,6 +129,13 @@ export function scanRaiz(raiz: string, existe: boolean, flavour?: string) {
   logDiscoveryOnce("scan.raiz", data);
 }
 
+// Resumo das raizes testadas. A lista das raizes vem do ambiente e e a mesma em toda maquina; as
+// que nao existem (sempre a maioria: 6 clientes x 7 pastas) ocupavam 12-30% dos relatos. Quem
+// chama registra so as raizes encontradas (scanRaiz) e esta contagem.
+export function scanRaizes(testadas: number, achadas: number) {
+  logDiscoveryOnce("scan.raizes", { testadas, achadas });
+}
+
 // Um install valido (app.asar ou _app.asar presentes). O resources entra
 // sanitizado (placeholder/hash), nunca o caminho cru.
 export function scanInstall(resources: string, flavour: string) {
@@ -154,13 +161,21 @@ export function runningTasklist(imagem: string, ok: boolean, erro?: string) {
 // Resultado do script Linux --status --json: code + se o JSON parseou.
 // O stderr (banner, avisos) nao vai mais como blob — as linhas de trace viram
 // eventos proprios (scriptTrace) para o log ficar legivel.
+// O --status roda a cada leitura de estado da GUI: as linhas abaixo passam pelo mesmo dedupe da
+// varredura, entao so entram de novo quando mudam ou depois da janela.
+// Falha nunca e suprimida: cada uma entra no log.
 export function scriptStatus(code: number | null, jsonOk: boolean) {
-  logger.info("discord", "script.status", { code, json_ok: jsonOk ? "sim" : "nao" });
+  const data = { code, json_ok: jsonOk ? "sim" : "nao" };
+  if (code !== 0 || !jsonOk) {
+    logger.warn("discord", "script.status", data);
+    return;
+  }
+  logDiscoveryOnce("script.status", data);
 }
 
 // Uma linha de aviso/trace do script (ex.: "trace: varridas 5 blocos, achei 1").
 export function scriptTrace(linha: string) {
-  logger.info("discord", "script.trace", { msg: linha.slice(0, 200) });
+  logDiscoveryOnce("script.trace", { msg: linha.slice(0, 200) });
 }
 
 // Cada Discord que o script Linux encontrou (vem do JSON, com estado).
@@ -173,7 +188,7 @@ export function scriptInstall(
   if (extras?.flavour) data.flavour = extras.flavour;
   if (extras?.detected_by) data.detected_by = extras.detected_by;
   if (extras?.flatpak_id) data.flatpak_id = extras.flatpak_id;
-  logger.info("discord", "script.install", data);
+  logDiscoveryOnce("script.install", data);
 }
 
 export function scriptJsonInvalido(stdout: string) {

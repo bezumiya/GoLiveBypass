@@ -49,6 +49,8 @@ export interface PluginLogger {
     error(event: string, context?: PluginLogContext, data?: Record<string, unknown>, message?: string): PluginLogRecord | null;
     restore(lines: readonly string[]): void;
     records(): readonly PluginLogRecord[];
+    /** Operações, avisos/erros, aberturas e relaunch, preservados mesmo quando o ring os descartou. */
+    milestones(): readonly PluginLogRecord[];
     getLog(): string;
 }
 
@@ -65,6 +67,8 @@ const SAFE_KEYS: Record<string, true> = {
     canal: true, versão: true, versao: true, versao_atual: true, versao_nova: true, estado: true, modo: true, servicos: true, issue: true, namespace: true, namespace_removed: true, skipped_addresses: true, skipped_dns: true, driver_service: true, adapter_default_route: true, residual: true, allowed_apps_count: true, dropped_keys: true,
     // Retrato do ambiente (env.snapshot) e falhas de instalação: só rótulos técnicos, nunca caminho ou nome.
     so: true, so_build: true, kernel: true, distro: true, ipv6_kernel: true, wg_modulo: true, empacotamento: true, sessao_grafica: true, cliente: true, fuso: true, wiresock_versao: true, wiresock_upgrade: true, msi_pasta_installer: true, significado: true, passo: true, step: true, elevacao: true, esperado: true, setup_erros: true, causa_provavel: true, acao_manual: true, operacao: true, segundos_desde: true,
+    // Resumo da busca de rota (vpn-proton criarResumoDeProgresso): nomes de servidor Proton e contagens.
+    progresso_fase: true, progresso_eventos: true, servidores: true,
 };
 const DEDUPE_EVENT = /(?:watchdog|progress|probe|diagnostic|diagnóstico)/i;
 
@@ -199,11 +203,86 @@ export function pendingNamespaceRelaunch(records: readonly PluginLogRecord[]): {
     return null;
 }
 
+const MAX_MARCOS = 120;
+function ehMarco(record: PluginLogRecord): boolean {
+    return record.level !== "info" || EVENTO_OPERACAO.test(record.event) || EVENTO_ATIVACAO.test(record.event)
+        || /relaunch/i.test(record.message || "");
+}
+
+const RESUMO_MAX_BYTES = 4 * 1024;
+const RESUMO_LINHA_MAX = 240;
+const EVENTO_OPERACAO = /^operation\.(.+)\.(started|completed|failed)$/;
+const EVENTO_ATIVACAO = /^(vpn\.activation|linux\.network\.(ready|failed)|relaunch\.|wiresock\.start|plugin\.process\.)/;
+
+function linhaCurta(record: PluginLogRecord): string {
+    const texto = legacyLine(record);
+    return texto.length > RESUMO_LINHA_MAX ? `${texto.slice(0, RESUMO_LINHA_MAX)}…` : texto;
+}
+
+/**
+ * Bloco que abre o log do relato e nunca é cortado. O ring do plugin tem teto de eventos e o
+ * relato tem teto de bytes: numa sessão longa a ativação, o relaunch e o erro que a pessoa viu
+ * saíam do relato (o caso que motivou: duas buscas de rota encheram o ring e só sobrou progresso).
+ * Tudo vem dos registros que já estão no ring, já redigidos.
+ */
+export function montarResumoDoPlugin(records: readonly PluginLogRecord[], agora: Date = new Date()): string {
+    const saida = ["=== resumo ===", `relato enviado em ${agora.toISOString().slice(5, 19)}Z`];
+
+    const aberturas = records.filter(r => r.event === "plugin.process.started").slice(-3);
+    if (aberturas.length) saida.push(`aberturas do plugin: ${aberturas.map(r => r.ts.slice(5, 19)).join(", ")}`);
+
+    const operacoes: string[] = [];
+    const pendentes = new Map<string, PluginLogRecord>();
+    for (const record of records) {
+        const m = EVENTO_OPERACAO.exec(record.event);
+        if (!m) continue;
+        const chave = record.operation_id || m[1];
+        if (m[2] === "started") { pendentes.set(chave, record); continue; }
+        pendentes.delete(chave);
+        const ms = Number(record.data?.duration_ms);
+        const erro = m[2] === "failed" && record.data?.error !== undefined ? ` — ${clip(String(record.data.error), 160)}` : "";
+        operacoes.push(`  [${record.ts.slice(5, 19)}] ${m[1]} ${m[2] === "failed" ? "falhou" : "ok"}${Number.isFinite(ms) ? ` em ${Math.round(ms / 100) / 10}s` : ""}${erro}`);
+    }
+    for (const record of pendentes.values()) {
+        operacoes.push(`  [${record.ts.slice(5, 19)}] ${EVENTO_OPERACAO.exec(record.event)?.[1] ?? record.event} sem fim registrado`);
+    }
+    if (operacoes.length) saida.push("operacoes:", ...operacoes.slice(-8));
+
+    const ativacao = records.filter(r => EVENTO_ATIVACAO.test(r.event) && r.event !== "plugin.process.started"
+        || /relaunch/i.test(r.message || "")).slice(-4);
+    if (ativacao.length) saida.push("ativacao e relaunch:", ...ativacao.map(r => `  ${linhaCurta(r)}`));
+
+    const jaMostrados = new Set(ativacao);
+    const porEvento = new Map<string, { record: PluginLogRecord; vezes: number }>();
+    for (const record of records) {
+        if (record.level === "info" || jaMostrados.has(record) || EVENTO_OPERACAO.test(record.event)) continue;
+        const chave = `${record.component}|${record.event}|${record.message || ""}`;
+        const anterior = porEvento.get(chave);
+        porEvento.delete(chave);
+        porEvento.set(chave, { record, vezes: (anterior?.vezes ?? 0) + record.count });
+    }
+    const avisos = [...porEvento.values()].slice(-8);
+    if (avisos.length) {
+        saida.push("avisos e erros (ultimo de cada tipo):");
+        for (const { record, vezes } of avisos) saida.push(`  ${linhaCurta(record)}${vezes > 1 ? ` [${vezes}x no log]` : ""}`);
+    }
+
+    if (saida.length === 2) saida.push("(nenhuma operacao, aviso ou erro no log)");
+    const texto = saida.join("\n");
+    if (utf8Bytes(texto) <= RESUMO_MAX_BYTES) return texto;
+    const corte = new TextEncoder().encode(texto).subarray(0, RESUMO_MAX_BYTES);
+    const quebra = corte.lastIndexOf(10);
+    return `${new TextDecoder().decode(corte.subarray(0, quebra > 0 ? quebra : corte.length))}\n[resumo cortado]`;
+}
+
 export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
     const maxEvents = Math.max(1, Math.floor(options.maxEvents ?? 400));
     const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? 128 * 1024));
     const now = options.now || (() => new Date());
     const ring: PluginLogRecord[] = [];
+    // Marcos (operações, avisos/erros, aberturas, relaunch) em fila própria: o ruído pode empurrar
+    // a ativação para fora do ring, mas não daqui. É a fonte do resumo do relato.
+    const marcos: PluginLogRecord[] = [];
     let ringBytes = 0;
     let lastDedupeAt = 0;
     const trimRing = () => {
@@ -216,6 +295,10 @@ export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
         ring.push(record);
         ringBytes += utf8Bytes(JSON.stringify(record));
         trimRing();
+        if (ehMarco(record)) {
+            marcos.push(record);
+            if (marcos.length > MAX_MARCOS) marcos.shift();
+        }
     };
 
     const mergeAggregate = (target: PluginLogRecord, incoming: PluginLogRecord): void => {
@@ -304,6 +387,7 @@ export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
         error: (event, context, data, message) => emit("error", event, context, data, message),
         restore,
         records: () => ring,
+        milestones: () => marcos,
         getLog: () => ring.map(legacyLine).join("\n"),
     };
 }

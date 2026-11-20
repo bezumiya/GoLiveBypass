@@ -15,6 +15,7 @@ import { metaFragmentos } from "./fragmentos-ip";
 import { caminhoLogWireSock, ipv6NoPerfil, metaDoLogWireSock } from "./wiresock-log";
 import * as logsDir from "./logsDir";
 import { guiEnvironmentSnapshot } from "./env-snapshot";
+import { montarResumo } from "./relato-resumo";
 import type { WgTunnelStats } from "./wgstats";
 import {
   cortarDoFim,
@@ -40,8 +41,12 @@ const LOG_TOTAL_MAX = 240 * 1024;
 // desse orcamento, com prioridade para o fim da sessao atual.
 const LOG_ISSUE_MAX = 52 * 1024;
 const LOG_GUI_ANTERIOR_MAX = 8 * 1024; // gui.log de antes do ring buffer
+const LOG_RESUMO_FONTE_BYTES = 512 * 1024; // quanto do gui.log o resumo le (o arquivo vai ate 2MB)
 const LOG_LEGADO_ARQUIVO_MAX = 4 * 1024; // cauda de cada log do runtime legado
 const LOG_LEGADO_TOTAL_MAX = 8 * 1024;
+// A GUI so roda WireGuard: um log do runtime legado so interessa se algo ainda escreve nele (estado
+// misto, como no #277). Parado ha mais que isto, ele e historico e ja desviou a triagem (#379).
+const LOG_LEGADO_RECENTE_MS = 24 * 60 * 60 * 1000;
 const DESC_MAX = 8 * 1024;
 const TITLE_MAX = 200;
 
@@ -127,13 +132,16 @@ export function montarLog(
   // recentes; a cauda do arquivo so interessa pelo que VEIO ANTES disso.
   // Sem a dedup, o report repetia a sessao inteira duas vezes.
   const anteriores: string[] = [];
-  const guiLog = lerArquivoSeguro(path.join(logsDir.logsDir(dadosRaiz, process.platform), "gui.log"));
+  let complementoGui = "";
+  const caminhoGuiLog = path.join(logsDir.logsDir(dadosRaiz, process.platform), "gui.log");
+  const guiLog = lerArquivoSeguro(caminhoGuiLog);
   if (guiLog) {
     // Uma linha repetida vem com "(xN...)", que nao existe no arquivo; sem tirar o
     // sufixo o indexOf dava -1 e o report repetia o arquivo inteiro.
     const primeiraDoRing = recente.split("\n").find((l) => l.trim() !== "");
     const inicioDoRing = primeiraDoRing ? guiLog.indexOf(logger.semRepeticao(primeiraDoRing)) : -1;
     const complemento = inicioDoRing >= 0 ? guiLog.slice(0, inicioDoRing) : guiLog;
+    complementoGui = complemento;
     if (complemento.trim()) {
       anteriores.push("=== gui.log (antes do ring buffer) ===");
       anteriores.push(cortarDoFim(complemento.trimEnd(), LOG_GUI_ANTERIOR_MAX));
@@ -148,10 +156,12 @@ export function montarLog(
   let legadoBytes = 0;
   const addLegado = (titulo: string, arquivo: string) => {
     if (legadoBytes >= LOG_LEGADO_TOTAL_MAX) return;
+    const idadeMs = idadeDoArquivoMs(arquivo);
+    if (idadeMs === null || idadeMs > LOG_LEGADO_RECENTE_MS) return;
     const cota = Math.min(LOG_LEGADO_ARQUIVO_MAX, LOG_LEGADO_TOTAL_MAX - legadoBytes);
     const conteudo = lerArquivoSeguro(arquivo, cota);
     if (!conteudo) return;
-    legado.push(titulo, conteudo.trimEnd());
+    legado.push(`${titulo} (escrito ha ${Math.max(1, Math.round(idadeMs / 60_000))} min)`, conteudo.trimEnd());
     legadoBytes += Buffer.byteLength(conteudo, "utf8");
   };
   const plataforma = process.platform;
@@ -166,12 +176,25 @@ export function montarLog(
     addLegado(`=== golivebypass.log (${path.basename(path.dirname(resources))}) ===`, alvo);
   }
 
+  // O resumo abre o relato e nunca e cortado. Ele le uma cauda bem maior do gui.log que a do corpo
+  // (que o ruido pode ter empurrado), nao so o trecho que cabe no orcamento; sem arquivo, o ring.
+  const fonteResumo = lerArquivoSeguro(caminhoGuiLog, LOG_RESUMO_FONTE_BYTES) || `${complementoGui}\n${recente}`;
+  const resumo = montarResumo(fonteResumo, logger.stamp());
+
   // O ring fica com o que sobra do orcamento, guardando as linhas mais recentes.
   const titulo = "=== sessao GUI (ring buffer) ===";
-  const resto = [...anteriores, ...legado].join("\n");
+  const resto = [resumo, ...anteriores, ...legado].join("\n");
   const cotaRing = Math.max(8 * 1024, LOG_ISSUE_MAX - Buffer.byteLength(resto, "utf8") - titulo.length - 2);
-  const partes = [titulo, cortarDoFim(recente, cotaRing), ...anteriores, ...legado];
+  const partes = [resumo, titulo, cortarDoFim(recente, cotaRing), ...anteriores, ...legado];
   return redigir(partes.join("\n"), segredos, tokenApi);
+}
+
+function idadeDoArquivoMs(arquivo: string): number | null {
+  try {
+    return Math.max(0, Date.now() - fs.statSync(arquivo).mtimeMs);
+  } catch {
+    return null;
+  }
 }
 
 // O perfil WireSock ativo, lido so para saber se o tunel tem endereco IPv6. O conteudo (que tem a

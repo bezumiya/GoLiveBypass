@@ -1,5 +1,47 @@
 import { describe, expect, it } from "vitest";
 import { LOG_ISSUE_MAX, montarLog } from "../../goLiveBypass/bug-report";
+import { createPluginLogger, montarResumoDoPlugin } from "../../goLiveBypass/plugin-log";
+
+describe("resumo do relatorio do plugin", () => {
+  it("ativacao e relaunch ficam no topo mesmo quando o ring as descartou do corpo", () => {
+    let agora = Date.UTC(2026, 10, 15, 23, 0, 0);
+    const logger = createPluginLogger({ component: "plugin.native", now: () => new Date(agora += 1000) });
+    logger.info("plugin.process.started");
+    logger.info("operation.vpn-activation.started", { operation_id: "vpn-activation-a1" });
+    logger.info("linux.network.ready", { operation_id: "vpn-activation-a1", phase: "active" });
+    logger.info("relaunch.accepted", { operation_id: "vpn-activation-a1" }, { namespace: "glb-1" }, "comando de relaunch no namespace aceito com sucesso; encerrando processo atual");
+    logger.info("plugin.process.started");
+    logger.warn("relaunch.cliente_nao_subiu", {}, { namespace: "glb-1" });
+    logger.error("operation.vpn-activation.failed", { operation_id: "vpn-activation-b2" }, { duration_ms: 4321, error: "ERRO-DA-TELA" });
+    // Sessao longa depois: o ring do relato so leva o fim.
+    for (let i = 0; i < 380; i++) logger.info("route.diagnostic", {}, { reason: `rota ${i} sem resposta no momento `.repeat(8) });
+
+    // O ring ja descartou o comeco da sessao (o caso do relato que motivou o resumo).
+    expect(logger.records().some(r => r.event === "linux.network.ready")).toBe(false);
+    const resumo = montarResumoDoPlugin(logger.milestones(), new Date(agora));
+    expect(resumo.startsWith("=== resumo ===\nrelato enviado em 11-15T23:")).toBe(true);
+    expect(resumo).toMatch(/vpn-activation falhou em 4\.3s — ERRO-DA-TELA/);
+    expect(resumo).toContain("linux.network.ready");
+    expect(resumo).toContain("relaunch no namespace aceito");
+    expect(resumo).toContain("relaunch.cliente_nao_subiu");
+    expect(resumo).toMatch(/aberturas do plugin: 11-15T23:00:01, 11-15T23:00:05/);
+    expect(Buffer.byteLength(resumo, "utf8")).toBeLessThanOrEqual(4 * 1024 + 32);
+
+    const log = montarLog({ ring: logger.getLog(), caudaArquivo: "", sessao: "", segredos: [], token: "token", resumo });
+    expect(log.startsWith("=== resumo ===")).toBe(true);
+    expect(Buffer.byteLength(log, "utf8")).toBeLessThanOrEqual(LOG_ISSUE_MAX + 1024);
+    // O corpo perdeu o comeco da sessao; o resumo nao.
+    const corpo = log.slice(log.indexOf("=== plugin (memoria) ==="));
+    expect(corpo).not.toContain("ERRO-DA-TELA");
+    expect(log).toContain("ERRO-DA-TELA");
+  });
+
+  it("ring sem operacao nem aviso diz isso em vez de vir vazio", () => {
+    expect(montarResumoDoPlugin([], new Date(Date.UTC(2026, 0, 2, 3, 4, 5)))).toBe(
+      "=== resumo ===\nrelato enviado em 01-02T03:04:05Z\n(nenhuma operacao, aviso ou erro no log)",
+    );
+  });
+});
 
 describe("log do relatorio do plugin", () => {
   it("cabe na issue e preserva o fim do ring quando o plugin-vpn.log antigo e grande", () => {

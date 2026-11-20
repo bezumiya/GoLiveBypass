@@ -28,6 +28,7 @@ import {
 } from "./updater";
 import * as logger from "./logger";
 import * as discordscan from "./discordscan";
+import { descreverFalhaDaTela } from "./relato-resumo";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
 import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type TunnelStats, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, verifyWindowsNetwork, type WireSockConnectionStatus, wireSockSelectionForReport } from "./wiresock";
@@ -194,10 +195,16 @@ let protonRoutePoolAbort: AbortController | null = null;
 function withWireSockLifecycle<T>(operation: string, task: () => Promise<T>): Promise<T> {
   const run = wireSockLifecycleQueue.then(async () => {
     logger.info("wiresock", "inicio de operacao serializada", { operation });
+    const inicio = Date.now();
+    let resultado = "ok";
     try {
       return await task();
+    } catch (error) {
+      resultado = "erro";
+      throw error;
     } finally {
-      logger.info("wiresock", "fim de operacao serializada", { operation });
+      // Resultado e duracao: o resumo do relato monta a lista de operacoes a partir desta linha.
+      logger.info("wiresock", "fim de operacao serializada", { operation, resultado, duracao_ms: Date.now() - inicio });
     }
   });
   wireSockLifecycleQueue = run.then(() => undefined, () => undefined);
@@ -978,12 +985,18 @@ function logWindowsDiscoveryRoots(
   env: WindowsDiscoveryEnvironment,
   roots = rootsForEnvironment(env),
 ): void {
+  let testadas = 0;
+  let achadas = 0;
   for (const root of roots) {
     for (const flavour of ALL_APPS) {
       const rootPath = path.win32.join(root, flavour);
-      discordscan.scanRaiz(rootPath, diskFs.existsSync(rootPath), flavour);
+      testadas++;
+      if (!diskFs.existsSync(rootPath)) continue;
+      achadas++;
+      discordscan.scanRaiz(rootPath, true, flavour);
     }
   }
+  discordscan.scanRaizes(testadas, achadas);
 }
 
 
@@ -999,6 +1012,7 @@ function getMacDiscordInstalls(): DiscordInstall[] {
   const installs: DiscordInstall[] = [];
   const seen = new Set<string>();
   discordscan.scanInicio("darwin");
+  let testadas = 0;
 
   for (const root of roots) {
     for (const { flavour, appName } of MAC_APPS) {
@@ -1008,14 +1022,16 @@ function getMacDiscordInstalls(): DiscordInstall[] {
       const asar = path.join(resources, "app.asar");
       const originalAsar = path.join(resources, "_app.asar");
       const existe = diskFs.existsSync(asar) || diskFs.existsSync(originalAsar);
-      discordscan.scanRaiz(bundlePath, existe, flavour);
+      testadas++;
       if (existe) {
+        discordscan.scanRaiz(bundlePath, true, flavour);
         installs.push({ flavour, resources, exePath: "", bundlePath });
         discordscan.scanInstall(resources, flavour);
         seen.add(flavour);
       }
     }
   }
+  discordscan.scanRaizes(testadas, installs.length);
   discordscan.scanResultado(installs.length);
   return installs;
 }
@@ -3230,6 +3246,37 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
+// O que a pessoa viu na tela era a pergunta mais repetida nas issues ("qual erro apareceu?"). Nas
+// acoes que ela dispara, a falha devolvida a janela vira uma linha `ui erro.exibido` no log e entra
+// no resumo do relato. Canais de leitura (get-*, check-*) ficam fora: devolvem "sem sessao" e afins
+// como resultado normal, nao como erro mostrado.
+const CANAIS_DE_ACAO = new Set([
+  "activate", "deactivate", "restart-bypass", "restore-internet",
+  "login-proton", "logout-proton", "discover-proton-routes", "optimize-proton-route", "select-proton-route",
+  "import-wg-conf", "import-wg-conf-file", "test-wg-conf", "set-vpn-mode",
+  "set-linux-manual-target", "clear-linux-manual-target",
+]);
+{
+  const registrarOriginal = ipcMain.handle.bind(ipcMain);
+  const registrarFalha = (canal: string, valor: unknown) => {
+    const falha = descreverFalhaDaTela(valor);
+    if (falha) logger.warn("ui", "erro.exibido", { canal, ...(falha.codigo ? { codigo: falha.codigo } : {}), mensagem: falha.mensagem });
+  };
+  ipcMain.handle = ((canal: string, handler: Parameters<typeof ipcMain.handle>[1]) => {
+    if (!CANAIS_DE_ACAO.has(canal)) return registrarOriginal(canal, handler);
+    return registrarOriginal(canal, async (...args: Parameters<typeof handler>) => {
+      try {
+        const resultado = await handler(...args);
+        registrarFalha(canal, resultado);
+        return resultado;
+      } catch (error) {
+        registrarFalha(canal, error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
+    });
+  }) as typeof ipcMain.handle;
+}
+
 ipcMain.handle("activate", async (event) => {
   if (IS_LINUX) {
     // No Linux, a GUI delega pro script standalone; o script.sh ja tem a heuristica

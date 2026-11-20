@@ -80,7 +80,7 @@ import {
 import { installerFolderDiagnosis, windowsEnvironmentSnapshot } from "./vpn-windows";
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
-import { createOperationId, createPluginLogger, pendingNamespaceRelaunch, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
+import { createOperationId, createPluginLogger, montarResumoDoPlugin, pendingNamespaceRelaunch, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
 
 const PLUGIN_VERSION = "2.0.17";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
@@ -1224,7 +1224,14 @@ export async function submitBugReport(_: IpcMainInvokeEvent, value: unknown): Pr
 
     const segredos = coletarSegredosLocais();
     const blocoDeLog = pedido.includeLogs
-        ? montarLog({ ring: pluginLogger.getLog(), caudaArquivo: lerCaudaDoLog(), sessao: pedido.session, segredos, token: BUG_API_TOKEN })
+        ? montarLog({
+            ring: pluginLogger.getLog(),
+            caudaArquivo: lerCaudaDoLog(),
+            sessao: pedido.session,
+            segredos,
+            token: BUG_API_TOKEN,
+            resumo: montarResumoDoPlugin(pluginLogger.milestones()),
+        })
         : "";
     const status = await controller.getStatusAsync();
     const meta = montarMeta({

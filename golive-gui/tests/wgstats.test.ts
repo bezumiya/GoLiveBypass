@@ -5,7 +5,11 @@ import path from "path";
 import { definirLeitorFragmentos, metaFragmentos, reiniciarFragmentos } from "../electron/fragmentos-ip";
 import * as logger from "../electron/logger";
 import { registrarLogWireSock } from "../electron/wiresock-log";
-import { classifyWgReadiness, iniciarWgStatsWatchdog, parseWgDump, pararWgStatsWatchdog, WG_STATS_INTERVAL_MS } from "../electron/wgstats";
+import { classifyWgReadiness, iniciarWgStatsWatchdog, parseWgDump, pararWgStatsWatchdog, WG_SAUDE_INFO_MS, WG_STATS_INTERVAL_MS } from "../electron/wgstats";
+
+// A linha `stats` saudavel entra na 1a leitura e de novo so depois de WG_SAUDE_INFO_MS: a leitura
+// que volta a ser registrada e a primeira depois dessa janela.
+const LEITURA_DO_2O_REGISTRO = Math.ceil((WG_STATS_INTERVAL_MS + WG_SAUDE_INFO_MS) / WG_STATS_INTERVAL_MS);
 
 // O vigia tambem le os fragmentos IP (fragmentos-ip.ts). Nos testes o netstat de verdade nunca
 // roda: no Windows a suite ficaria esperando por ele com o relogio falso.
@@ -158,15 +162,17 @@ describe("watchdog WireGuard", () => {
     let chamadas = 0;
     const provider = vi.fn(() => {
       chamadas++;
-      if (chamadas === 2) return Promise.resolve({ ok: false, handshakeAgoS: null, rxBytes: null, txBytes: null, endpoint: null, error: "leitura falhou" });
+      // Falha logo antes da leitura registrada: o delta dela cobre dois intervalos.
+      if (chamadas === LEITURA_DO_2O_REGISTRO - 1) return Promise.resolve({ ok: false, handshakeAgoS: null, rxBytes: null, txBytes: null, endpoint: null, error: "leitura falhou" });
       const bytes = Math.round((Date.now() - inicio) / 1000) * 1024;
       return Promise.resolve({ ok: true, handshakeAgoS: 1, rxBytes: bytes, txBytes: bytes, endpoint: "peer" });
     });
     try {
       iniciarWgStatsWatchdog(provider);
-      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 3);
-      expect(chamadas).toBe(3);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * LEITURA_DO_2O_REGISTRO);
+      expect(chamadas).toBe(LEITURA_DO_2O_REGISTRO);
       const recent = logger.getRecent();
+      expect(recent.match(/\] \[info\]\[wg\] stats \|/g)).toHaveLength(2);
       expect(recent).toContain("rx_taxa_kbps=8 tx_taxa_kbps=8");
       expect(recent).not.toContain("rx_taxa_kbps=16");
     } finally {
@@ -178,17 +184,40 @@ describe("watchdog WireGuard", () => {
   it("contador que zerou (tunel reiniciado) nao vira taxa negativa", async () => {
     vi.useFakeTimers();
     logger._resetForTests();
-    const amostras = [500_000, 1_000];
+    let chamadas = 0;
     const provider = vi.fn(() => {
-      const bytes = amostras.shift() ?? 1_000;
+      chamadas++;
+      // O contador zera justo na leitura que volta a ser registrada.
+      const bytes = chamadas < LEITURA_DO_2O_REGISTRO ? 500_000 : 1_000;
       return Promise.resolve({ ok: true, handshakeAgoS: 1, rxBytes: bytes, txBytes: bytes, endpoint: "peer" });
     });
     try {
       iniciarWgStatsWatchdog(provider);
-      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 2);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * LEITURA_DO_2O_REGISTRO);
       const recent = logger.getRecent();
       expect(recent).toContain("rx_total_kb=1 ");
       expect(recent).not.toMatch(/taxa_kbps=-/);
+    } finally {
+      pararWgStatsWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it("aviso repetido entra uma vez; a volta ao normal entra na hora", async () => {
+    vi.useFakeTimers();
+    logger._resetForTests();
+    let chamadas = 0;
+    const provider = vi.fn(() => {
+      chamadas++;
+      const handshakeAgoS = chamadas <= 4 ? 500 + chamadas : 1;
+      return Promise.resolve({ ok: true, handshakeAgoS, rxBytes: 10, txBytes: 10, endpoint: "peer" });
+    });
+    try {
+      iniciarWgStatsWatchdog(provider);
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 5);
+      const recent = logger.getRecent();
+      expect(recent.match(/handshake\.velho/g)).toHaveLength(1);
+      expect(recent).toMatch(/\[warn\]\[wg\] handshake\.velho \| handshake_ha_s=501[\s\S]*\[info\]\[wg\] stats \| handshake_ha_s=1 /);
     } finally {
       pararWgStatsWatchdog();
       vi.useRealTimers();
