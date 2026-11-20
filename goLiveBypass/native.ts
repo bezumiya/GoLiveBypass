@@ -444,7 +444,7 @@ function eventForMessage(message: string): string {
 }
 
 // Retrato do ambiente que vai no log (env.snapshot, uma vez por abertura) e nos metadados do relato.
-// O fuso é só o deslocamento ("-03:00"), para converter o UTC do log no horário que a pessoa conta.
+// O fuso é só o deslocamento ("-03:00"): o texto do relato sai no horário local e o plugin-vpn.log, em UTC.
 function pluginEnvironmentSnapshot(): Record<string, string> {
     let base: Record<string, string | boolean> = { so: process.platform };
     try {

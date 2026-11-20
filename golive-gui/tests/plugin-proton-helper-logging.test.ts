@@ -78,7 +78,7 @@ describe("logs do helper Proton", () => {
             progresso.push(`GOLIVE_PROGRESS {"phase":"testing","total":12,"tested":${i + 1},"succeeded":${succeeded},"server":"US-FREE#${i}"}`);
         }
         progresso.push('GOLIVE_PROGRESS {"phase":"completed","total":12,"tested":12,"succeeded":1}');
-        helperState.stdout = '{"success":true}\n';
+        helperState.stdout = '{"success":true,"server":"US-FREE#7","pingMs":38,"downloadMbps":44.2,"uploadMbps":12.1,"endpoint":"203.0.113.9:51820"}\n';
         helperState.stderr = `${progresso.join("\n")}\n`;
         helperState.code = 0;
         const logs: Array<{ level: string; event: string; data?: Record<string, unknown> }> = [];
@@ -100,6 +100,9 @@ describe("logs do helper Proton", () => {
         expect(String(fim.servidores)).toContain("US-FREE#7:ok");
         expect(String(fim.servidores)).toContain("US-FREE#6:testando");
         expect(String(fim.servidores)).not.toContain("NL-FREE");
+        // A escolha do helper fica no fim (antes so existia nas amostras de progresso); o endpoint nao.
+        expect(fim).toMatchObject({ server: "US-FREE#7", ping_ms: 38, download_mbps: 44.2, upload_mbps: 12.1 });
+        expect(JSON.stringify(logs)).not.toContain("203.0.113.9");
     });
 
     it("o resumo da busca passa pelo filtro do log do plugin sem perder campos", () => {

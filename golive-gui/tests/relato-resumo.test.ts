@@ -38,6 +38,37 @@ describe("montarResumo", () => {
     expect(avisos).toContain("Falha 6 [6x no log]");
   });
 
+  it("operacao de bastidor que deu certo fica fora da lista; com erro, entra", () => {
+    const op = (hora: string, nome: string, resultado: string) => [
+      `[15/11/2026 - ${hora}] [info][wiresock] inicio de operacao serializada | operation=${nome}`,
+      `[15/11/2026 - ${hora}] [info][wiresock] fim de operacao serializada | operation=${nome} resultado=${resultado} duracao_ms=12`,
+    ];
+    const log = [
+      ...op("12:00:00", "ativacao", "ok"),
+      ...Array.from({ length: 10 }, () => op("12:01:00", "aguardar-selecao-login", "ok")).flat(),
+      ...op("12:02:00", "modo-vpn", "erro"),
+    ].join("\n");
+    const resumo = montarResumo(log, "15/11/2026 - 12:05:00");
+    expect(resumo).toContain("ativacao ok");
+    expect(resumo).not.toContain("aguardar-selecao-login");
+    expect(resumo).toContain("modo-vpn erro");
+  });
+
+  it("a mesma falha da tela repetida vira uma linha curta com a contagem", () => {
+    const msg = "Download WireSock retornou HTTP 502 A instalação falhou e não foi possível confirmar a rede (NETWORK_LOCK_FAILED: codigo=1). Use \"Restaurar internet\".";
+    const log = [
+      `[15/11/2026 - 22:43:00] [warn][ui] erro.exibido | canal=login-proton codigo=TWO_FACTOR_INVALID mensagem=O código 2FA está incorreto ou expirou.`,
+      `[15/11/2026 - 22:48:58] [warn][ui] erro.exibido | canal=activate mensagem=${msg}`,
+      `[15/11/2026 - 22:53:48] [warn][ui] erro.exibido | canal=activate mensagem=${msg}`,
+      `[15/11/2026 - 22:56:35] [warn][ui] erro.exibido | canal=activate mensagem=${msg} (x2, ate 22:57:40)`,
+    ].join("\n");
+    const resumo = montarResumo(log, "15/11/2026 - 23:00:00");
+    expect(resumo).toContain("  [15/11/2026 - 22:43:00] login-proton (TWO_FACTOR_INVALID): O código 2FA está incorreto ou expirou.\n");
+    // A mensagem inteira entra, sem o prefixo do evento, e as 4 vezes viram uma linha.
+    expect(resumo).toContain(`  [15/11/2026 - 22:56:35] activate: ${msg} [4x]`);
+    expect(resumo.match(/activate:/g)).toHaveLength(1);
+  });
+
   it("sem nada relevante diz isso e respeita o teto", () => {
     expect(montarResumo("[19/11/2026 - 12:00:00] [info][app] iniciado", "19/11/2026 - 12:00:01")).toContain("(nenhuma operacao, aviso ou erro no log)");
     const muitos = Array.from({ length: 500 }, (_, i) => `[19/11/2026 - 12:00:00] [warn][x${i}] evento.${i} | ${"detalhe ".repeat(40)}`).join("\n");

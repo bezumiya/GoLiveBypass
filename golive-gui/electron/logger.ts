@@ -3,7 +3,7 @@
 // e nunca derruba o app por falha de escrita.
 //
 // Formato das linhas (grep-friendly):
-//   [MM-DD HH:MM:SS] [nivel][categoria] mensagem | chave=valor chave=valor
+//   [DD/MM/AAAA - HH:MM:SS] [nivel][categoria] mensagem | chave=valor chave=valor
 // A data entra porque o relato junta o ring com o gui.log de sessoes anteriores: so com a hora,
 // linhas de dias diferentes pareciam fora de ordem. O fuso vai nos metadados do relato.
 //
@@ -25,7 +25,7 @@ const RING_TAIL_BYTES = 128 * 1024; // teto do getRecent() (o total do report e 
 
 interface Entrada {
   linha: string;
-  corpo: string; // linha sem o carimbo [MM-DD HH:MM:SS]: e o que decide se repetiu
+  corpo: string; // linha sem o carimbo [DD/MM/AAAA - HH:MM:SS]: e o que decide se repetiu
   n: number; // repeticoes consecutivas colapsadas (rajada de erro nao come o buffer)
   ultimaHora: string;
 }

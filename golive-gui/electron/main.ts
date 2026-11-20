@@ -616,6 +616,10 @@ let linuxStatusLastLogAt = 0;
 let linuxHealthTimer: ReturnType<typeof setInterval> | null = null;
 let linuxHealthInFlight = false;
 let linuxHealthFailures = 0;
+// Motivo da ultima falha registrada: o watchdog roda a cada 15s e a mesma falha (ex.: telemetria
+// sem root) virava uma linha por rodada, empurrando o resto da sessao para fora do relato.
+let linuxHealthUltimoMotivo = "";
+const LINUX_HEALTH_REGISTRO_A_CADA = 20; // falhas seguidas com o mesmo motivo (~5 min)
 let linuxHealthStatusNotificado = "";
 function linuxStatusLogAllowed(signature: string): boolean {
   const now = Date.now();
@@ -1774,6 +1778,7 @@ function stopLinuxHealthWatchdog() {
   linuxHealthTimer = null;
   linuxHealthInFlight = false;
   linuxHealthFailures = 0;
+  linuxHealthUltimoMotivo = "";
   linuxHealthStatusNotificado = "";
 }
 
@@ -1784,10 +1789,17 @@ function startLinuxHealthWatchdog() {
     linuxHealthInFlight = true;
     void checkLinuxTunnelHealth().then((result) => {
       if (result.healthy) {
+        if (linuxHealthFailures > 0) logger.info("linux", "tunel.diagnostico.normal", { falhas_antes: linuxHealthFailures });
         linuxHealthFailures = 0;
+        linuxHealthUltimoMotivo = "";
       } else {
         linuxHealthFailures += 1;
-        logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: linuxHealthFailures, motivo: result.reason });
+        // Entra a primeira falha, a troca de motivo e, com o mesmo motivo, uma a cada ~5 min.
+        const motivo = String(result.reason ?? "");
+        if (motivo !== linuxHealthUltimoMotivo || linuxHealthFailures % LINUX_HEALTH_REGISTRO_A_CADA === 0) {
+          linuxHealthUltimoMotivo = motivo;
+          logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: linuxHealthFailures, motivo: result.reason });
+        }
       }
       // A janela le o MESMO estado que este watchdog observa. Sem esta
       // comparacao, fechar o Discord ou perder o namespace deixava o botao
@@ -3260,7 +3272,8 @@ const CANAIS_DE_ACAO = new Set([
   const registrarOriginal = ipcMain.handle.bind(ipcMain);
   const registrarFalha = (canal: string, valor: unknown) => {
     const falha = descreverFalhaDaTela(valor);
-    if (falha) logger.warn("ui", "erro.exibido", { canal, ...(falha.codigo ? { codigo: falha.codigo } : {}), mensagem: falha.mensagem });
+    // *_CANCELLED e a tentativa substituida por outra (ex.: login refeito): nao e erro que a pessoa viu.
+    if (falha && !/_CANCELLED$/.test(falha.codigo ?? "")) logger.warn("ui", "erro.exibido", { canal, ...(falha.codigo ? { codigo: falha.codigo } : {}), mensagem: falha.mensagem });
   };
   ipcMain.handle = ((canal: string, handler: Parameters<typeof ipcMain.handle>[1]) => {
     if (!CANAIS_DE_ACAO.has(canal)) return registrarOriginal(canal, handler);

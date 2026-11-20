@@ -41,6 +41,16 @@ describe("resumo do relatorio do plugin", () => {
     expect(log).toContain("ERRO-DA-TELA");
   });
 
+  it("servidor escolhido pela busca entra no resumo mesmo com o ring cheio", () => {
+    let agora = Date.UTC(2026, 10, 15, 23, 0, 0);
+    const logger = createPluginLogger({ component: "plugin.native", now: () => new Date(agora += 1000) });
+    logger.info("helper.completed", {}, { exit_code: 0, json: true });
+    logger.info("helper.completed", {}, { exit_code: 0, json: true, server: "CA-FREE#19", ping_ms: 42, download_mbps: 31.5 });
+    for (let i = 0; i < 420; i++) logger.info("route.diagnostic", {}, { reason: `rota ${i}` });
+    expect(logger.records().some(r => r.event === "helper.completed")).toBe(false);
+    expect(montarResumoDoPlugin(logger.milestones(), new Date(agora))).toContain("servidor escolhido: CA-FREE#19 (ping 42ms) em ");
+  });
+
   it("ring sem operacao nem aviso diz isso em vez de vir vazio", () => {
     expect(montarResumoDoPlugin([], new Date(2026, 0, 2, 3, 4, 5))).toBe(
       "=== resumo ===\nrelato enviado em 02/01/2026 - 03:04:05\n(nenhuma operacao, aviso ou erro no log)",

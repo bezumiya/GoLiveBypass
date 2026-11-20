@@ -49,7 +49,7 @@ export interface PluginLogger {
     error(event: string, context?: PluginLogContext, data?: Record<string, unknown>, message?: string): PluginLogRecord | null;
     restore(lines: readonly string[]): void;
     records(): readonly PluginLogRecord[];
-    /** Operações, avisos/erros, aberturas e relaunch, preservados mesmo quando o ring os descartou. */
+    /** Operações, avisos/erros, aberturas, relaunch e servidor escolhido, preservados mesmo quando o ring os descartou. */
     milestones(): readonly PluginLogRecord[];
     getLog(): string;
 }
@@ -214,7 +214,8 @@ export function pendingNamespaceRelaunch(records: readonly PluginLogRecord[]): {
 const MAX_MARCOS = 120;
 function ehMarco(record: PluginLogRecord): boolean {
     return record.level !== "info" || EVENTO_OPERACAO.test(record.event) || EVENTO_ATIVACAO.test(record.event)
-        || /relaunch/i.test(record.message || "");
+        || /relaunch/i.test(record.message || "")
+        || (record.event === "helper.completed" && typeof record.data?.server === "string");
 }
 
 const RESUMO_MAX_BYTES = 4 * 1024;
@@ -259,6 +260,12 @@ export function montarResumoDoPlugin(records: readonly PluginLogRecord[], agora:
     const ativacao = records.filter(r => EVENTO_ATIVACAO.test(r.event) && r.event !== "plugin.process.started"
         || /relaunch/i.test(r.message || "")).slice(-4);
     if (ativacao.length) saida.push("ativacao e relaunch:", ...ativacao.map(r => `  ${linhaCurta(r)}`));
+
+    const escolha = [...records].reverse().find(r => r.event === "helper.completed" && typeof r.data?.server === "string");
+    if (escolha?.data) {
+        const ping = Number(escolha.data.ping_ms);
+        saida.push(`servidor escolhido: ${escolha.data.server}${Number.isFinite(ping) ? ` (ping ${ping}ms)` : ""} em ${carimbo(escolha.ts)}`);
+    }
 
     const jaMostrados = new Set(ativacao);
     const porEvento = new Map<string, { record: PluginLogRecord; vezes: number }>();

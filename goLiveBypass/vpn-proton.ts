@@ -641,6 +641,21 @@ export function criarResumoDeProgresso() {
     };
 }
 
+/**
+ * Servidor que o helper escolheu e a medição dele. Antes isso só aparecia nas amostras de
+ * progresso; com elas fora do log, o fim da chamada carrega a escolha (é o que a GUI registra
+ * em "servidor ótimo selecionado"). Só nome de servidor do catálogo e números.
+ */
+function escolhaDoHelper(json: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (!json || json.success !== true || typeof json.server !== "string" || !json.server.trim()) return {};
+    return {
+        server: json.server.trim().slice(0, 64),
+        ...(finitePositive(json.pingMs) ? { ping_ms: json.pingMs } : {}),
+        ...(finitePositive(json.downloadMbps) ? { download_mbps: json.downloadMbps } : {}),
+        ...(finitePositive(json.uploadMbps) ? { upload_mbps: json.uploadMbps } : {}),
+    };
+}
+
 export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
     return new Promise((resolve, reject) => {
         if (options.signal?.aborted) { reject(abortError()); return; }
@@ -759,6 +774,7 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
                 stderr_bytes: Buffer.byteLength(stderr, "utf8"),
                 json: Boolean(parsedJson),
                 ...progresso.resumo(),
+                ...escolhaDoHelper(parsedJson),
             });
             resolve({ code, stdout, stderr, json: parsedJson });
         });

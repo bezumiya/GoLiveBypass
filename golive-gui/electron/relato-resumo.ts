@@ -48,6 +48,12 @@ function curta(texto: string, max = LINHA_MAX): string {
   return texto.length > max ? `${texto.slice(0, max)}…` : texto;
 }
 
+// "(x3, ate ...)" no fim da linha: a mesma linha colapsada pelo ring.
+function repeticoes(msg: string): number {
+  const m = / \(x(\d+)(?:, ate [^)]*)?\)$/.exec(msg);
+  return m ? Number(m[1]) : 1;
+}
+
 function segundos(ms: string | undefined): string {
   const n = Number(ms);
   return Number.isFinite(n) ? `${Math.round(n / 100) / 10}s` : "?";
@@ -57,6 +63,9 @@ const EVENTO_ATIVACAO =
   /^(activation\.(completed|failed)|ativacao[._ ]|preflight concluido|readiness\.complete|relaunch\.|linux\.network\.(ready|failed)|ativacao duplicada)/;
 const EVENTO_SERVIDOR = /^servidor ótimo selecionado/;
 const EVENTO_TELA = "erro.exibido";
+// Operacoes de bastidor, instantaneas e repetidas a cada tela: quando dao certo, so ocupavam a lista
+// (nos relatos reais, 6 das 8 linhas eram "aguardar-selecao-login ok em 0s"). Com erro, entram.
+const OPERACOES_DE_BASTIDOR = new Set(["aguardar-selecao-login", "modo-vpn", "preferencias-proton"]);
 const ERRO_DE_HANDLER = /^Error occurred in handler for '[^']+'/;
 
 /**
@@ -76,8 +85,9 @@ export function montarResumo(texto: string, agora: string): string {
       const op = campo(l.dados, "operation") ?? "?";
       const resultado = campo(l.dados, "resultado");
       const duracao = campo(l.dados, "duracao_ms");
-      operacoes.push(`  [${l.stamp}] ${op}${resultado ? ` ${resultado}` : ""}${duracao ? ` em ${segundos(duracao)}` : ""}`);
       if (pendente && campo(pendente.dados, "operation") === op) pendente = null;
+      if (OPERACOES_DE_BASTIDOR.has(op) && resultado !== "erro") continue;
+      operacoes.push(`  [${l.stamp}] ${op}${resultado ? ` ${resultado}` : ""}${duracao ? ` em ${segundos(duracao)}` : ""}`);
     }
   }
   if (pendente) operacoes.push(`  [${pendente.stamp}] ${campo(pendente.dados, "operation") ?? "?"} em andamento`);
@@ -93,8 +103,30 @@ export function montarResumo(texto: string, agora: string): string {
     saida.push(`servidor escolhido: ${nome}${ping ? ` (ping ${ping}ms)` : ""} em ${servidor.stamp}`);
   }
 
-  const tela = linhas.filter((l) => l.evento === EVENTO_TELA).slice(-MAX_TELA);
-  if (tela.length) saida.push("erros mostrados na tela:", ...tela.map((l) => `  ${curta(l.texto)}`));
+  // A mesma falha repetida (a pessoa tentou de novo) vira uma linha so, com a contagem.
+  const porErro = new Map<string, { linha: LinhaDoLog; vezes: number }>();
+  for (const l of linhas) {
+    if (l.evento !== EVENTO_TELA) continue;
+    const chave = l.dados.replace(/ \(x\d+.*\)$/, "");
+    const anterior = porErro.get(chave);
+    porErro.delete(chave);
+    porErro.set(chave, { linha: l, vezes: (anterior?.vezes ?? 0) + repeticoes(l.msg) });
+  }
+  const tela = [...porErro.values()].slice(-MAX_TELA);
+  if (tela.length) {
+    saida.push("erros mostrados na tela:");
+    for (const { linha, vezes } of tela) {
+      // mensagem= e o ultimo campo e pode conter "codigo=1" no texto: os campos vem so de antes dele.
+      const dados = linha.dados.replace(/ \(x\d+.*\)$/, "");
+      const corte = dados.indexOf("mensagem=");
+      const antes = corte >= 0 ? dados.slice(0, corte) : dados;
+      const mensagem = corte >= 0 ? dados.slice(corte + "mensagem=".length) : dados;
+      const canal = campo(antes, "canal") ?? "?";
+      const codigo = campo(antes, "codigo");
+      // A mensagem da tela e o que mais importa no relato: cabe inteira (ja vem limitada a 400).
+      saida.push(`  ${curta(`[${linha.stamp}] ${canal}${codigo ? ` (${codigo})` : ""}: ${mensagem}`, 460)}${vezes > 1 ? ` [${vezes}x]` : ""}`);
+    }
+  }
 
   // Avisos e erros restantes: o mais recente de cada evento, com quantas vezes apareceu.
   // O erro da tela tem secao propria; o "Error occurred in handler" do Electron e agrupado pelo
@@ -106,7 +138,7 @@ export function montarResumo(texto: string, agora: string): string {
     const chave = `${l.cat}|${ERRO_DE_HANDLER.exec(l.evento)?.[0] ?? l.evento}`;
     const anterior = porEvento.get(chave);
     porEvento.delete(chave); // reinsere no fim: a ordem do Map vira "mais recente por ultimo"
-    porEvento.set(chave, { linha: l, vezes: (anterior?.vezes ?? 0) + 1 });
+    porEvento.set(chave, { linha: l, vezes: (anterior?.vezes ?? 0) + repeticoes(l.msg) });
   }
   const avisos = [...porEvento.values()].slice(-MAX_AVISOS);
   if (avisos.length) {
