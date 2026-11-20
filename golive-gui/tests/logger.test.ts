@@ -28,7 +28,7 @@ describe("logger", () => {
 
     const conteudo = fs.readFileSync(path.join(dir, "gui.log"), "utf8");
     expect(conteudo).toMatch(
-      /\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[info\]\[tor\] tunel\.verificado \| ms=342 porta=9060/,
+      /\[\d{2}\/\d{2}\/\d{4} - \d{2}:\d{2}:\d{2}\] \[info\]\[tor\] tunel\.verificado \| ms=342 porta=9060/,
     );
   });
 
@@ -53,11 +53,11 @@ describe("logger", () => {
 
       const linhas = logger.getRecent().split("\n").filter(Boolean);
       expect(linhas).toEqual([
-        "[10-28 12:00:00] [info][app] contexto.util",
-        "[10-28 12:00:00] [error][net] socks.falha | motivo=handshake (x120, ate 12:01:59)",
-        "[10-28 12:02:00] [info][app] depois",
+        "[28/10/2026 - 12:00:00] [info][app] contexto.util",
+        "[28/10/2026 - 12:00:00] [error][net] socks.falha | motivo=handshake (x120, ate 12:01:59)",
+        "[28/10/2026 - 12:02:00] [info][app] depois",
       ]);
-      expect(logger.semRepeticao(linhas[1])).toBe("[10-28 12:00:00] [error][net] socks.falha | motivo=handshake");
+      expect(logger.semRepeticao(linhas[1])).toBe("[28/10/2026 - 12:00:00] [error][net] socks.falha | motivo=handshake");
     } finally {
       vi.useRealTimers();
     }
@@ -72,8 +72,8 @@ describe("logger", () => {
         vi.advanceTimersByTime(1000);
       }
       const [linha] = logger.getRecent().split("\n").filter(Boolean);
-      expect(linha).toBe("[10-28 23:59:58] [error][net] socks.falha | motivo=handshake (x4, ate 10-29 00:00:01)");
-      expect(logger.semRepeticao(linha)).toBe("[10-28 23:59:58] [error][net] socks.falha | motivo=handshake");
+      expect(linha).toBe("[28/10/2026 - 23:59:58] [error][net] socks.falha | motivo=handshake (x4, ate 29/10/2026 - 00:00:01)");
+      expect(logger.semRepeticao(linha)).toBe("[28/10/2026 - 23:59:58] [error][net] socks.falha | motivo=handshake");
     } finally {
       vi.useRealTimers();
     }

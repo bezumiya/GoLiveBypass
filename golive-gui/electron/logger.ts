@@ -38,10 +38,12 @@ let tamanhoArquivo = 0;
 
 export function stamp(agora = new Date()): string {
   const dois = (n: number) => String(n).padStart(2, "0");
-  return `${dois(agora.getMonth() + 1)}-${dois(agora.getDate())} ${agora.toTimeString().slice(0, 8)}`;
+  return `${dois(agora.getDate())}/${dois(agora.getMonth() + 1)}/${agora.getFullYear()} - ${agora.toTimeString().slice(0, 8)}`;
 }
 
-const STAMP_LEN = 14; // "MM-DD HH:MM:SS"
+const STAMP_LEN = 21; // "DD/MM/AAAA - HH:MM:SS"
+const DATA_LEN = 10; // "DD/MM/AAAA"
+const HORA_DESDE = 13; // depois de "DD/MM/AAAA - "
 
 export function formatLine(
   nivel: Nivel,
@@ -74,7 +76,7 @@ function gravar(linha: string) {
   }
 }
 
-// Toda linha comeca com "[MM-DD HH:MM:SS] " (stamp()).
+// Toda linha comeca com "[DD/MM/AAAA - HH:MM:SS] " (stamp()).
 const horaDa = (linha: string) => linha.slice(1, 1 + STAMP_LEN);
 
 function empilhar(linha: string) {
@@ -174,7 +176,7 @@ export function getRecent(): string {
     const e = ring[i];
     const inicio = horaDa(e.linha);
     // Mesmo dia: so a hora final; virou o dia no meio da rajada: data e hora.
-    const fim = e.ultimaHora.slice(0, 5) === inicio.slice(0, 5) ? e.ultimaHora.slice(6) : e.ultimaHora;
+    const fim = e.ultimaHora.slice(0, DATA_LEN) === inicio.slice(0, DATA_LEN) ? e.ultimaHora.slice(HORA_DESDE) : e.ultimaHora;
     const ate = e.ultimaHora !== inicio ? `, ate ${fim}` : "";
     const texto = e.n > 1 ? `${e.linha} (x${e.n}${ate})` : e.linha;
     const custo = Buffer.byteLength(texto, "utf8");
@@ -190,7 +192,7 @@ export function getRecent(): string {
 
 // Linha do getRecent() como foi gravada no arquivo (sem o sufixo de repeticao).
 export function semRepeticao(linha: string): string {
-  return linha.replace(/ \(x\d+(?:, ate (?:\d{2}-\d{2} )?\d{2}:\d{2}:\d{2})?\)$/, "");
+  return linha.replace(/ \(x\d+(?:, ate (?:\d{2}\/\d{2}\/\d{4} - )?\d{2}:\d{2}:\d{2})?\)$/, "");
 }
 
 // Uso exclusivo de testes: o estado e de modulo, cada teste recomeca do zero.

@@ -52,13 +52,18 @@ describe("plugin: o log não descarta mais campos em silêncio", () => {
         expect(redactPluginData({ code: 1632, significado: undefined })).toEqual({ code: 1632 });
     });
 
-    it("a linha do relato traz mês/dia em UTC, a operação e a fase", () => {
+    it("a linha do relato traz data completa no horário local, a operação e a fase", () => {
         const logger = createPluginLogger({
             component: "plugin.native", pluginVersion: "t", platform: "linux", arch: "x64",
             now: () => new Date("2026-11-04T01:37:13.670Z"),
         });
         logger.info("linux.network.phase", { operation_id: "vpn-activation-ab-1", phase: "interface" });
-        expect(logger.getLog()).toBe("11-04T01:37:13.670Z [info] [plugin.native] linux.network.phase | op=vpn-activation-ab-1 phase=interface");
+        // O texto sai no horário local (igual à GUI); o JSONL continua em UTC.
+        const local = new Date("2026-11-04T01:37:13.670Z");
+        const dois = (n: number) => String(n).padStart(2, "0");
+        const esperado = `${dois(local.getDate())}/${dois(local.getMonth() + 1)}/${local.getFullYear()} - ${dois(local.getHours())}:${dois(local.getMinutes())}:${dois(local.getSeconds())}`;
+        expect(logger.getLog()).toBe(`[${esperado}] [info] [plugin.native] linux.network.phase | op=vpn-activation-ab-1 phase=interface`);
+        expect(logger.records()[0].ts).toBe("2026-11-04T01:37:13.670Z");
     });
 });
 

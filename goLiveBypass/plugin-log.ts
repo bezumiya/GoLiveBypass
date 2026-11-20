@@ -160,11 +160,19 @@ function eventName(value: string): string {
     const normalized = value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
     return normalized.slice(0, 120) || "plugin.event";
 }
-// O texto que vai no relato leva mês/dia e o "Z" do UTC: só o horário, sem data e sem fuso, fazia
+// O texto do relato leva data completa no horário local, igual à GUI: só o horário em UTC fazia
 // o "22:37" que a pessoa contava não bater com o "01:37" do log (#404), e o arquivo junta dias.
+// O arquivo JSONL continua com o ts ISO em UTC.
+export function carimbo(valor: string | Date): string {
+    const data = typeof valor === "string" ? new Date(valor) : valor;
+    if (Number.isNaN(data.getTime())) return String(valor);
+    const dois = (n: number) => String(n).padStart(2, "0");
+    return `${dois(data.getDate())}/${dois(data.getMonth() + 1)}/${data.getFullYear()} - `
+        + `${dois(data.getHours())}:${dois(data.getMinutes())}:${dois(data.getSeconds())}`;
+}
 // Fase e operação vão na linha: sem elas, três "linux.network.phase" seguidos pareciam iguais.
 function legacyLine(record: PluginLogRecord): string {
-    const stamp = `${record.ts.slice(5, 23)}Z`;
+    const stamp = `[${carimbo(record.ts)}]`;
     const label = record.message ? redactString(record.message) : record.event;
     const fields: string[] = [];
     if (record.operation_id) fields.push(`op=${record.operation_id}`);
@@ -226,10 +234,10 @@ function linhaCurta(record: PluginLogRecord): string {
  * Tudo vem dos registros que já estão no ring, já redigidos.
  */
 export function montarResumoDoPlugin(records: readonly PluginLogRecord[], agora: Date = new Date()): string {
-    const saida = ["=== resumo ===", `relato enviado em ${agora.toISOString().slice(5, 19)}Z`];
+    const saida = ["=== resumo ===", `relato enviado em ${carimbo(agora)}`];
 
     const aberturas = records.filter(r => r.event === "plugin.process.started").slice(-3);
-    if (aberturas.length) saida.push(`aberturas do plugin: ${aberturas.map(r => r.ts.slice(5, 19)).join(", ")}`);
+    if (aberturas.length) saida.push(`aberturas do plugin: ${aberturas.map(r => carimbo(r.ts)).join(", ")}`);
 
     const operacoes: string[] = [];
     const pendentes = new Map<string, PluginLogRecord>();
@@ -241,10 +249,10 @@ export function montarResumoDoPlugin(records: readonly PluginLogRecord[], agora:
         pendentes.delete(chave);
         const ms = Number(record.data?.duration_ms);
         const erro = m[2] === "failed" && record.data?.error !== undefined ? ` — ${clip(String(record.data.error), 160)}` : "";
-        operacoes.push(`  [${record.ts.slice(5, 19)}] ${m[1]} ${m[2] === "failed" ? "falhou" : "ok"}${Number.isFinite(ms) ? ` em ${Math.round(ms / 100) / 10}s` : ""}${erro}`);
+        operacoes.push(`  [${carimbo(record.ts)}] ${m[1]} ${m[2] === "failed" ? "falhou" : "ok"}${Number.isFinite(ms) ? ` em ${Math.round(ms / 100) / 10}s` : ""}${erro}`);
     }
     for (const record of pendentes.values()) {
-        operacoes.push(`  [${record.ts.slice(5, 19)}] ${EVENTO_OPERACAO.exec(record.event)?.[1] ?? record.event} sem fim registrado`);
+        operacoes.push(`  [${carimbo(record.ts)}] ${EVENTO_OPERACAO.exec(record.event)?.[1] ?? record.event} sem fim registrado`);
     }
     if (operacoes.length) saida.push("operacoes:", ...operacoes.slice(-8));
 

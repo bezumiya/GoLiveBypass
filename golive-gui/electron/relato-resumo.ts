@@ -20,7 +20,8 @@ interface LinhaDoLog {
   texto: string;
 }
 
-const FORMATO = /^\[((?:\d{2}-\d{2} )?\d{2}:\d{2}:\d{2})\] \[(info|warn|error)\]\[([^\]]+)\] (.*)$/;
+// "[DD/MM/AAAA - HH:MM:SS]"; o gui.log de versoes anteriores tem so "[HH:MM:SS]".
+const FORMATO = /^\[((?:\d{2}\/\d{2}\/\d{4} - )?\d{2}:\d{2}:\d{2})\] \[(info|warn|error)\]\[([^\]]+)\] (.*)$/;
 
 function analisar(linha: string): LinhaDoLog | null {
   const m = FORMATO.exec(linha);

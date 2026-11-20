@@ -46,7 +46,7 @@ describe("montarLog", () => {
     logger.info("app", "depois");
 
     const log = montarLog(raiz, [], "token-de-teste");
-    expect(log).toContain("[10-28 12:00:00] [error][net] socks.falha (x3, ate 12:00:02)");
+    expect(log).toContain("[28/10/2026 - 12:00:00] [error][net] socks.falha (x3, ate 12:00:02)");
     expect(log).toContain("=== gui.log (antes do ring buffer) ===\n[11:00:00] [info][app] sessao.anterior");
     // O resumo do topo repete o erro de proposito; a sessao em si nao pode vir duas vezes.
     const corpo = log.slice(log.indexOf("=== sessao GUI (ring buffer) ==="));
@@ -114,6 +114,6 @@ describe("montarLog", () => {
     expect(resumo).toContain("FALHA-DA-ATIVACAO");
     expect(resumo).toContain("servidor escolhido: US-FREE#75 (ping 142ms)");
     expect(resumo).toContain("MENSAGEM-DA-TELA");
-    expect(resumo).toMatch(/relato enviado em \d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    expect(resumo).toMatch(/relato enviado em \d{2}\/\d{2}\/\d{4} - \d{2}:\d{2}:\d{2}/);
   });
 });
