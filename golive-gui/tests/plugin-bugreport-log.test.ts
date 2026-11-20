@@ -51,6 +51,17 @@ describe("resumo do relatorio do plugin", () => {
     expect(montarResumoDoPlugin(logger.milestones(), new Date(agora))).toContain("servidor escolhido: CA-FREE#19 (ping 42ms) em ");
   });
 
+  it("aviso deduplicado aparece uma vez, com o horario da ultima ocorrencia e sem count duplicado", () => {
+    let agora = Date.UTC(2026, 10, 15, 23, 0, 0);
+    const logger = createPluginLogger({ component: "plugin.native", now: () => new Date(agora += 1000) });
+    logger.warn("route.probe.failed", {}, { reason: "sem resposta" });
+    logger.warn("route.probe.failed", {}, { reason: "sem resposta" });
+    const linha = montarResumoDoPlugin(logger.milestones(), new Date(agora)).split("\n").find(l => l.includes("route.probe.failed")) ?? "";
+    expect(linha).toContain("[2x no log]");
+    expect(linha).not.toContain("count=");
+    expect(linha).toContain(`[${carimbo(new Date(Date.UTC(2026, 10, 15, 23, 0, 2)))}]`);
+  });
+
   it("ring sem operacao nem aviso diz isso em vez de vir vazio", () => {
     expect(montarResumoDoPlugin([], new Date(2026, 0, 2, 3, 4, 5))).toBe(
       "=== resumo ===\nrelato enviado em 02/01/2026 - 03:04:05\n(nenhuma operacao, aviso ou erro no log)",

@@ -171,8 +171,9 @@ export function carimbo(valor: string | Date): string {
         + `${dois(data.getHours())}:${dois(data.getMinutes())}:${dois(data.getSeconds())}`;
 }
 // Fase e operação vão na linha: sem elas, três "linux.network.phase" seguidos pareciam iguais.
-function legacyLine(record: PluginLogRecord): string {
-    const stamp = `[${carimbo(record.ts)}]`;
+// `noResumo`: horario da ultima ocorrencia e sem o count=N (o resumo poe a contagem dele).
+function legacyLine(record: PluginLogRecord, noResumo = false): string {
+    const stamp = `[${carimbo(noResumo ? record.last_ts || record.ts : record.ts)}]`;
     const label = record.message ? redactString(record.message) : record.event;
     const fields: string[] = [];
     if (record.operation_id) fields.push(`op=${record.operation_id}`);
@@ -181,7 +182,7 @@ function legacyLine(record: PluginLogRecord): string {
         const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
         fields.push(`${key}=${clip(text, 300)}`);
     }
-    if (record.count && record.count > 1) fields.push(`count=${record.count}`);
+    if (!noResumo && record.count && record.count > 1) fields.push(`count=${record.count}`);
     return `${stamp} [${record.level}] [${record.component}] ${label}${fields.length ? ` | ${fields.join(" ")}` : ""}`;
 }
 
@@ -224,7 +225,7 @@ const EVENTO_OPERACAO = /^operation\.(.+)\.(started|completed|failed)$/;
 const EVENTO_ATIVACAO = /^(vpn\.activation|linux\.network\.(ready|failed)|relaunch\.|wiresock\.start|plugin\.process\.)/;
 
 function linhaCurta(record: PluginLogRecord): string {
-    const texto = legacyLine(record);
+    const texto = legacyLine(record, true);
     return texto.length > RESUMO_LINHA_MAX ? `${texto.slice(0, RESUMO_LINHA_MAX)}…` : texto;
 }
 

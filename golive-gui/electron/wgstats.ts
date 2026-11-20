@@ -178,7 +178,7 @@ export const WG_STATS_INTERVAL_MS = 45_000;
 // keepalive persistente e 25s, entao o dobro do dobro ja e folga generosa para jitter de rede.
 export const WG_STALE_HANDSHAKE_S = 180;
 
-// Saude saudavel vira linha de log so de tempos em tempos; um problema entra em toda leitura.
+// Saude saudavel vira linha de log so de tempos em tempos; o mesmo aviso tambem (ver registrarSaudeComLimite).
 export const WG_SAUDE_INFO_MS = 5 * 60_000;
 // Sem nenhuma fonte de estatistica, "indisponivel" nao muda a cada leitura: repetir so enche o log.
 export const WG_INDISPONIVEL_MS = 10 * 60_000;
@@ -186,9 +186,12 @@ let ultimaSaudeInfoMs = Number.NEGATIVE_INFINITY;
 let ultimoIndisponivelMs = Number.NEGATIVE_INFINITY;
 // Aviso igual ao anterior (mesmo evento) entra de novo so depois de WG_SAUDE_INFO_MS: um tunel
 // degradado gerava a mesma linha a cada 45s e empurrava o resto da sessao para fora do relato.
-// Mudou o evento (ex.: handshake.velho -> tunel.saude), entra na hora.
+// Mudou o evento (ex.: handshake.velho -> tunel.saude), entra na hora. A volta ao normal nao zera
+// este limite: com o handshake alternando velho/saudavel a cada leitura, o aviso voltaria toda vez.
 let ultimoAvisoEvento: string | null = null;
 let ultimoAvisoMs = Number.NEGATIVE_INFINITY;
+// Houve aviso registrado desde a ultima leitura saudavel registrada: a volta ao normal entra na hora.
+let avisoRegistrado = false;
 
 /**
  * Sem `wg.exe` (o normal com o WireSock direto) a saude do tunel vem do log do proprio
@@ -214,12 +217,13 @@ function registrarSaudeComLimite(nivel: "info" | "warn", evento: string, dados: 
     if (evento !== ultimoAvisoEvento || agora - ultimoAvisoMs >= WG_SAUDE_INFO_MS) {
       ultimoAvisoEvento = evento;
       ultimoAvisoMs = agora;
+      avisoRegistrado = true;
       logger.warn("wg", evento, dados);
     }
     return;
   }
-  if (ultimoAvisoEvento !== null) {
-    ultimoAvisoEvento = null;
+  if (avisoRegistrado) {
+    avisoRegistrado = false;
     ultimaSaudeInfoMs = Number.NEGATIVE_INFINITY;
   }
   if (agora - ultimaSaudeInfoMs >= WG_SAUDE_INFO_MS) {
@@ -243,6 +247,7 @@ export function iniciarWgStatsWatchdog(provider: WgStatsProvider = getWgStats) {
   ultimoIndisponivelMs = Number.NEGATIVE_INFINITY;
   ultimoAvisoEvento = null;
   ultimoAvisoMs = Number.NEGATIVE_INFINITY;
+  avisoRegistrado = false;
   // Fragmentos IP (so Windows, ver fragmentos-ip.ts): a contagem "desde o tunel" parte daqui.
   reiniciarFragmentos();
   void amostrarERegistrarFragmentos();

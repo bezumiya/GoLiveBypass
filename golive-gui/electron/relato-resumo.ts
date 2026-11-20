@@ -158,6 +158,19 @@ function cortarResumo(texto: string): string {
 }
 
 /**
+ * Resultado de uma operacao serializada pelo valor que ela devolveu: `erro` para
+ * `{ ok:false }`/`{ success:false }`, `cancelado` para `{ cancelled:true }`, senao `ok`.
+ * Excecao e tratada por quem chama.
+ */
+export function resultadoDaOperacao(valor: unknown): "ok" | "erro" | "cancelado" {
+  if (!valor || typeof valor !== "object") return "ok";
+  const r = valor as Record<string, unknown>;
+  if (r.cancelled === true || r.canceled === true) return "cancelado";
+  if (r.ok === false || r.success === false) return "erro";
+  return "ok";
+}
+
+/**
  * O que a tela recebeu de uma acao que falhou: a mensagem de `{ success: false }` ou o texto da
  * excecao que o IPC devolveu. Null quando nao houve falha.
  */

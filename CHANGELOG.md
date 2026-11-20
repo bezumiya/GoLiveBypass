@@ -19,7 +19,7 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
     - Nos relatos reais da 2.0.15 em diante, essas regras reduzem o log em cerca de 41%, já contando a data mais longa.
   - **Estrutura:**
     - As linhas do relato, na GUI e no plugin, passam a trazer data e hora locais no formato `[dd/mm/aaaa - hh:mm:ss]`, porque o relato junta sessões de dias diferentes. No plugin isso substitui o mês/dia em UTC com `Z`, para bater com o horário que a pessoa vê; o `plugin-vpn.log` continua com o horário ISO em UTC.
-    - O fim de cada operação serializada traz o resultado e a duração.
+    - O fim de cada operação serializada traz o resultado (`ok`, `erro` ou `cancelado`, inclusive quando a falha vem no valor devolvido, como `{ success: false }`) e a duração.
     - Os logs do proxy legado só entram no relato da GUI se foram escritos nas últimas 24 h (estado misto, como no #277).
   - **Resumo `=== resumo ===` no topo do log:**
     - o que mostra: as últimas operações com resultado e duração, a ativação e o relaunch, o servidor escolhido, o último aviso ou erro de cada tipo e o horário do envio;

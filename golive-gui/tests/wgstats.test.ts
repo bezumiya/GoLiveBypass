@@ -224,6 +224,28 @@ describe("watchdog WireGuard", () => {
     }
   });
 
+  it("handshake alternando velho/saudavel nao repete o aviso a cada leitura", async () => {
+    vi.useFakeTimers();
+    logger._resetForTests();
+    let chamadas = 0;
+    const provider = vi.fn(() => {
+      chamadas++;
+      const handshakeAgoS = chamadas % 2 === 1 ? 500 : 1;
+      return Promise.resolve({ ok: true, handshakeAgoS, rxBytes: 10 * chamadas, txBytes: 10 * chamadas, endpoint: "peer" });
+    });
+    try {
+      iniciarWgStatsWatchdog(provider);
+      // Leituras de 45s alternando, dentro da janela de 5 min: um aviso e uma volta ao normal.
+      await vi.advanceTimersByTimeAsync(WG_STATS_INTERVAL_MS * 6);
+      const recent = logger.getRecent();
+      expect(recent.match(/handshake\.velho/g)).toHaveLength(1);
+      expect(recent.match(/\[info\]\[wg\] stats/g)).toHaveLength(1);
+    } finally {
+      pararWgStatsWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
   it("le os fragmentos IP ao ligar e a cada leitura, e recomeca a contagem num tunel novo", async () => {
     vi.useFakeTimers();
     let v4 = 100;

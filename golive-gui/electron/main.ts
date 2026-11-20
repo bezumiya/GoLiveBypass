@@ -28,7 +28,7 @@ import {
 } from "./updater";
 import * as logger from "./logger";
 import * as discordscan from "./discordscan";
-import { descreverFalhaDaTela } from "./relato-resumo";
+import { descreverFalhaDaTela, resultadoDaOperacao } from "./relato-resumo";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
 import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type TunnelStats, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, verifyWindowsNetwork, type WireSockConnectionStatus, wireSockSelectionForReport } from "./wiresock";
@@ -198,7 +198,10 @@ function withWireSockLifecycle<T>(operation: string, task: () => Promise<T>): Pr
     const inicio = Date.now();
     let resultado = "ok";
     try {
-      return await task();
+      const valor = await task();
+      // Varias operacoes falham pelo valor ({ success:false }, recovery com ok:false), sem lancar.
+      resultado = resultadoDaOperacao(valor);
+      return valor;
     } catch (error) {
       resultado = "erro";
       throw error;
@@ -619,7 +622,8 @@ let linuxHealthFailures = 0;
 // Motivo da ultima falha registrada: o watchdog roda a cada 15s e a mesma falha (ex.: telemetria
 // sem root) virava uma linha por rodada, empurrando o resto da sessao para fora do relato.
 let linuxHealthUltimoMotivo = "";
-const LINUX_HEALTH_REGISTRO_A_CADA = 20; // falhas seguidas com o mesmo motivo (~5 min)
+let linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
+const LINUX_HEALTH_REGISTRO_MS = 5 * 60_000; // mesmo motivo entra de novo so depois disto
 let linuxHealthStatusNotificado = "";
 function linuxStatusLogAllowed(signature: string): boolean {
   const now = Date.now();
@@ -809,7 +813,7 @@ if (!gotLock) {
       const logs = logsDir.garantirLogsDir(app.getPath("home"), process.platform);
       logger.initLogger(logs);
       logger.patchConsole();
-      // As linhas do gui.log so tem HH:MM:SS e o arquivo junta dias: a data completa fica aqui.
+      // Instante exato da abertura, em ISO: o gui.log de versoes anteriores so tinha HH:MM:SS.
       logger.info("app", "iniciado", { versao: app.getVersion(), plataforma: process.platform, inicio: new Date().toISOString() });
       // Uma linha por abertura com SO/build, fuso e o que o relato precisaria perguntar (env-snapshot.ts).
       const ambiente = guiEnvironmentSnapshot();
@@ -1016,7 +1020,9 @@ function getMacDiscordInstalls(): DiscordInstall[] {
   const installs: DiscordInstall[] = [];
   const seen = new Set<string>();
   discordscan.scanInicio("darwin");
+  // Mesma semantica do Windows: testadas = caminhos olhados, achadas = os que existem no disco.
   let testadas = 0;
+  let achadas = 0;
 
   for (const root of roots) {
     for (const { flavour, appName } of MAC_APPS) {
@@ -1027,15 +1033,18 @@ function getMacDiscordInstalls(): DiscordInstall[] {
       const originalAsar = path.join(resources, "_app.asar");
       const existe = diskFs.existsSync(asar) || diskFs.existsSync(originalAsar);
       testadas++;
-      if (existe) {
+      if (existe || diskFs.existsSync(bundlePath)) {
+        achadas++;
         discordscan.scanRaiz(bundlePath, true, flavour);
+      }
+      if (existe) {
         installs.push({ flavour, resources, exePath: "", bundlePath });
         discordscan.scanInstall(resources, flavour);
         seen.add(flavour);
       }
     }
   }
-  discordscan.scanRaizes(testadas, installs.length);
+  discordscan.scanRaizes(testadas, achadas);
   discordscan.scanResultado(installs.length);
   return installs;
 }
@@ -1779,6 +1788,7 @@ function stopLinuxHealthWatchdog() {
   linuxHealthInFlight = false;
   linuxHealthFailures = 0;
   linuxHealthUltimoMotivo = "";
+  linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
   linuxHealthStatusNotificado = "";
 }
 
@@ -1792,12 +1802,16 @@ function startLinuxHealthWatchdog() {
         if (linuxHealthFailures > 0) logger.info("linux", "tunel.diagnostico.normal", { falhas_antes: linuxHealthFailures });
         linuxHealthFailures = 0;
         linuxHealthUltimoMotivo = "";
+        linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
       } else {
         linuxHealthFailures += 1;
-        // Entra a primeira falha, a troca de motivo e, com o mesmo motivo, uma a cada ~5 min.
+        // Entra a primeira falha, a troca de motivo e, com o mesmo motivo, uma a cada 5 min
+        // contados do ultimo registro (nao do contador de falhas, que segue de outro motivo).
         const motivo = String(result.reason ?? "");
-        if (motivo !== linuxHealthUltimoMotivo || linuxHealthFailures % LINUX_HEALTH_REGISTRO_A_CADA === 0) {
+        const agora = Date.now();
+        if (motivo !== linuxHealthUltimoMotivo || agora - linuxHealthUltimoRegistroMs >= LINUX_HEALTH_REGISTRO_MS) {
           linuxHealthUltimoMotivo = motivo;
+          linuxHealthUltimoRegistroMs = agora;
           logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: linuxHealthFailures, motivo: result.reason });
         }
       }

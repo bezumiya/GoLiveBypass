@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { descreverFalhaDaTela, montarResumo } from "../electron/relato-resumo";
+import { descreverFalhaDaTela, montarResumo, resultadoDaOperacao } from "../electron/relato-resumo";
 
 describe("montarResumo", () => {
   it("le linhas do formato antigo (so hora) e do novo, e marca operacao sem fim", () => {
@@ -73,6 +73,17 @@ describe("montarResumo", () => {
     expect(montarResumo("[19/11/2026 - 12:00:00] [info][app] iniciado", "19/11/2026 - 12:00:01")).toContain("(nenhuma operacao, aviso ou erro no log)");
     const muitos = Array.from({ length: 500 }, (_, i) => `[19/11/2026 - 12:00:00] [warn][x${i}] evento.${i} | ${"detalhe ".repeat(40)}`).join("\n");
     expect(Buffer.byteLength(montarResumo(muitos, "19/11/2026 - 12:00:01"), "utf8")).toBeLessThanOrEqual(4 * 1024 + 32);
+  });
+});
+
+describe("resultadoDaOperacao", () => {
+  it("falha pelo valor vira erro, cancelamento vira cancelado, o resto ok", () => {
+    expect(resultadoDaOperacao({ success: false, error: "Nenhuma conta ProtonVPN conectada." })).toBe("erro");
+    expect(resultadoDaOperacao({ ok: false, residual: ["dns"] })).toBe("erro");
+    expect(resultadoDaOperacao({ success: false, cancelled: true })).toBe("cancelado");
+    expect(resultadoDaOperacao({ success: true })).toBe("ok");
+    expect(resultadoDaOperacao(undefined)).toBe("ok");
+    expect(resultadoDaOperacao("texto")).toBe("ok");
   });
 });
 
