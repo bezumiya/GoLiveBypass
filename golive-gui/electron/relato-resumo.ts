@@ -56,6 +56,7 @@ const EVENTO_ATIVACAO =
   /^(activation\.(completed|failed)|ativacao[._ ]|preflight concluido|readiness\.complete|relaunch\.|linux\.network\.(ready|failed)|ativacao duplicada)/;
 const EVENTO_SERVIDOR = /^servidor ótimo selecionado/;
 const EVENTO_TELA = "erro.exibido";
+const ERRO_DE_HANDLER = /^Error occurred in handler for '[^']+'/;
 
 /**
  * Monta o bloco de resumo a partir das linhas do log (mais antiga -> mais recente).
@@ -95,11 +96,13 @@ export function montarResumo(texto: string, agora: string): string {
   if (tela.length) saida.push("erros mostrados na tela:", ...tela.map((l) => `  ${curta(l.texto)}`));
 
   // Avisos e erros restantes: o mais recente de cada evento, com quantas vezes apareceu.
-  const jaMostradas = new Set([...ativacao, ...tela].map((l) => l.texto));
+  // O erro da tela tem secao propria; o "Error occurred in handler" do Electron e agrupado pelo
+  // canal (a mensagem varia e cada variacao viraria um tipo novo).
+  const jaMostradas = new Set(ativacao.map((l) => l.texto));
   const porEvento = new Map<string, { linha: LinhaDoLog; vezes: number }>();
   for (const l of linhas) {
-    if (l.nivel === "info" || jaMostradas.has(l.texto)) continue;
-    const chave = `${l.cat}|${l.evento}`;
+    if (l.nivel === "info" || l.evento === EVENTO_TELA || jaMostradas.has(l.texto)) continue;
+    const chave = `${l.cat}|${ERRO_DE_HANDLER.exec(l.evento)?.[0] ?? l.evento}`;
     const anterior = porEvento.get(chave);
     porEvento.delete(chave); // reinsere no fim: a ordem do Map vira "mais recente por ultimo"
     porEvento.set(chave, { linha: l, vezes: (anterior?.vezes ?? 0) + 1 });

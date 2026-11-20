@@ -26,6 +26,18 @@ describe("montarResumo", () => {
     expect(resumo).toContain("handshake.velho");
   });
 
+  it("erro da tela fica so na secao dele e o erro do handler agrupa pelo canal", () => {
+    const log = [1, 2, 3, 4, 5, 6].flatMap((i) => [
+      `[11-15 22:4${i}:00] [warn][ui] erro.exibido | canal=activate mensagem=Falha ${i}`,
+      `[11-15 22:4${i}:00] [error][app] Error occurred in handler for 'activate': Error: Falha ${i}`,
+    ]).join("\n");
+    const resumo = montarResumo(log, "11-15 23:00:00");
+    const avisos = resumo.slice(resumo.indexOf("avisos e erros"));
+    expect(avisos).not.toContain("erro.exibido");
+    expect(avisos.match(/Error occurred in handler/g)).toHaveLength(1);
+    expect(avisos).toContain("Falha 6 [6x no log]");
+  });
+
   it("sem nada relevante diz isso e respeita o teto", () => {
     expect(montarResumo("[11-19 12:00:00] [info][app] iniciado", "11-19 12:00:01")).toContain("(nenhuma operacao, aviso ou erro no log)");
     const muitos = Array.from({ length: 500 }, (_, i) => `[11-19 12:00:00] [warn][x${i}] evento.${i} | ${"detalhe ".repeat(40)}`).join("\n");
