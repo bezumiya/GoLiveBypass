@@ -315,10 +315,10 @@ function parsePendingWindowsUpdate(value: unknown): PendingWindowsUpdate | null 
   };
 }
 
-function loadPendingWindowsUpdate(canal: Canal): void {
+function loadPendingWindowsUpdate(canal: Canal): boolean {
   const marker = pendingWindowsFile();
   const current = portableExePath();
-  if (!marker || !current || !existsSync(marker)) return;
+  if (!marker || !current || !existsSync(marker)) return false;
 
   let pending: PendingWindowsUpdate | null = null;
   try {
@@ -338,12 +338,13 @@ function loadPendingWindowsUpdate(canal: Canal): void {
   if (pending === null || !valid) {
     if (pending && isSafePendingDownload(pending.downloaded)) void rm(pending.downloaded, { force: true });
     clearPendingMarker();
-    return;
+    return false;
   }
 
   pendingWindowsUpdate = pending;
   setUpdateReady(true);
   console.log(`[updater] update pendente recuperado: ${pending.version}`);
+  return true;
 }
 
 async function discardPendingWindowsUpdate(): Promise<void> {
@@ -691,7 +692,15 @@ export function setupUpdater(
   // hora de apagar (no momento da troca ele ainda estava em execucao).
   const atual = portableExePath();
   if (atual !== null) cleanupOldExe(atual);
-  loadPendingWindowsUpdate(canalAtual());
+  // #459: um update ja baixado e conferido tinha o marcador recuperado no boot, mas
+  // ninguem aplicava — o app seguia na versao antiga ate o usuario encontrar o
+  // botao de reiniciar. Se a atualizacao automatica esta ligada, aplicar agora:
+  // a proxima abertura sempre termina na versao nova.
+  const recuperado = loadPendingWindowsUpdate(canalAtual());
+  if (recuperado && isAutoUpdateEnabled()) {
+    console.log("[updater] aplicando update pendente recuperado na abertura");
+    void installPendingWindowsUpdate();
+  }
   setInterval(
     () => void checkWindowsUpdate(getMainWindow, isAutoUpdateEnabled, canalAtual, {
       reason: "fallback-horario",

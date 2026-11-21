@@ -130,6 +130,13 @@ it("restaura e aplica o portable valido apos reiniciar", async () => {
   expect(await controller.applyPendingUpdate()).toBe(true);
   expect(state.spawn).toHaveBeenCalledWith(pending.current, pending.downloaded);
 });
+it("aplica sozinho o update ja baixado ao abrir com atualizacao ligada (#459)", async () => {
+  const pending = marker();
+  const updater = await import("../electron/updater");
+  updater.setupUpdater(() => null, () => true, () => "beta");
+  expect(state.spawn).toHaveBeenCalledWith(pending.current, pending.downloaded);
+  expect(state.quit).toHaveBeenCalled();
+});
 it("troca para stable descarta beta restaurada antes de aplicar", async () => {
   marker();
   const updater = await import("../electron/updater");
