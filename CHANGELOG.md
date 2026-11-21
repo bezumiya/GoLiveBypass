@@ -4,7 +4,7 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
-## [Não lançado]
+## [2.0.18] - 2026-11-20
 
 ### Alterado
 
@@ -30,6 +30,13 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
     - O cliente macOS não tem log nem relato, então não recebe nada disto por enquanto.
     - O standalone segue pausado e não muda.
     - As informações novas (handshake no Linux, erro do Discord no namespace, agente polkit, outras VPNs, versão desatualizada, sintoma obrigatório) ficam para a próxima etapa.
+
+### Corrigido
+
+- **O resumo do relato não perde mais a ativação quando a sessão acumula avisos (plugin).** A fila de marcos era única: numa sessão com muitos `route.probe.failed`, os avisos de rotina empurravam a ativação, o relaunch e as operações para fora do `=== resumo ===`, que é justamente o bloco que deveria preservá-los. Agora a fila de estado (operações, ativação, relaunch, aberturas, servidor escolhido) é separada da fila de avisos.
+- **Túnel Linux oscilando não repete aviso e recuperação a cada 15 s.** A leitura saudável zerava o motivo e o instante do `tunel.diagnostico`; com o túnel alternando falha/sucesso, cada falha voltava a parecer nova e o relato gravava o par aviso + `tunel.diagnostico.normal` em toda rodada. O limite agora conta do último aviso registrado e a recuperação só entra se um aviso entrou.
+- **Cancelamento não vira `ui erro.exibido` e o código numérico não se perde (GUI).** `{ success: false, cancelled: true, error }` era registrado como falha que a pessoa viu; agora é ignorado. A mensagem devolvida pelo handler também passa pela redação de valor (`token=`, `senha=` etc.) antes de ir para o `gui.log` e para o resumo.
+- **A seção "plugin-vpn.log (antes do ring)" volta a existir.** O arquivo é JSONL e o relato comparava a cauda com o texto do ring; a primeira linha nunca era encontrada e a cauda era descartada. A cauda agora é convertida para o mesmo formato do ring.
 
 ## [2.0.17] - 2026-11-19
 

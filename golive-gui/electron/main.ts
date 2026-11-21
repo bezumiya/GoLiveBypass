@@ -52,7 +52,7 @@ import { createProcSeams } from "./linux-proc-seams";
 import { clearSelectedTarget, listRunningApps, selectManualTarget, type ManualTargetServiceDeps } from "./linux-manual-target-service";
 import { readManualTarget } from "./linux-manual-target";
 import { sessionMarkerPaths } from "./linux-session-marker";
-import { classifyLinuxHealth } from "./linux-health";
+import { classifyLinuxHealth, criarRegistroDeDiagnostico } from "./linux-health";
 import { stripAnsiCodes, tailErroScript } from "./script-stderr";
 import { neutralizeLegacyInjection } from "./legacy-injection";
 import { PROTON_CAPTCHA_IPC_CHANNEL, isAllowedProtonCaptchaNavigation, parseProtonCaptchaChallenge, validateProtonCaptchaResponse } from "./proton-captcha";
@@ -618,12 +618,9 @@ let linuxStatusLastLog = "";
 let linuxStatusLastLogAt = 0;
 let linuxHealthTimer: ReturnType<typeof setInterval> | null = null;
 let linuxHealthInFlight = false;
-let linuxHealthFailures = 0;
-// Motivo da ultima falha registrada: o watchdog roda a cada 15s e a mesma falha (ex.: telemetria
-// sem root) virava uma linha por rodada, empurrando o resto da sessao para fora do relato.
-let linuxHealthUltimoMotivo = "";
-let linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
-const LINUX_HEALTH_REGISTRO_MS = 5 * 60_000; // mesmo motivo entra de novo so depois disto
+// O watchdog roda a cada 15s; o limitador deixa no log a primeira falha, a troca de motivo e o
+// mesmo motivo a cada 5 min, sem repetir o par aviso/volta-ao-normal quando o tunel oscila.
+const linuxHealthLog = criarRegistroDeDiagnostico({ intervaloMs: 5 * 60_000 });
 let linuxHealthStatusNotificado = "";
 function linuxStatusLogAllowed(signature: string): boolean {
   const now = Date.now();
@@ -1786,9 +1783,7 @@ function stopLinuxHealthWatchdog() {
   if (linuxHealthTimer !== null) clearInterval(linuxHealthTimer);
   linuxHealthTimer = null;
   linuxHealthInFlight = false;
-  linuxHealthFailures = 0;
-  linuxHealthUltimoMotivo = "";
-  linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
+  linuxHealthLog.reiniciar();
   linuxHealthStatusNotificado = "";
 }
 
@@ -1799,21 +1794,11 @@ function startLinuxHealthWatchdog() {
     linuxHealthInFlight = true;
     void checkLinuxTunnelHealth().then((result) => {
       if (result.healthy) {
-        if (linuxHealthFailures > 0) logger.info("linux", "tunel.diagnostico.normal", { falhas_antes: linuxHealthFailures });
-        linuxHealthFailures = 0;
-        linuxHealthUltimoMotivo = "";
-        linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
+        const normal = linuxHealthLog.saudavel();
+        if (normal) logger.info("linux", "tunel.diagnostico.normal", { falhas_antes: normal.falhasAntes });
       } else {
-        linuxHealthFailures += 1;
-        // Entra a primeira falha, a troca de motivo e, com o mesmo motivo, uma a cada 5 min
-        // contados do ultimo registro (nao do contador de falhas, que segue de outro motivo).
-        const motivo = String(result.reason ?? "");
-        const agora = Date.now();
-        if (motivo !== linuxHealthUltimoMotivo || agora - linuxHealthUltimoRegistroMs >= LINUX_HEALTH_REGISTRO_MS) {
-          linuxHealthUltimoMotivo = motivo;
-          linuxHealthUltimoRegistroMs = agora;
-          logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: linuxHealthFailures, motivo: result.reason });
-        }
+        const falha = linuxHealthLog.falhou(String(result.reason ?? ""));
+        if (falha) logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: falha.falhas, motivo: result.reason });
       }
       // A janela le o MESMO estado que este watchdog observa. Sem esta
       // comparacao, fechar o Discord ou perder o namespace deixava o botao
@@ -3287,7 +3272,11 @@ const CANAIS_DE_ACAO = new Set([
   const registrarFalha = (canal: string, valor: unknown) => {
     const falha = descreverFalhaDaTela(valor);
     // *_CANCELLED e a tentativa substituida por outra (ex.: login refeito): nao e erro que a pessoa viu.
-    if (falha && !/_CANCELLED$/.test(falha.codigo ?? "")) logger.warn("ui", "erro.exibido", { canal, ...(falha.codigo ? { codigo: falha.codigo } : {}), mensagem: falha.mensagem });
+    // O texto vem de handler e pode carregar token/senha; a redacao de valor do logger nao roda
+    // em warn(), entao ela e aplicada aqui antes de gravar o arquivo e o resumo.
+    if (falha && !/_CANCELLED$/.test(falha.codigo ?? "")) {
+      logger.warn("ui", "erro.exibido", { canal, ...(falha.codigo ? { codigo: falha.codigo } : {}), mensagem: logger.redactLogValue(falha.mensagem, "mensagem") });
+    }
   };
   ipcMain.handle = ((canal: string, handler: Parameters<typeof ipcMain.handle>[1]) => {
     if (!CANAIS_DE_ACAO.has(canal)) return registrarOriginal(canal, handler);

@@ -80,9 +80,9 @@ import {
 import { installerFolderDiagnosis, windowsEnvironmentSnapshot } from "./vpn-windows";
 import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
-import { createOperationId, createPluginLogger, montarResumoDoPlugin, pendingNamespaceRelaunch, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
+import { createOperationId, createPluginLogger, formatarLinhaDoArquivo, montarResumoDoPlugin, pendingNamespaceRelaunch, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
 
-const PLUGIN_VERSION = "2.0.17";
+const PLUGIN_VERSION = "2.0.18";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
 const PLUGIN_CHECKSUM_ASSET = `${PLUGIN_ASSET}.sha256`;
 const GITHUB_RELEASES_URL = "https://api.github.com/repos/bezumiya/GoLiveBypass/releases?per_page=20";
@@ -1119,7 +1119,10 @@ function lerCaudaDoLog(maxBytes = BUG_LOG_TAIL_BYTES): string {
         const pedaco = buffer.length > maxBytes ? buffer.subarray(buffer.length - maxBytes) : buffer;
         const texto = pedaco.toString("utf8");
         // O corte pode cair no meio de uma linha: descarta a primeira, parcial.
-        return pedaco.length < buffer.length ? texto.slice(texto.indexOf("\n") + 1) : texto;
+        const linhas = (pedaco.length < buffer.length ? texto.slice(texto.indexOf("\n") + 1) : texto).split(/\r?\n/);
+        // O arquivo é JSONL; o relato usa o texto do ring. Sem converter, complementoDaCauda não
+        // encontrava a primeira linha do ring e a cauda anterior a ele nunca entrava no relato.
+        return linhas.map(formatarLinhaDoArquivo).filter(Boolean).join("\n");
     } catch (error) {
         log("warn", "não consegui ler o log do plugin para o relato", { erro: error });
         return "";
