@@ -72,13 +72,46 @@ NONINTERACTIVE=0
 # acomodarem antes de o Electron do Discord iniciar o updater.
 TUNNEL_STARTUP_SETTLE_SECONDS=2
 
-# iproute2 imprime tanto "nome" quanto "nome (id: N)" em `ip netns list`.
-# Comparar o primeiro campo evita rejeitar o formato sem sufixo e tambem evita
-# confundir um namespace com nome apenas semelhante (ex.: discord-vpn-old).
+# /var/run/netns pode ser 0700 root:root (#449): `ip netns list` como usuario
+# comum falha com EACCES mesmo com o tunel ativo. A identidade nsfs gravada na
+# ativacao prova o namespace por um processo, sem root e sem prompt.
+netns_identity_file() { printf '%s\n' "$INSTALL_DIR/netns.inode"; }
+
+netns_identity_read() {
+    local f
+    f="$(netns_identity_file)"
+    [ -f "$f" ] || return 1
+    head -1 "$f" 2>/dev/null
+}
+
+netns_identity_pid_matches() {
+    local ident="$1" proc_net pid_ns
+    [ -n "$ident" ] || return 1
+    for proc_net in /proc/[0-9]*/ns/net; do
+        [ -e "$proc_net" ] || continue
+        pid_ns="$(stat -L -c '%d:%i' "$proc_net" 2>/dev/null || true)"
+        [ "$pid_ns" = "$ident" ] && return 0
+    done
+    return 1
+}
+
+# `ip netns list` continua sendo a prova primaria (funciona quando /run/netns e
+# legivel). O fallback cobre o diretorio 0700 semuario e sem sudo -n.
 netns_exists() {
     _glb_ip="${IP_BINARY:-}"
     [ -n "$_glb_ip" ] || _glb_ip=ip
-    "$_glb_ip" netns list 2>/dev/null | awk -v name="$NETNS_NAME" '$1 == name { found=1 } END { exit !found }'
+    if "$_glb_ip" netns list 2>/dev/null | awk -v name="$NETNS_NAME" '$1 == name { found=1 } END { exit !found }'; then
+        return 0
+    fi
+    netns_identity_pid_matches "$(netns_identity_read 2>/dev/null || true)"
+}
+
+# Prova autoritativa para operacoes iniciadas pelo usuario (teardown/rollback).
+# Nunca chamado por --status/--probe, que nao podem abrir prompt.
+netns_exists_elevated() {
+    _glb_ip="${IP_BINARY:-}"
+    [ -n "$_glb_ip" ] || _glb_ip=ip
+    elevate "$_glb_ip" netns list 2>/dev/null | awk -v name="$NETNS_NAME" '$1 == name { found=1 } END { exit !found }'
 }
 
 # ---------------------------------------------------------------------------
@@ -917,7 +950,7 @@ rollback_activation() {
     [ "${ACTIVATION_ROLLBACK_PENDING:-0}" -eq 1 ] || return 0
     ACTIVATION_ROLLBACK_PENDING=0
 
-    if [ "${ACTIVATION_NETNS_TOUCH_STARTED:-0}" -eq 1 ] && netns_exists; then
+    if [ "${ACTIVATION_NETNS_TOUCH_STARTED:-0}" -eq 1 ] && { netns_exists || netns_exists_elevated; }; then
         warn "Rollback: removendo o namespace WireGuard incompleto."
         teardown_wireguard_netns || true
     fi
@@ -925,7 +958,7 @@ rollback_activation() {
     if [ "${ACTIVATION_ROLLBACK_REOPEN:-0}" -ne 1 ] || discord_running; then
         return 0
     fi
-    if netns_exists; then
+    if netns_exists || netns_exists_elevated; then
         warn "Rollback: o namespace WireGuard continua ativo; nao vou iniciar o Discord fora dele."
         return 0
     fi
@@ -3324,15 +3357,21 @@ discord_pid_flav() {
 }
 
 discord_pid_in_netns() {
-    local pid="$1" identified="" pid_ns="" netns_ns=""
+    local pid="$1" identified="" pid_ns="" netns_ns="" ident=""
     [ -n "$pid" ] || return 1
     identified="$(ip netns identify "$pid" 2>/dev/null || true)"
     [ "$identified" = "$NETNS_NAME" ] && return 0
     # /run/netns/$NETNS_NAME e bind mount de nsfs (nunca symlink): readlink
     # devolve EINVAL ate como root. A comparacao correta e por device:inode.
-    [ -e "/proc/$pid/ns/net" ] && [ -e "/run/netns/$NETNS_NAME" ] || return 1
+    [ -e "/proc/$pid/ns/net" ] || return 1
     pid_ns="$(stat -L -c '%d:%i' "/proc/$pid/ns/net" 2>/dev/null || true)"
-    netns_ns="$(stat -L -c '%d:%i' "/run/netns/$NETNS_NAME" 2>/dev/null || true)"
+    if [ -e "/run/netns/$NETNS_NAME" ]; then
+        netns_ns="$(stat -L -c '%d:%i' "/run/netns/$NETNS_NAME" 2>/dev/null || true)"
+    fi
+    if [ -z "$netns_ns" ]; then
+        ident="$(netns_identity_read 2>/dev/null || true)"
+        [ -n "$ident" ] && netns_ns="$ident"
+    fi
     [ -n "$pid_ns" ] && [ -n "$netns_ns" ] && [ "$pid_ns" = "$netns_ns" ]
 }
 
@@ -3343,8 +3382,8 @@ discord_pid_in_netns_elevated() {
     [ -n "$pid" ] || return 1
 
     # Prova primaria sem privilegio: --status/--probe nao podem depender de um
-    # timestamp sudo que talvez nao exista (ip netns identify e stat -L sao
-    # legiveis pelo usuario comum; /run/netns e drwxr-xr-x e o nsfs r--r--r--).
+    # timestamp sudo. Com /run/netns 0700, a identidade nsfs gravada na ativacao
+    # preserva a comparacao por device:inode.
     if discord_pid_in_netns "$pid"; then
         return 0
     fi
@@ -3811,6 +3850,12 @@ setup_wireguard_netns() {
         ACTIVATION_NETNS_TOUCH_STARTED=1
         step "Criando namespace de rede '$NETNS_NAME'"
         elevate ip netns add "$NETNS_NAME"
+        # Guarda a identidade do nsfs como usuario (elevate criaria arquivo root-owned).
+        # E a unica prova sem root quando /run/netns e 0700.
+        if have stat; then
+            _glb_ident="$(elevate stat -L -c '%d:%i' "/run/netns/$NETNS_NAME" 2>/dev/null || true)"
+            [ -n "$_glb_ident" ] && printf '%s\n' "$_glb_ident" > "$(netns_identity_file)"
+        fi
     fi
 
     # A partir daqui a interface existente tambem pode ser removida/recriada;
@@ -3969,12 +4014,14 @@ wait_for_tunnel_startup() {
     sleep "$TUNNEL_STARTUP_SETTLE_SECONDS"
 }
 
+# Retorna 1 quando o namespace nao saiu: o chamador decide se pode seguir.
 teardown_wireguard_netns() {
     # O daemon de usuario precisa morrer junto: o namespace sai, o device deixa de existir e
     # o processo ficaria orfao segurando o socket UAPI. Vale tambem para rollback de ativacao
     # (namespace parcial) e para o uninstall com o namespace ja removido.
+    local rc=0
     stop_wireguard_userspace
-    if netns_exists; then
+    if netns_exists || netns_exists_elevated; then
         step "Removendo namespace de rede '$NETNS_NAME' e interface WireGuard"
         if ! elevate ip netns del "$NETNS_NAME" 2>/dev/null; then
             warn "Nao consegui remover o namespace '$NETNS_NAME' (sem privilegio?). O tunel pode continuar ativo; rode: sudo ip netns del $NETNS_NAME"
@@ -3982,13 +4029,17 @@ teardown_wireguard_netns() {
         if ! elevate rm -rf "/etc/netns/$NETNS_NAME" 2>/dev/null; then
             warn "Nao consegui remover /etc/netns/$NETNS_NAME."
         fi
-        # Apenas anuncia sucesso quando o namespace realmente saiu; o retorno
-        # continua 0 para nao abortar o uninstall (set -e) antes de restaurar
-        # as injecoes do Discord.
-        if ! netns_exists; then
+        if netns_exists || netns_exists_elevated; then
+            warn "O namespace '$NETNS_NAME' continua ativo; rode: sudo ip netns del $NETNS_NAME"
+            rc=1
+        else
             ok "Tunel WireGuard encerrado."
+            rm -f "$(netns_identity_file)" 2>/dev/null || true
         fi
+    else
+        rm -f "$(netns_identity_file)" 2>/dev/null || true
     fi
+    return "$rc"
 }
 
 # Diagnostico do backend grafico usado pelo Discord dentro do namespace. Nao
@@ -4645,8 +4696,16 @@ if [ "$MODE" = "status" ]; then
 fi
 
 if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]; then
+    # Guarda o alvo antes de fechar o cliente: o uninstall deve devolver o Discord
+    # ao host quando ele estava aberto (#449).
+    glb_uninstall_target=""
+    if [ "$MODE" = "uninstall" ] && discord_running; then
+        glb_uninstall_target="$(select_launch_target "$FOUND")"
+    fi
     stop_discord
-    teardown_wireguard_netns
+    if ! teardown_wireguard_netns; then
+        fail "Nao foi possivel remover o namespace WireGuard. Rode: sudo ip netns del $NETNS_NAME e tente de novo."
+    fi
     remove_tor
     printf '%s\n' "$FOUND" | while IFS='|' read -r resources flav detect id; do
         # Mesma guarda do install: so desfaz _app.asar quando a injecao ali e NOSSA. Se for
@@ -4656,6 +4715,15 @@ if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]; then
         fi
     done
     if [ "$MODE" = "uninstall" ]; then
+        if [ -n "$glb_uninstall_target" ]; then
+            START_DISCORD_HOST_ONLY=1
+            if start_discord "$glb_uninstall_target" && wait_discord_host_started "$glb_uninstall_target"; then
+                ok "Discord reaberto sem o bypass."
+            else
+                warn "Nao consegui reabrir o Discord automaticamente; abra o cliente manualmente."
+            fi
+            START_DISCORD_HOST_ONLY=0
+        fi
         ok "GoLiveBypass desinstalado e Discord restaurado."
     fi
     exit 0
