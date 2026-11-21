@@ -28,6 +28,7 @@ import {
 } from "./updater";
 import * as logger from "./logger";
 import * as discordscan from "./discordscan";
+import { descreverFalhaDaTela, resultadoDaOperacao } from "./relato-resumo";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
 import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type TunnelStats, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, verifyWindowsNetwork, type WireSockConnectionStatus, wireSockSelectionForReport } from "./wiresock";
@@ -194,10 +195,19 @@ let protonRoutePoolAbort: AbortController | null = null;
 function withWireSockLifecycle<T>(operation: string, task: () => Promise<T>): Promise<T> {
   const run = wireSockLifecycleQueue.then(async () => {
     logger.info("wiresock", "inicio de operacao serializada", { operation });
+    const inicio = Date.now();
+    let resultado = "ok";
     try {
-      return await task();
+      const valor = await task();
+      // Varias operacoes falham pelo valor ({ success:false }, recovery com ok:false), sem lancar.
+      resultado = resultadoDaOperacao(valor);
+      return valor;
+    } catch (error) {
+      resultado = "erro";
+      throw error;
     } finally {
-      logger.info("wiresock", "fim de operacao serializada", { operation });
+      // Resultado e duracao: o resumo do relato monta a lista de operacoes a partir desta linha.
+      logger.info("wiresock", "fim de operacao serializada", { operation, resultado, duracao_ms: Date.now() - inicio });
     }
   });
   wireSockLifecycleQueue = run.then(() => undefined, () => undefined);
@@ -609,6 +619,11 @@ let linuxStatusLastLogAt = 0;
 let linuxHealthTimer: ReturnType<typeof setInterval> | null = null;
 let linuxHealthInFlight = false;
 let linuxHealthFailures = 0;
+// Motivo da ultima falha registrada: o watchdog roda a cada 15s e a mesma falha (ex.: telemetria
+// sem root) virava uma linha por rodada, empurrando o resto da sessao para fora do relato.
+let linuxHealthUltimoMotivo = "";
+let linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
+const LINUX_HEALTH_REGISTRO_MS = 5 * 60_000; // mesmo motivo entra de novo so depois disto
 let linuxHealthStatusNotificado = "";
 function linuxStatusLogAllowed(signature: string): boolean {
   const now = Date.now();
@@ -798,7 +813,7 @@ if (!gotLock) {
       const logs = logsDir.garantirLogsDir(app.getPath("home"), process.platform);
       logger.initLogger(logs);
       logger.patchConsole();
-      // As linhas do gui.log so tem HH:MM:SS e o arquivo junta dias: a data completa fica aqui.
+      // Instante exato da abertura, em ISO: o gui.log de versoes anteriores so tinha HH:MM:SS.
       logger.info("app", "iniciado", { versao: app.getVersion(), plataforma: process.platform, inicio: new Date().toISOString() });
       // Uma linha por abertura com SO/build, fuso e o que o relato precisaria perguntar (env-snapshot.ts).
       const ambiente = guiEnvironmentSnapshot();
@@ -978,12 +993,18 @@ function logWindowsDiscoveryRoots(
   env: WindowsDiscoveryEnvironment,
   roots = rootsForEnvironment(env),
 ): void {
+  let testadas = 0;
+  let achadas = 0;
   for (const root of roots) {
     for (const flavour of ALL_APPS) {
       const rootPath = path.win32.join(root, flavour);
-      discordscan.scanRaiz(rootPath, diskFs.existsSync(rootPath), flavour);
+      testadas++;
+      if (!diskFs.existsSync(rootPath)) continue;
+      achadas++;
+      discordscan.scanRaiz(rootPath, true, flavour);
     }
   }
+  discordscan.scanRaizes(testadas, achadas);
 }
 
 
@@ -999,6 +1020,9 @@ function getMacDiscordInstalls(): DiscordInstall[] {
   const installs: DiscordInstall[] = [];
   const seen = new Set<string>();
   discordscan.scanInicio("darwin");
+  // Mesma semantica do Windows: testadas = caminhos olhados, achadas = os que existem no disco.
+  let testadas = 0;
+  let achadas = 0;
 
   for (const root of roots) {
     for (const { flavour, appName } of MAC_APPS) {
@@ -1008,7 +1032,11 @@ function getMacDiscordInstalls(): DiscordInstall[] {
       const asar = path.join(resources, "app.asar");
       const originalAsar = path.join(resources, "_app.asar");
       const existe = diskFs.existsSync(asar) || diskFs.existsSync(originalAsar);
-      discordscan.scanRaiz(bundlePath, existe, flavour);
+      testadas++;
+      if (existe || diskFs.existsSync(bundlePath)) {
+        achadas++;
+        discordscan.scanRaiz(bundlePath, true, flavour);
+      }
       if (existe) {
         installs.push({ flavour, resources, exePath: "", bundlePath });
         discordscan.scanInstall(resources, flavour);
@@ -1016,6 +1044,7 @@ function getMacDiscordInstalls(): DiscordInstall[] {
       }
     }
   }
+  discordscan.scanRaizes(testadas, achadas);
   discordscan.scanResultado(installs.length);
   return installs;
 }
@@ -1758,6 +1787,8 @@ function stopLinuxHealthWatchdog() {
   linuxHealthTimer = null;
   linuxHealthInFlight = false;
   linuxHealthFailures = 0;
+  linuxHealthUltimoMotivo = "";
+  linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
   linuxHealthStatusNotificado = "";
 }
 
@@ -1768,10 +1799,21 @@ function startLinuxHealthWatchdog() {
     linuxHealthInFlight = true;
     void checkLinuxTunnelHealth().then((result) => {
       if (result.healthy) {
+        if (linuxHealthFailures > 0) logger.info("linux", "tunel.diagnostico.normal", { falhas_antes: linuxHealthFailures });
         linuxHealthFailures = 0;
+        linuxHealthUltimoMotivo = "";
+        linuxHealthUltimoRegistroMs = Number.NEGATIVE_INFINITY;
       } else {
         linuxHealthFailures += 1;
-        logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: linuxHealthFailures, motivo: result.reason });
+        // Entra a primeira falha, a troca de motivo e, com o mesmo motivo, uma a cada 5 min
+        // contados do ultimo registro (nao do contador de falhas, que segue de outro motivo).
+        const motivo = String(result.reason ?? "");
+        const agora = Date.now();
+        if (motivo !== linuxHealthUltimoMotivo || agora - linuxHealthUltimoRegistroMs >= LINUX_HEALTH_REGISTRO_MS) {
+          linuxHealthUltimoMotivo = motivo;
+          linuxHealthUltimoRegistroMs = agora;
+          logger.warn("linux", "tunel.diagnostico", { mode: "log-only", falhas: linuxHealthFailures, motivo: result.reason });
+        }
       }
       // A janela le o MESMO estado que este watchdog observa. Sem esta
       // comparacao, fechar o Discord ou perder o namespace deixava o botao
@@ -3230,6 +3272,38 @@ async function linuxDeactivate(onChunk: (c: string) => void) {
 
 // A bandeja precisa refletir o que os botoes da janela fizeram, entao os handlers de IPC
 // tambem remontam o menu ao terminar.
+// O que a pessoa viu na tela era a pergunta mais repetida nas issues ("qual erro apareceu?"). Nas
+// acoes que ela dispara, a falha devolvida a janela vira uma linha `ui erro.exibido` no log e entra
+// no resumo do relato. Canais de leitura (get-*, check-*) ficam fora: devolvem "sem sessao" e afins
+// como resultado normal, nao como erro mostrado.
+const CANAIS_DE_ACAO = new Set([
+  "activate", "deactivate", "restart-bypass", "restore-internet",
+  "login-proton", "logout-proton", "discover-proton-routes", "optimize-proton-route", "select-proton-route",
+  "import-wg-conf", "import-wg-conf-file", "test-wg-conf", "set-vpn-mode",
+  "set-linux-manual-target", "clear-linux-manual-target",
+]);
+{
+  const registrarOriginal = ipcMain.handle.bind(ipcMain);
+  const registrarFalha = (canal: string, valor: unknown) => {
+    const falha = descreverFalhaDaTela(valor);
+    // *_CANCELLED e a tentativa substituida por outra (ex.: login refeito): nao e erro que a pessoa viu.
+    if (falha && !/_CANCELLED$/.test(falha.codigo ?? "")) logger.warn("ui", "erro.exibido", { canal, ...(falha.codigo ? { codigo: falha.codigo } : {}), mensagem: falha.mensagem });
+  };
+  ipcMain.handle = ((canal: string, handler: Parameters<typeof ipcMain.handle>[1]) => {
+    if (!CANAIS_DE_ACAO.has(canal)) return registrarOriginal(canal, handler);
+    return registrarOriginal(canal, async (...args: Parameters<typeof handler>) => {
+      try {
+        const resultado = await handler(...args);
+        registrarFalha(canal, resultado);
+        return resultado;
+      } catch (error) {
+        registrarFalha(canal, error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
+    });
+  }) as typeof ipcMain.handle;
+}
+
 ipcMain.handle("activate", async (event) => {
   if (IS_LINUX) {
     // No Linux, a GUI delega pro script standalone; o script.sh ja tem a heuristica

@@ -178,12 +178,20 @@ export const WG_STATS_INTERVAL_MS = 45_000;
 // keepalive persistente e 25s, entao o dobro do dobro ja e folga generosa para jitter de rede.
 export const WG_STALE_HANDSHAKE_S = 180;
 
-// Saude saudavel vira linha de log so de tempos em tempos; um problema entra em toda leitura.
+// Saude saudavel vira linha de log so de tempos em tempos; o mesmo aviso tambem (ver registrarSaudeComLimite).
 export const WG_SAUDE_INFO_MS = 5 * 60_000;
 // Sem nenhuma fonte de estatistica, "indisponivel" nao muda a cada leitura: repetir so enche o log.
 export const WG_INDISPONIVEL_MS = 10 * 60_000;
 let ultimaSaudeInfoMs = Number.NEGATIVE_INFINITY;
 let ultimoIndisponivelMs = Number.NEGATIVE_INFINITY;
+// Aviso igual ao anterior (mesmo evento) entra de novo so depois de WG_SAUDE_INFO_MS: um tunel
+// degradado gerava a mesma linha a cada 45s e empurrava o resto da sessao para fora do relato.
+// Mudou o evento (ex.: handshake.velho -> tunel.saude), entra na hora. A volta ao normal nao zera
+// este limite: com o handshake alternando velho/saudavel a cada leitura, o aviso voltaria toda vez.
+let ultimoAvisoEvento: string | null = null;
+let ultimoAvisoMs = Number.NEGATIVE_INFINITY;
+// Houve aviso registrado desde a ultima leitura saudavel registrada: a volta ao normal entra na hora.
+let avisoRegistrado = false;
 
 /**
  * Sem `wg.exe` (o normal com o WireSock direto) a saude do tunel vem do log do proprio
@@ -195,16 +203,33 @@ function registrarSaudePeloLogWireSock(): boolean {
   const resumo = lerResumoLogWireSock(caminho);
   if (!resumo.ok) return false;
   const saude = avaliarSaudeWireSock(resumo, { handshakeVelhoS: WG_STALE_HANDSHAKE_S });
-  if (saude.nivel === "warn") {
-    logger.warn("wg", saude.evento, saude.dados);
-    return true;
-  }
+  registrarSaudeComLimite(saude.nivel, saude.evento, saude.dados);
+  return true;
+}
+
+/**
+ * Leitura saudavel entra de tempos em tempos; aviso entra quando aparece ou muda de tipo e, se
+ * continuar igual, de novo so depois de WG_SAUDE_INFO_MS. A volta ao normal entra na hora.
+ */
+function registrarSaudeComLimite(nivel: "info" | "warn", evento: string, dados: Record<string, unknown>): void {
   const agora = Date.now();
+  if (nivel === "warn") {
+    if (evento !== ultimoAvisoEvento || agora - ultimoAvisoMs >= WG_SAUDE_INFO_MS) {
+      ultimoAvisoEvento = evento;
+      ultimoAvisoMs = agora;
+      avisoRegistrado = true;
+      logger.warn("wg", evento, dados);
+    }
+    return;
+  }
+  if (avisoRegistrado) {
+    avisoRegistrado = false;
+    ultimaSaudeInfoMs = Number.NEGATIVE_INFINITY;
+  }
   if (agora - ultimaSaudeInfoMs >= WG_SAUDE_INFO_MS) {
     ultimaSaudeInfoMs = agora;
-    logger.info("wg", saude.evento, saude.dados);
+    logger.info("wg", evento, dados);
   }
-  return true;
 }
 
 export type WgStatsProvider = () => Promise<WgTunnelStats> | WgTunnelStats;
@@ -220,6 +245,9 @@ export function iniciarWgStatsWatchdog(provider: WgStatsProvider = getWgStats) {
   ultimaAmostraMs = null;
   ultimaSaudeInfoMs = Number.NEGATIVE_INFINITY;
   ultimoIndisponivelMs = Number.NEGATIVE_INFINITY;
+  ultimoAvisoEvento = null;
+  ultimoAvisoMs = Number.NEGATIVE_INFINITY;
+  avisoRegistrado = false;
   // Fragmentos IP (so Windows, ver fragmentos-ip.ts): a contagem "desde o tunel" parte daqui.
   reiniciarFragmentos();
   void amostrarERegistrarFragmentos();
@@ -266,10 +294,11 @@ export function iniciarWgStatsWatchdog(provider: WgStatsProvider = getWgStats) {
           ultimoTx = s.txBytes;
           ultimaAmostraMs = agora;
         }
+        // Os contadores seguem a cada leitura (a taxa depende disso); so o registro e limitado.
         if (s.handshakeAgoS !== null && s.handshakeAgoS > WG_STALE_HANDSHAKE_S) {
-          logger.warn("wg", "handshake.velho", dadosCampo);
+          registrarSaudeComLimite("warn", "handshake.velho", dadosCampo);
         } else {
-          logger.info("wg", "stats", dadosCampo);
+          registrarSaudeComLimite("info", "stats", dadosCampo);
         }
       })
       .catch((error) => {

@@ -228,15 +228,11 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
     const timeout = options.timeoutMs ?? 25000;
     const operationId = logger.createOperationId('proton-confgen');
     const startedAt = Date.now();
-    const logContext = {
-      operation_id: operationId,
-      phase: 'confgen',
-      executable: path.basename(exe),
-      timeout_ms: timeout,
-    };
-    logger.logEvent('info', 'proton', 'confgen.start', logContext, {
-      args: safeConfgenArgs(options.args),
-    });
+    // Uma linha por chamada, no fim: o login e a busca de rota chamam o helper dezenas de vezes
+    // e o par start/complete com stderr ocupava ~27% dos relatos. Executavel e timeout so
+    // aparecem quando a chamada falha, que e quando importam.
+    const logContext = { operation_id: operationId, args: safeConfgenArgs(options.args) };
+    const contextoDeFalha = { executable: path.basename(exe), timeout_ms: timeout };
     const child = spawn(exe, options.args, {
       windowsHide: true,
       env: { ...process.env },
@@ -266,6 +262,7 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
       settled = true;
       clearTimeout(timer);
       logger.logEvent('error', 'proton', 'confgen.failed', logContext, {
+        ...contextoDeFalha,
         durationMs: Date.now() - startedAt,
         error: error.message,
         aborted,
@@ -314,13 +311,18 @@ export function runConfgen(options: RunConfgenOptions): Promise<{ code: number |
       if (terminationError || aborted) { finishReject(terminationError || abortError()); return; }
       const parsedJson = parseConfgenJson(stdout);
       settled = true;
-      logger.logEvent(code === 0 ? 'info' : 'warn', 'proton', 'confgen.complete', logContext, {
+      const ok = code === 0;
+      logger.logEvent(ok ? 'info' : 'warn', 'proton', 'confgen.complete', logContext, {
         durationMs: Date.now() - startedAt,
         exitCode: code,
-        stdoutBytes: Buffer.byteLength(stdout, 'utf8'),
-        stderrBytes: Buffer.byteLength(stderr, 'utf8'),
         json: Boolean(parsedJson),
-        stderrTail: logger.clipLogText(stderr, 1200),
+        // Saida com sucesso e progresso/ruido; a cauda so ajuda quando o helper falha.
+        ...(ok ? {} : {
+          ...contextoDeFalha,
+          stdoutBytes: Buffer.byteLength(stdout, 'utf8'),
+          stderrBytes: Buffer.byteLength(stderr, 'utf8'),
+          stderrTail: logger.clipLogText(stderr, 1200),
+        }),
       });
       resolve({ code, stdout, stderr, json: parsedJson });
     });

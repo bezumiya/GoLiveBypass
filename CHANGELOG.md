@@ -4,6 +4,33 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [Não lançado]
+
+### Alterado
+
+- **Relato de bug com log enxuto e um resumo no topo que nunca é cortado (GUI Windows/Linux e plugin).** Numa revisão das 327 issues de produção, o log chegava no teto (mediana de 64,5 KB para ~65 KB) e 127 dos 216 relatos com log vieram cortados. Na mediana, 57% dos bytes eram eventos repetitivos. A ativação saía do relato e cada issue virava pergunta (#431: duas buscas de rota encheram o ring do plugin e só sobrou progresso).
+  - **Menos ruído:**
+    - O plugin registra a busca de rota pela troca de fase e um resumo no fim, com contagem e servidores testados e o resultado de cada um, em vez de uma linha por servidor (`helper.progress_sampled` vira `helper.phase`). A tela continua recebendo todo o progresso.
+    - A GUI grava uma linha por chamada do `proton-confgen`, sem o par start/complete e sem a cauda do stderr quando dá certo. No plugin, o servidor escolhido e a medição dele (ping, download, upload) passam para o `helper.completed`, já que antes só existiam nas amostras de progresso.
+    - A varredura do Discord registra só as pastas que existem, mais uma linha `scan.raizes testadas=N achadas=M`.
+    - As linhas `script.*` do `--status` do Linux só entram de novo quando mudam (falha sempre entra).
+    - Na saúde do túnel, o aviso igual ao anterior e a leitura `wg stats` saudável entram no máximo a cada 5 minutos, e a volta ao normal entra na hora. No Linux, o `tunel.diagnostico` (a cada 15 s) entra na primeira falha, na troca de motivo e depois a cada ~5 min com a contagem, mais uma linha quando volta ao normal.
+    - Os IDs de operação da GUI passam de 36 para 8 caracteres.
+    - Nos relatos reais da 2.0.15 em diante, essas regras reduzem o log em cerca de 41%, já contando a data mais longa.
+  - **Estrutura:**
+    - As linhas do relato, na GUI e no plugin, passam a trazer data e hora locais no formato `[dd/mm/aaaa - hh:mm:ss]`, porque o relato junta sessões de dias diferentes. No plugin isso substitui o mês/dia em UTC com `Z`, para bater com o horário que a pessoa vê; o `plugin-vpn.log` continua com o horário ISO em UTC.
+    - O fim de cada operação serializada traz o resultado (`ok`, `erro` ou `cancelado`, inclusive quando a falha vem no valor devolvido, como `{ success: false }`) e a duração.
+    - Os logs do proxy legado só entram no relato da GUI se foram escritos nas últimas 24 h (estado misto, como no #277).
+  - **Resumo `=== resumo ===` no topo do log:**
+    - o que mostra: as últimas operações com resultado e duração, a ativação e o relaunch, o servidor escolhido, o último aviso ou erro de cada tipo e o horário do envio;
+    - o erro que a tela mostrou: na GUI, a falha devolvida à janela nas ações do usuário vira `ui erro.exibido` (a mesma falha repetida aparece uma vez, com a contagem); no plugin, ele já vem no `operation.*.failed`;
+    - operações de bastidor que dão certo (`aguardar-selecao-login`, `modo-vpn`, `preferencias-proton`) ficam fora da lista, porque nos relatos reais ocupavam quase todas as linhas;
+    - de onde sai: na GUI, de uma cauda maior do `gui.log`; no plugin, de uma fila própria de marcos que o ruído não consegue esvaziar.
+  - **Lacunas:**
+    - O cliente macOS não tem log nem relato, então não recebe nada disto por enquanto.
+    - O standalone segue pausado e não muda.
+    - As informações novas (handshake no Linux, erro do Discord no namespace, agente polkit, outras VPNs, versão desatualizada, sintoma obrigatório) ficam para a próxima etapa.
+
 ## [2.0.17] - 2026-11-19
 
 ### Corrigido

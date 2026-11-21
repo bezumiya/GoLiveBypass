@@ -594,6 +594,68 @@ export function parseConfgenJson(stdout: string): Record<string, unknown> | unde
     return undefined;
 }
 
+const MAX_SERVIDORES_NO_RESUMO = 15;
+
+/**
+ * Resume o progresso do helper para o log. Antes cada linha GOLIVE_PROGRESS virava uma linha de
+ * log (uma por servidor do catalogo e por teste): duas buscas enchiam o ring do plugin e a ativacao
+ * saia do relato. Agora o log recebe a troca de fase e, no fim, a contagem e os servidores
+ * testados com o resultado de cada um. A tela continua recebendo todo o progresso.
+ */
+export function criarResumoDeProgresso() {
+    let fase: string | null = null;
+    let ultimo: ProtonOptimizationProgress | null = null;
+    let eventos = 0;
+    const testados = new Map<string, "ok" | "falhou" | "testando">();
+    let ultimoSucesso = 0;
+    return {
+        /** Registra um progresso; devolve a fase quando ela mudou (para virar linha de log). */
+        registrar(progress: ProtonOptimizationProgress): string | null {
+            eventos++;
+            const mudou = progress.phase !== fase;
+            fase = progress.phase;
+            if (progress.phase === "testing" && progress.server) {
+                const resultado = progress.status === "success" || progress.succeeded > ultimoSucesso
+                    ? "ok"
+                    : progress.status === "failed" ? "falhou" : testados.get(progress.server) ?? "testando";
+                testados.delete(progress.server);
+                testados.set(progress.server, resultado);
+            }
+            ultimoSucesso = Math.max(ultimoSucesso, progress.succeeded);
+            ultimo = progress;
+            return mudou ? progress.phase : null;
+        },
+        resumo(): Record<string, unknown> {
+            if (!ultimo) return {};
+            const lista = [...testados.entries()];
+            const servidores = lista.slice(-MAX_SERVIDORES_NO_RESUMO).map(([nome, r]) => `${nome}:${r}`).join(",");
+            return {
+                progresso_fase: ultimo.phase,
+                progresso_eventos: eventos,
+                total: ultimo.total,
+                tested: ultimo.tested,
+                succeeded: ultimo.succeeded,
+                ...(servidores ? { servidores: lista.length > MAX_SERVIDORES_NO_RESUMO ? `…${servidores}` : servidores } : {}),
+            };
+        },
+    };
+}
+
+/**
+ * Servidor que o helper escolheu e a medição dele. Antes isso só aparecia nas amostras de
+ * progresso; com elas fora do log, o fim da chamada carrega a escolha (é o que a GUI registra
+ * em "servidor ótimo selecionado"). Só nome de servidor do catálogo e números.
+ */
+function escolhaDoHelper(json: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (!json || json.success !== true || typeof json.server !== "string" || !json.server.trim()) return {};
+    return {
+        server: json.server.trim().slice(0, 64),
+        ...(finitePositive(json.pingMs) ? { ping_ms: json.pingMs } : {}),
+        ...(finitePositive(json.downloadMbps) ? { download_mbps: json.downloadMbps } : {}),
+        ...(finitePositive(json.uploadMbps) ? { upload_mbps: json.uploadMbps } : {}),
+    };
+}
+
 export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
     return new Promise((resolve, reject) => {
         if (options.signal?.aborted) { reject(abortError()); return; }
@@ -618,6 +680,7 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
         let killTimer: ReturnType<typeof setTimeout> | undefined;
         const stdoutDecoder = new StringDecoder("utf8");
         const stderrDecoder = new StringDecoder("utf8");
+        const progresso = criarResumoDeProgresso();
         const emitProgress = (chunk: string) => {
             stderrBuffer = (stderrBuffer + chunk).slice(-MAX_STDERR_BYTES);
             const lines = stderrBuffer.split(/\r?\n/);
@@ -628,17 +691,14 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
                 try {
                     const progress = validProgress(JSON.parse(match[1]));
                     if (progress) {
-                        options.log?.("info", "helper.progress_sampled", {
-                            phase: progress.phase,
-                            attempt_id: attemptId,
-                            total: progress.total,
-                            tested: progress.tested,
-                            succeeded: progress.succeeded,
-                            server: progress.server,
-                            ping_ms: progress.pingMs,
-                            download_mbps: progress.downloadMbps,
-                            upload_mbps: progress.uploadMbps,
-                        });
+                        const novaFase = progresso.registrar(progress);
+                        if (novaFase) {
+                            options.log?.("info", "helper.phase", {
+                                phase: novaFase,
+                                attempt_id: attemptId,
+                                total: progress.total,
+                            });
+                        }
                         options.onProgress?.(progress);
                     }
                 } catch {}
@@ -658,6 +718,7 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
                 stderr_bytes: Buffer.byteLength(stderr, "utf8"),
                 aborted,
                 error: safeDiagnosticDetail(error, 300),
+                ...progresso.resumo(),
             });
             reject(error);
         };
@@ -712,6 +773,8 @@ export function runConfgen(options: RunConfgenOptions): Promise<ConfgenResult> {
                 stdout_bytes: Buffer.byteLength(stdout, "utf8"),
                 stderr_bytes: Buffer.byteLength(stderr, "utf8"),
                 json: Boolean(parsedJson),
+                ...progresso.resumo(),
+                ...escolhaDoHelper(parsedJson),
             });
             resolve({ code, stdout, stderr, json: parsedJson });
         });

@@ -140,6 +140,8 @@ export interface BugReportLogSources {
     sessao: string;
     segredos: SegredosConhecidos;
     token: string;
+    /** Bloco "=== resumo ===" montado dos registros do ring (montarResumoDoPlugin). */
+    resumo?: string;
 }
 
 export interface BugReportPayloadSources {
@@ -250,8 +252,11 @@ export function complementoDaCauda(ring: string, caudaArquivo: string): string {
 
 /** Bloco de log enviado: sessão do renderer, ring buffer do processo e o complemento da
  * cauda do arquivo, tudo redigido e cortado em `LOG_MAX_BYTES`. */
-export function montarLog({ ring, caudaArquivo, sessao, segredos, token }: BugReportLogSources): string {
+export function montarLog({ ring, caudaArquivo, sessao, segredos, token, resumo }: BugReportLogSources): string {
     const partes: string[] = [];
+    // O resumo abre o relato e entra no orcamento antes do ring: e o trecho que nunca sai.
+    const resumoLimpo = resumo?.trim();
+    if (resumoLimpo) partes.push(resumoLimpo);
 
     const sessaoLimpa = sessao.trimEnd();
     if (sessaoLimpa.trim()) partes.push(`=== sessao do plugin (renderer) ===\n${sessaoLimpa}`);
