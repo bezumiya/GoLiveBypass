@@ -186,6 +186,44 @@ function legacyLine(record: PluginLogRecord, noResumo = false): string {
     return `${stamp} [${record.level}] [${record.component}] ${label}${fields.length ? ` | ${fields.join(" ")}` : ""}`;
 }
 
+/** Registro JSONL do arquivo, normalizado como no restore. Null quando a linha não é um registro. */
+function registroDoArquivo(value: unknown, componentePadrao: string): PluginLogRecord | null {
+    if (!value || typeof value !== "object") return null;
+    const raw = value as Partial<PluginLogRecord>;
+    const ts = validTimestamp(raw.ts);
+    if (raw.schema_version !== 1 || !ts || typeof raw.event !== "string") return null;
+    if (raw.level !== "info" && raw.level !== "warn" && raw.level !== "error") return null;
+    return {
+        schema_version: 1,
+        ts,
+        level: raw.level,
+        component: eventName(typeof raw.component === "string" ? raw.component : componentePadrao),
+        event: eventName(raw.event),
+        operation_id: validContext(raw.operation_id),
+        attempt_id: validContext(raw.attempt_id),
+        phase: validContext(raw.phase, 80),
+        plugin_version: validContext(raw.plugin_version, 80),
+        platform: validContext(raw.platform, 40),
+        arch: validContext(raw.arch, 40),
+        message: typeof raw.message === "string" ? redactString(raw.message) : undefined,
+        data: redactPluginData(raw.data),
+        count: Number.isInteger(raw.count) && Number(raw.count) > 0 ? Math.min(Number(raw.count), 1_000_000) : 1,
+        first_ts: validTimestamp(raw.first_ts) || ts,
+        last_ts: validTimestamp(raw.last_ts) || ts,
+    };
+}
+
+/** Linha do plugin-vpn.log no mesmo texto do ring, para o relato poder deduplicar a cauda do arquivo. */
+export function formatarLinhaDoArquivo(line: string): string {
+    const trimmed = line.trimEnd();
+    if (!trimmed) return "";
+    try {
+        const record = registroDoArquivo(JSON.parse(trimmed), "plugin");
+        if (record) return legacyLine(record);
+    } catch { /* linha antiga em texto puro ou truncada: vai como está */ }
+    return trimmed;
+}
+
 function sameDedupe(a: PluginLogRecord, b: PluginLogRecord): boolean {
     return a.level === b.level && a.component === b.component && a.event === b.event && a.operation_id === b.operation_id
         && JSON.stringify(a.data || {}) === JSON.stringify(b.data || {});
@@ -212,9 +250,13 @@ export function pendingNamespaceRelaunch(records: readonly PluginLogRecord[]): {
     return null;
 }
 
-const MAX_MARCOS = 120;
-function ehMarco(record: PluginLogRecord): boolean {
-    return record.level !== "info" || EVENTO_OPERACAO.test(record.event) || EVENTO_ATIVACAO.test(record.event)
+// Duas filas: aviso de rotina não pode empurrar a ativação/relaunch para fora do resumo. Antes
+// uma única fila de 120 marcos perdia a ativação quando uma sessão acumulava avisos (o resumo
+// ficava só com os avisos, exatamente o que ele deveria evitar).
+const MAX_MARCOS_ESTADO = 120;
+const MAX_MARCOS_AVISO = 120;
+function ehMarcoDeEstado(record: PluginLogRecord): boolean {
+    return EVENTO_OPERACAO.test(record.event) || EVENTO_ATIVACAO.test(record.event)
         || /relaunch/i.test(record.message || "")
         || (record.event === "helper.completed" && typeof record.data?.server === "string");
 }
@@ -296,9 +338,11 @@ export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
     const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? 128 * 1024));
     const now = options.now || (() => new Date());
     const ring: PluginLogRecord[] = [];
-    // Marcos (operações, avisos/erros, aberturas, relaunch) em fila própria: o ruído pode empurrar
-    // a ativação para fora do ring, mas não daqui. É a fonte do resumo do relato.
-    const marcos: PluginLogRecord[] = [];
+    // Marcos em filas próprias: o ruído pode empurrar a ativação para fora do ring, mas não daqui.
+    // A fila de estado (operações, ativação, relaunch, aberturas, escolha) não é esvaziada pelos
+    // avisos de rotina; estes têm uma fila menor só para o resumo mostrar o último de cada tipo.
+    const marcosDeEstado: PluginLogRecord[] = [];
+    const marcosDeAviso: PluginLogRecord[] = [];
     let ringBytes = 0;
     let lastDedupeAt = 0;
     const trimRing = () => {
@@ -311,9 +355,12 @@ export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
         ring.push(record);
         ringBytes += utf8Bytes(JSON.stringify(record));
         trimRing();
-        if (ehMarco(record)) {
-            marcos.push(record);
-            if (marcos.length > MAX_MARCOS) marcos.shift();
+        if (ehMarcoDeEstado(record)) {
+            marcosDeEstado.push(record);
+            if (marcosDeEstado.length > MAX_MARCOS_ESTADO) marcosDeEstado.shift();
+        } else if (record.level !== "info") {
+            marcosDeAviso.push(record);
+            if (marcosDeAviso.length > MAX_MARCOS_AVISO) marcosDeAviso.shift();
         }
     };
 
@@ -367,28 +414,12 @@ export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
     const restore = (lines: readonly string[]) => {
         for (const line of lines) {
             try {
-                const value = JSON.parse(line) as PluginLogRecord;
-                const ts = validTimestamp(value?.ts);
-                if (value?.schema_version !== 1 || !ts || typeof value.event !== "string") continue;
-                if (value.level !== "info" && value.level !== "warn" && value.level !== "error") continue;
-                const restored: PluginLogRecord = {
-                    schema_version: 1,
-                    ts,
-                    level: value.level,
-                    component: eventName(typeof value.component === "string" ? value.component : options.component),
-                    event: eventName(value.event),
-                    operation_id: validContext(value.operation_id),
-                    attempt_id: validContext(value.attempt_id),
-                    phase: validContext(value.phase, 80),
-                    plugin_version: validContext(value.plugin_version || options.pluginVersion, 80),
-                    platform: validContext(value.platform || options.platform, 40),
-                    arch: validContext(value.arch || options.arch, 40),
-                    message: typeof value.message === "string" ? redactString(value.message) : undefined,
-                    data: redactPluginData(value.data),
-                    count: Number.isInteger(value.count) && Number(value.count) > 0 ? Math.min(Number(value.count), 1_000_000) : 1,
-                    first_ts: validTimestamp(value.first_ts) || ts,
-                    last_ts: validTimestamp(value.last_ts) || ts,
-                };
+                const restored = registroDoArquivo(JSON.parse(line), options.component);
+                if (!restored) continue;
+                // Mantém os defaults de versão/plataforma da execução quando o arquivo não os traz.
+                restored.plugin_version = restored.plugin_version || validContext(options.pluginVersion, 80);
+                restored.platform = restored.platform || validContext(options.platform, 40);
+                restored.arch = restored.arch || validContext(options.arch, 40);
                 const previous = ring[ring.length - 1];
                 if (previous && DEDUPE_EVENT.test(restored.event) && sameDedupe(previous, restored)) mergeAggregate(previous, restored);
                 else appendRing(restored);
@@ -403,7 +434,7 @@ export function createPluginLogger(options: PluginLoggerOptions): PluginLogger {
         error: (event, context, data, message) => emit("error", event, context, data, message),
         restore,
         records: () => ring,
-        milestones: () => marcos,
+        milestones: () => [...marcosDeEstado, ...marcosDeAviso],
         getLog: () => ring.map(legacyLine).join("\n"),
     };
 }

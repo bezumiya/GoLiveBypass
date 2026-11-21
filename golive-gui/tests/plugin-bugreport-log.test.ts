@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { LOG_ISSUE_MAX, montarLog } from "../../goLiveBypass/bug-report";
-import { carimbo, createPluginLogger, montarResumoDoPlugin } from "../../goLiveBypass/plugin-log";
+import { carimbo, createPluginLogger, formatarLinhaDoArquivo, montarResumoDoPlugin } from "../../goLiveBypass/plugin-log";
 
 describe("resumo do relatorio do plugin", () => {
   it("data no formato dd/mm/aaaa - hh:mm:ss, no horario local", () => {
@@ -62,6 +62,26 @@ describe("resumo do relatorio do plugin", () => {
     expect(linha).toContain(`[${carimbo(new Date(Date.UTC(2026, 10, 15, 23, 0, 2)))}]`);
   });
 
+  it("aviso em excesso nao expulsa ativacao, relaunch e operacao do resumo", () => {
+    let agora = Date.UTC(2026, 10, 15, 23, 0, 0);
+    const logger = createPluginLogger({ component: "plugin.native", now: () => new Date(agora += 1000), maxEvents: 20 });
+    logger.info("plugin.process.started");
+    logger.info("operation.vpn-activation.started", { operation_id: "vpn-activation-a1" });
+    logger.info("linux.network.ready", { operation_id: "vpn-activation-a1", phase: "active" });
+    logger.info("relaunch.accepted", { operation_id: "vpn-activation-a1" }, { namespace: "glb-1" }, "relaunch no namespace aceito");
+    logger.info("operation.vpn-activation.completed", { operation_id: "vpn-activation-a1" }, { duration_ms: 1200 });
+    for (let i = 0; i < 200; i++) logger.warn("route.probe.failed", { stage: String(i) }, { erro: `falha ${i}` });
+
+    // O ring pequeno perdeu a ativacao; a fila de estado do resumo nao.
+    expect(logger.records().some(r => r.event === "linux.network.ready")).toBe(false);
+    const resumo = montarResumoDoPlugin(logger.milestones(), new Date(agora));
+    expect(resumo).toContain("linux.network.ready");
+    expect(resumo).toContain("relaunch no namespace aceito");
+    expect(resumo).toMatch(/vpn-activation ok em 1\.2s/);
+    expect(resumo).toContain("aberturas do plugin: ");
+    expect(resumo).toContain("route.probe.failed");
+  });
+
   it("ring sem operacao nem aviso diz isso em vez de vir vazio", () => {
     expect(montarResumoDoPlugin([], new Date(2026, 0, 2, 3, 4, 5))).toBe(
       "=== resumo ===\nrelato enviado em 02/01/2026 - 03:04:05\n(nenhuma operacao, aviso ou erro no log)",
@@ -87,5 +107,22 @@ describe("log do relatorio do plugin", () => {
     expect(log).toContain("=== plugin-vpn.log (antes do ring) ===");
     expect(log).toContain("antigo 3999");
     expect(log).not.toContain("antigo 0 ");
+  });
+
+  it("cauda JSONL do arquivo vira o mesmo texto do ring e entra antes dele", () => {
+    const registro = (event: string, ts: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+      schema_version: 1, ts, level: "info", component: "plugin.native", event, count: 1, first_ts: ts, last_ts: ts, ...extra,
+    });
+    const antigo = registro("plugin.process.started", "2026-11-14T23:00:00.000Z");
+    const atual = registro("operation.vpn-activation.started", "2026-11-15T23:00:00.000Z", { operation_id: "vpn-activation-a1" });
+    const ring = formatarLinhaDoArquivo(atual);
+    expect(ring).toContain("operation.vpn-activation.started");
+
+    // O arquivo é JSONL; sem converter, a primeira linha do ring não seria encontrada e a cauda
+    // anterior a ele seria descartada por complementoDaCauda.
+    const cauda = [antigo, atual].map(formatarLinhaDoArquivo).join("\n");
+    const log = montarLog({ ring, caudaArquivo: cauda, sessao: "", segredos: [], token: "token" });
+    expect(log).toContain("=== plugin-vpn.log (antes do ring) ===");
+    expect(log).toContain("plugin.process.started");
   });
 });

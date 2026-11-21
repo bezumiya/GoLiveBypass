@@ -179,7 +179,10 @@ export function descreverFalhaDaTela(valor: unknown): { codigo?: string; mensage
   if (!valor || typeof valor !== "object") return null;
   const r = valor as Record<string, unknown>;
   if (r.success !== false && r.ok !== false) return null;
+  // Cancelamento (inclusive o que carrega uma explicação) não é falha que a pessoa viu.
+  if (r.cancelled === true || r.canceled === true) return null;
   const texto = [r.message, r.error].filter((x) => typeof x === "string" && x.trim()).join(" — ");
   if (!texto) return null;
-  return { ...(typeof r.code === "string" ? { codigo: r.code } : {}), mensagem: curta(texto, 400) };
+  const codigo = typeof r.code === "string" && r.code.trim() ? r.code.trim() : typeof r.code === "number" ? String(r.code) : undefined;
+  return { ...(codigo ? { codigo } : {}), mensagem: curta(texto, 400) };
 }

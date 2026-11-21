@@ -96,4 +96,11 @@ describe("descreverFalhaDaTela", () => {
     expect(descreverFalhaDaTela({ success: false })).toBeNull();
     expect(descreverFalhaDaTela(undefined)).toBeNull();
   });
+
+  it("cancelamento nao vira erro exibido e codigo numerico nao se perde", () => {
+    expect(descreverFalhaDaTela({ success: false, cancelled: true, error: "Teste cancelado." })).toBeNull();
+    expect(descreverFalhaDaTela({ success: false, canceled: true, message: "Operacao cancelada." })).toBeNull();
+    expect(descreverFalhaDaTela({ success: false, code: 1632, message: "Falha do Windows." }))
+      .toEqual({ codigo: "1632", mensagem: "Falha do Windows." });
+  });
 });
