@@ -1407,7 +1407,8 @@ function Stop-DiscordProcesses($processos) {
 # para gravar: se falha, o Equilotl vai falhar logo depois com "files are used by a
 # different process" — melhor descobrir antes de desfazer o patch do cliente.
 function Test-ArquivoLivre([string]$caminho) {
-    if (-not $caminho -or -not (Test-Path -LiteralPath $caminho)) { return $true }
+    # app.asar pode ser diretorio no layout legado: File.Open daria Access denied sem trava.
+    if (-not $caminho -or -not (Test-Path -LiteralPath $caminho -PathType Leaf)) { return $true }
     try {
         $fluxo = [IO.File]::Open($caminho, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $fluxo.Close()
