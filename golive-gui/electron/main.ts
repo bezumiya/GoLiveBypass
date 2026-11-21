@@ -3113,9 +3113,26 @@ function createLinuxPasswordFallback(
     return passFile;
   };
   const run = async (args: string[], onChunk: (chunk: string) => void) => {
-    const forward = (chunk: string) => {
+    const held: string[] = [];
+    const emit = (chunk: string) => {
       forwardChunk(chunk);
       if (onChunk !== forwardChunk) onChunk(chunk);
+    };
+    const releaseHeld = () => {
+      for (const chunk of held) emit(chunk);
+      held.length = 0;
+    };
+    const forward = (chunk: string) => {
+      // A primeira execução falha de propósito (provider_missing) para o modal
+      // de senha abrir. Mostrar esse erro antes da janela responder faz parecer
+      // que a autorização falhou (#380). Guardamos a linha e só a devolvemos se
+      // o fallback for cancelado ou também falhar.
+      if (!passFile && chunk.includes("nao foi possivel autorizar o sudo (resultado unavailable)")) {
+        consumeLinuxElevationEvents(chunk, state);
+        held.push(chunk);
+        return;
+      }
+      emit(chunk);
     };
     // A janela do app e a dona do pedido de senha nesta operacao: o script nao
     // abre zenity/kdialog/pkexec (um dialogo por spawn) e sinaliza
@@ -3125,20 +3142,30 @@ function createLinuxPasswordFallback(
     const extraEnv: Record<string, string> = { GOLIVE_SUDO_UI: "1" };
     if (passFile) extraEnv.GOLIVE_SUDO_PASS_FILE = passFile;
     let result = await runScript(args, forward, extraEnv);
-    if (result.code === 0 || !state.providerMissing) return result;
+    if (result.code === 0 || !state.providerMissing) {
+      releaseHeld();
+      return result;
+    }
     // Sem a janela respondendo, o script falha antes de qualquer stop_discord —
     // repetir com a senha da GUI é seguro e resolve sozinho (NixOS enxuto, spins).
     let incorrect = false;
     for (let attempt = 0; attempt < LINUX_GUI_PASSWORD_ATTEMPTS; attempt += 1) {
       state.guiPasswordRejected = false;
       const password = await promptLinuxSudoPassword(incorrect);
-      if (password === null) return result;
+      if (password === null) {
+        releaseHeld();
+        return result;
+      }
       const file = storePassword(password);
       result = await runScript(args, forward, { GOLIVE_SUDO_PASS_FILE: file, GOLIVE_SUDO_UI: "1" });
       if (result.code === 0) return result;
-      if (!state.guiPasswordRejected) return result;
+      if (!state.guiPasswordRejected) {
+        releaseHeld();
+        return result;
+      }
       incorrect = true;
     }
+    releaseHeld();
     return result;
   };
   return { run, dispose: cleanupFile };
