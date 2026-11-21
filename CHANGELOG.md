@@ -4,6 +4,12 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [2.0.19-beta-2] - 2026-11-21
+
+### Corrigido
+
+- **Windows: um update já baixado e conferido é aplicado na abertura do app (#459).** O `update pendente recuperado` era apenas registrado no log e o app seguia na versão antiga, mesmo com o executável novo validado em disco. Com a atualização automática ligada, a abertura agora agenda a troca do portable e reinicia na versão nova; se o helper não puder trocar, o app antigo permanece e a tentativa fica disponível para a próxima abertura. A verificação de identidade, tamanho e SHA-256 continua sendo feita antes da troca.
+
 ## [2.0.19-beta-1] - 2026-11-21
 
 ### Corrigido
