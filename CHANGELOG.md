@@ -4,6 +4,20 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [2.0.19-beta-1] - 2026-11-21
+
+### Corrigido
+
+- **Instalação no Windows: `app.asar` como pasta não é mais tratado como arquivo em uso (#453).** Em clientes com o layout legado (`app.asar` diretório e `_app.asar` arquivo), a sonda de trava abria o diretório com `[IO.File]::Open`, recebia `Access denied` e cancelava a instalação com o Discord fechado. Agora só arquivos são sondados; o `_app.asar` travado continua detectado.
+- **Linux: status e desinstalação enxergam o namespace mesmo com `/var/run/netns` 0700 (#449).** A identidade `device:inode` do namespace é gravada na ativação e usada para provar o túnel a partir de `/proc`, sem root e sem prompt. O teardown passa a usar uma checagem elevada e falha explicitamente se o namespace sobrar; o uninstall reabre o Discord no host quando ele estava aberto e não imprime sucesso falso.
+- **Windows: falha temporária no download do WireSock agora tem nova tentativa e mensagem útil (#429, #432).** HTTP 429/502/503/504 e timeout são repetidos até três vezes com backoff curto; a mensagem final aponta o site oficial e orienta tentar de novo. O hash fixado e a verificação do instalador continuam os mesmos — nenhum mirror foi adicionado.
+- **Linux: o erro da primeira tentativa de sudo não aparece mais antes da janela de senha (#380).** Com `GOLIVE_SUDO_UI=1`, a primeira execução falha de propósito para abrir o modal; o texto "não foi possível autorizar o sudo (resultado unavailable)" era exibido como falha real. Agora ele só aparece se a janela for cancelada ou a autorização falhar de verdade.
+- **Plugin: erro na recuperação de update interrompido deixa de virar `erro={}` no relato (#414).** A mensagem do erro passa a ser gravada no log, preservando a única pista da falha.
+
+### Observação
+
+- Relatos sem log, sem versão atual ou com causa dependente de ambiente/reputação de IP (#377, #378, #398, #403, #405, #409, #410, #414, #420, #421, #422, #424, #432, #448, #456, #457) seguem abertos para reteste ou informação do autor. As correções de login Proton 5003 (#437 a #442, #446, #458), injeção legada no Canary (#379) e "checking for updates" (#450) já vieram na 2.0.17 e não foram alteradas aqui.
+
 ## [2.0.18] - 2026-11-20
 
 ### Alterado
