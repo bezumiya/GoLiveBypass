@@ -1,0 +1,333 @@
+name: proton-app-version
+
+# Em 19/11/2026 a Proton passou a recusar a versão que o proton-confgen anunciava (código 5003,
+# "This version of the app is no longer supported", #437 a #442) e todo login quebrou até sair
+# uma release; o projeto só soube pelos relatos. Esta checagem pergunta à API, sem login, se ainda
+# é aceita a versão que cada helper manda: o da main, o da última release estável (Windows e Linux)
+# e o da última release macOS, que sai com make_latest=false e por isso nunca é a "latest" do
+# repositório. Só 5001, 5003 e 5005 abrem issue; rede fora, 5xx ou outro código viram aviso, para
+# instabilidade não virar alarme falso. A issue fecha sozinha quando um run completo vê tudo aceito.
+# O run fica vermelho quando o alerta muda (issue aberta ou atualizada) ou a própria checagem falha;
+# enquanto nada muda, a recusa fica como aviso no run, sem e-mail de falha a cada 6 horas.
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      versao:
+        description: 'Testar outra ClientVersion (ex.: 4.17.2); com versão informada o run só relata, sem abrir nem fechar issue'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  issues: write
+
+# Um run manual e o agendado ao mesmo tempo não podem abrir duas issues.
+concurrency:
+  group: proton-app-version
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Declarado, o runner usa bash --noprofile --norc -eo pipefail; sem declarar, seria só bash -e.
+    shell: bash
+
+jobs:
+  verificar:
+    # Só no repositório de produção: o fork de trabalho também tem Actions ligado e não pode abrir issue.
+    if: github.repository == 'bezumiya/GoLiveBypass'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Versões a conferir
+        id: versoes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSAO_INPUT: ${{ inputs.versao }}
+        run: |
+          set -euo pipefail
+          api=tools/proton-confgen/internal/constants/api.go
+          # Cada alvo vira uma linha "ClientVersion|x-pm-appversion|User-Agent|origens". Com x-pm-appversion vazio,
+          # o script deriva o formato oficial e o alvo é conferido nas duas arquiteturas; preenchido, é o par literal
+          # de um helper anterior ao ClientVersion (o da macos-v0.8.0 manda linux-vpn@4.17.2).
+          declare -A origens=()
+          ordem=()
+          # completo=nao quando uma release ficou fora (API do GitHub, api.go ilegível): sem ela conferida, um run em
+          # que o resto é aceito não pode fechar o alerta.
+          completo=sim
+          # Primeiro valor de NOME = "..." no api.go, aceitando var e string como o readClientVersion do script.
+          valor() { sed -nE "/^[[:space:]]*(var[[:space:]]+)?$1([[:space:]]+string)?[[:space:]]*=[[:space:]]*\"([^\"]*)\".*\$/{s//\\3/p;q;}"; }
+          adicionar() {  # $1 = origem, $2 = conteúdo do api.go; falha se não achar versão nenhuma
+            local cv app="" ua="" chave
+            cv="$(printf '%s\n' "$2" | valor ClientVersion)"
+            if [ -z "$cv" ]; then
+              app="$(printf '%s\n' "$2" | valor AppVersion)"
+              ua="$(printf '%s\n' "$2" | valor UserAgent)"
+              [ -n "$app" ] || return 1
+              cv="$(printf '%s\n' "$app" | sed -nE 's/^[^@]*@([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')"
+            fi
+            chave="$cv|$app|$ua"
+            if [ -n "${origens[$chave]:-}" ]; then
+              origens[$chave]="${origens[$chave]}, $1"
+            else
+              ordem+=("$chave")
+              origens[$chave]="$1"
+            fi
+          }
+          # Falha da API do GitHub só tira aquela release desta checagem, com aviso; a main é conferida de todo jeito.
+          adicionar_release() {  # $1 = descrição, $2 = tag ("?" se a consulta falhou, vazia se não existe)
+            local conteudo
+            if [ "$2" = "?" ]; then
+              echo "::warning::Não consegui consultar a $1; ela fica fora desta checagem."
+              completo=nao
+              return 0
+            fi
+            if [ -z "$2" ]; then
+              echo "::notice::Não há $1 para conferir."
+              return 0
+            fi
+            if ! conteudo="$(gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GITHUB_REPOSITORY/contents/$api?ref=$2")"; then
+              echo "::warning::Não consegui ler $api na $2 ($1); ela fica fora desta checagem."
+              completo=nao
+              return 0
+            fi
+            if ! adicionar "$2" "$conteudo"; then
+              echo "::warning::$api na $2 ($1) não tem ClientVersion nem AppVersion; ela fica fora desta checagem."
+              completo=nao
+            fi
+          }
+          if [ -n "${VERSAO_INPUT:-}" ]; then
+            versao="$(printf '%s' "$VERSAO_INPUT" | tr -d '[:space:]')"
+            if ! [[ "$versao" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Versão informada inválida: use X.Y.Z, como 6.1.2."
+              exit 1
+            fi
+            adicionar "versão informada à mão" "var ClientVersion = \"$versao\""
+          else
+            # Sem esta guarda, um api.go reformatado tiraria a main da checagem calado.
+            if ! adicionar main "$(cat "$api")"; then
+              echo "::error::Não achei ClientVersion (nem AppVersion) em $api."
+              exit 1
+            fi
+            gui="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)" || gui="?"
+            # As releases macOS saem com make_latest=false: a mais recente vem da lista e, como no updater do macOS
+            # (pickRelease), é a maior macos-vX.Y.Z estável.
+            mac="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --exclude-drafts --exclude-pre-releases --json tagName \
+                     --jq '[.[] | select(.tagName | test("^macos-v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(.tagName | ltrimstr("macos-v") | split(".") | map(tonumber)) | last | .tagName // empty')" || mac="?"
+            adicionar_release "última release estável" "$gui"
+            adicionar_release "última release macOS" "$mac"
+          fi
+          {
+            echo "completo=$completo"
+            echo "alvos<<FIM"
+            for chave in "${ordem[@]}"; do printf '%s|%s\n' "$chave" "${origens[$chave]}"; done
+            echo "FIM"
+          } >> "$GITHUB_OUTPUT"
+          for chave in "${ordem[@]}"; do echo "Alvo: $chave (${origens[$chave]})"; done
+
+      - name: Perguntar à Proton se a versão ainda é aceita
+        id: proton
+        env:
+          ALVOS: ${{ steps.versoes.outputs.alvos }}
+          COMPLETO: ${{ steps.versoes.outputs.completo }}
+        run: |
+          set -uo pipefail
+          recusadas=""; aceitas=""; relatorio=""; ultima=""; erro=nao; inconclusivas=0; conferidas=0
+          # Um campo da linha JSON do script (vazio se faltar), numa linha só; node já está instalado, sem depender do jq.
+          campo() { node -e 'const j = JSON.parse(process.argv[1]); const v = j[process.argv[2]]; process.stdout.write(v == null ? "" : String(v).replace(/\s+/g, " "));' "$1" "$2" </dev/null 2>/dev/null || true; }
+          while IFS='|' read -r cv app ua origem; do
+            if [ -z "$cv$app" ]; then continue; fi
+            # O par literal de um helper antigo não leva a arquitetura: uma consulta basta.
+            if [ -n "$app" ]; then archs=literal; else archs="x86-64 aarch64"; fi
+            for arch in $archs; do
+              vars=(PROTON_CLIENT_VERSION="$cv" GITHUB_OUTPUT=/dev/null)
+              if [ "$arch" = literal ]; then
+                vars+=(PROTON_APP_VERSION="$app" PROTON_USER_AGENT="$ua")
+              else
+                vars+=(PROTON_ARCH="$arch")
+              fi
+              conferidas=$((conferidas + 1))
+              # O bash do Actions roda com -e: sem o "|| rc=$?", a primeira recusa (saída 1) encerraria o passo antes
+              # de registrar o que foi recusado, e a issue nunca seria aberta.
+              rc=0
+              saida="$(env "${vars[@]}" node scripts/check-proton-app-version.mjs </dev/null)" || rc=$?
+              echo "$saida"
+              linha="$(printf '%s\n' "$saida" | tail -n 1)"
+              status="$(campo "$linha" status)"
+              enviado="$(campo "$linha" appVersion)"
+              u="$(campo "$linha" latestVersion)"
+              if [ -n "$u" ]; then ultima="$u"; fi
+              resposta="HTTP $(campo "$linha" httpStatus), código $(campo "$linha" code)"
+              # Só a combinação esperada de saída e status conta: um script quebrado (saída 1 sem JSON) não vira recusa.
+              case "$rc:$status" in
+                0:accepted)
+                  aceitas="${aceitas:+$aceitas, }$enviado"
+                  relatorio="$relatorio- \`$enviado\` ($origem): aceita ($resposta)"$'\n'
+                  ;;
+                0:inconclusive)
+                  inconclusivas=$((inconclusivas + 1))
+                  relatorio="$relatorio- \`$enviado\` ($origem): inconclusiva ($(campo "$linha" message))"$'\n'
+                  ;;
+                1:rejected)
+                  recusadas="$recusadas $enviado"
+                  relatorio="$relatorio- \`$enviado\` ($origem): **recusada** ($resposta, \"$(campo "$linha" message)\")"$'\n'
+                  ;;
+                *)
+                  # 5002/2064 (saída 2) ou saída sem JSON: o erro é da própria checagem, não da Proton.
+                  erro=sim
+                  echo "::error::A checagem de ${app:-$cv $arch} ($origem) terminou com código $rc e status '${status:-sem JSON}'."
+                  ;;
+              esac
+            done
+          done <<< "$ALVOS"
+          if [ "$conferidas" -eq 0 ]; then
+            erro=sim
+            echo "::error::Nenhuma versão foi conferida; veja o passo anterior."
+          fi
+          # Em ordem fixa, para o título da issue ser o mesmo a cada run com o mesmo conjunto.
+          recusadas="$(printf '%s' "$recusadas" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd ' ' -)"
+          # Completo: todas as releases entraram, nenhuma resposta inconclusiva e nenhum erro. Só um run completo pode
+          # fechar o alerta ou tirar versões do título dele.
+          completa=nao
+          if [ "${COMPLETO:-nao}" = sim ] && [ "$erro" = nao ] && [ "$inconclusivas" -eq 0 ]; then completa=sim; fi
+          tudo_aceito=nao
+          if [ "$completa" = sim ] && [ -z "$recusadas" ]; then tudo_aceito=sim; fi
+          # O passo termina com 0 de propósito: se ele falhasse, os seguintes não rodariam, e uma recusa encontrada
+          # junto com um erro da checagem ficaria sem issue. Quem deixa o run vermelho é o último passo.
+          {
+            echo "recusadas=$recusadas"
+            echo "aceitas=$aceitas"
+            echo "erro=$erro"
+            echo "completa=$completa"
+            echo "tudo_aceito=$tudo_aceito"
+            echo "ultima=$ultima"
+            echo "relatorio<<FIM"
+            printf '%s' "$relatorio"
+            echo "FIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Abrir ou atualizar a issue do alerta
+        id: alerta
+        if: steps.proton.outputs.recusadas != '' && inputs.versao == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECUSADAS: ${{ steps.proton.outputs.recusadas }}
+          COMPLETA: ${{ steps.proton.outputs.completa }}
+          RELATORIO: ${{ steps.proton.outputs.relatorio }}
+          ULTIMA: ${{ steps.proton.outputs.ultima }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          prefixo='[alerta] Proton recusa a versão do helper'
+          # Conjuntos de versões em ordem fixa, para comparar títulos como texto.
+          linhas() { tr ' ' '\n' | sed '/^$/d' | sort -u; }
+          ordenar() { linhas | paste -sd ' ' -; }
+          conjunto() { sed -n 's/.*(\(.*\))$/\1/p' | ordenar; }  # as versões entre os parênteses do título
+          contido() { [ -z "$(comm -23 <(printf '%s' "$1" | linhas) <(printf '%s' "$2" | linhas))" ]; }  # $1 dentro de $2
+          atual="$(printf '%s' "$RECUSADAS" | ordenar)"
+          corpo="$RUNNER_TEMP/corpo.md"
+          {
+            echo "A checagem agendada encontrou a Proton recusando a versão que um helper distribuído anuncia. Enquanto isso durar, quem usa esse helper não consegue entrar na conta Proton (foi o que aconteceu em 19/11, #437 a #442)."
+            echo
+            echo "**Respostas da API** (\`GET https://vpn-api.proton.me/vpn/v2/clientconfig\`, sem login, $(date -u '+%d/%m/%Y %H:%M') UTC):"
+            echo
+            printf '%s\n' "$RELATORIO"
+            echo
+            echo "**Versão atual do cliente oficial** (python-proton-vpn-api-core): \`${ULTIMA:-não foi possível ler}\`."
+            echo
+            echo "**Como corrigir:**"
+            echo "1. Se a \`main\` foi recusada: trocar \`ClientVersion\` em \`tools/proton-confgen/internal/constants/api.go\` pela versão de [python-proton-vpn-api-core/stable/versions.yml](https://raw.githubusercontent.com/ProtonVPN/python-proton-vpn-api-core/stable/versions.yml), atualizar o mesmo número no \`Makefile\` e no \`.goreleaser.yaml\` de \`tools/proton-confgen\`, regenerar o helper Linux embutido em \`goLiveBypass/vpn-proton.ts\` (como no #444) e rodar \`go test ./...\` em \`tools/proton-confgen\`."
+            echo "2. Lançar de novo, a partir de uma \`main\` aceita, cada release recusada: \`build-gui.yml\` para Windows e Linux, \`release-macos.yml\` para o macOS. A correção só chega aos usuários com release."
+            echo
+            echo "Esta issue fecha sozinha quando uma checagem completa vir todas as versões aceitas. Fechar à mão silencia o alerta: enquanto o que a Proton recusa couber no que foi fechado, a checagem não abre outra issue e a recusa fica só como aviso no run. Uma recusa nova abre issue."
+            echo
+            echo "Para conferir à mão: \`node scripts/check-proton-app-version.mjs\` (com \`PROTON_CLIENT_VERSION=X.Y.Z\` para testar outra versão)."
+            echo
+            echo "Run: $RUN_URL"
+          } > "$corpo"
+          aberta="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,title \
+                    --jq "first(.[] | select(.title | startswith(\"$prefixo\"))) | \"\(.number)|\(.title)\"")"
+          if [ -n "$aberta" ]; then
+            numero="${aberta%%|*}"
+            antes="$(printf '%s\n' "${aberta#*|}" | conjunto)"
+            if [ "$COMPLETA" = sim ]; then
+              novo="$atual"
+            else
+              # Run parcial (release fora, resposta inconclusiva ou erro): o que sumiu pode só não ter sido conferido,
+              # então nada sai do título; só entra recusa nova.
+              novo="$(printf '%s %s' "$antes" "$atual" | ordenar)"
+            fi
+            if [ "$novo" = "$antes" ]; then
+              echo "::warning::A Proton recusa: $atual. A issue #$numero já registra este alerta."
+              exit 0
+            fi
+            comentario="$RUNNER_TEMP/comentario.md"
+            { echo "**Mudou o que a Proton recusa.** O título desta issue foi atualizado."; echo; cat "$corpo"; } > "$comentario"
+            gh issue comment "$numero" --repo "$GITHUB_REPOSITORY" --body-file "$comentario"
+            gh issue edit "$numero" --repo "$GITHUB_REPOSITORY" --title "$prefixo ($novo)"
+            echo "novidade=sim" >> "$GITHUB_OUTPUT"
+            echo "Issue #$numero atualizada."
+            exit 0
+          fi
+          # Fechar o alerta à mão silencia: se o que a Proton recusa agora cabe no conjunto de um alerta fechado, a
+          # checagem não abre outro (a cada 6 h, seria spam) e a recusa fica só como aviso no run. Ao fechar, a própria
+          # checagem troca o prefixo por [resolvido], então fechamento automático não silencia nada.
+          fechadas="$(gh issue list --repo "$GITHUB_REPOSITORY" --state closed --limit 1000 --json number,title \
+                      --jq ".[] | select(.title | startswith(\"$prefixo\")) | \"\(.number)|\(.title)\"")"
+          while IFS='|' read -r n t; do
+            if [ -z "$n" ]; then continue; fi
+            if contido "$atual" "$(printf '%s\n' "$t" | conjunto)"; then
+              echo "::warning::A Proton recusa: $atual. A issue #$n, fechada à mão, silencia este alerta: não abro outra."
+              exit 0
+            fi
+          done <<< "$fechadas"
+          url="$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$prefixo ($atual)" --body-file "$corpo")"
+          numero="${url##*/}"
+          echo "novidade=sim" >> "$GITHUB_OUTPUT"
+          echo "Issue aberta: $url"
+          # Label e responsável entram depois: se um falhar (label apagada, permissão), o alerta já existe e o outro ainda entra.
+          gh issue edit "$numero" --repo "$GITHUB_REPOSITORY" --add-label bug \
+            || echo "::warning::Não consegui pôr a label bug na issue #$numero."
+          gh issue edit "$numero" --repo "$GITHUB_REPOSITORY" --add-assignee pdl-clay \
+            || echo "::warning::Não consegui atribuir a issue #$numero a pdl-clay."
+
+      - name: Fechar o alerta quando a Proton voltar a aceitar tudo
+        if: steps.proton.outputs.tudo_aceito == 'sim' && inputs.versao == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACEITAS: ${{ steps.proton.outputs.aceitas }}
+        run: |
+          set -euo pipefail
+          prefixo='[alerta] Proton recusa a versão do helper'
+          abertas="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json number,title \
+                     --jq ".[] | select(.title | startswith(\"$prefixo\")) | \"\(.number)|\(.title)\"")"
+          while IFS='|' read -r numero titulo; do
+            if [ -z "$numero" ]; then continue; fi
+            # O prefixo muda antes de fechar: um [alerta] fechado silencia (é como o mantenedor silencia à mão), e o
+            # fechamento automático não pode silenciar. Nesta ordem, se o fechamento falhar, sobra só uma issue aberta.
+            gh issue edit "$numero" --repo "$GITHUB_REPOSITORY" --title "[resolvido]${titulo#'[alerta]'}" </dev/null
+            gh issue close "$numero" --repo "$GITHUB_REPOSITORY" </dev/null \
+              --comment "A checagem de $(date -u '+%d/%m/%Y %H:%M') UTC viu a Proton aceitar todas as versões conferidas ($ACEITAS). Fechando."
+            echo "Issue #$numero fechada."
+          done <<< "$abertas"
+
+      # Vermelho só com novidade (issue aberta ou atualizada), com a checagem quebrada ou num teste à mão recusado: uma
+      # recusa já registrada não deixa o run vermelho a cada 6 h, porque cada run vermelho agendado manda e-mail.
+      - name: Run vermelho quando o alerta muda ou a checagem falha
+        if: steps.alerta.outputs.novidade == 'sim' || steps.proton.outputs.erro == 'sim' || (inputs.versao != '' && steps.proton.outputs.recusadas != '')
+        env:
+          RECUSADAS: ${{ steps.proton.outputs.recusadas }}
+          ERRO: ${{ steps.proton.outputs.erro }}
+        run: |
+          if [ -n "$RECUSADAS" ]; then echo "::error::A Proton recusa: $RECUSADAS"; fi
+          if [ "$ERRO" = sim ]; then echo "::error::A própria checagem falhou (requisição malformada ou saída inesperada do script); veja o passo da Proton."; fi
+          exit 1

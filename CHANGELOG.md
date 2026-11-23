@@ -4,6 +4,39 @@ Todas as mudanças notáveis deste projeto são documentadas aqui. O formato seg
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o versionamento
 segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
+## [Unreleased]
+
+### Adicionado
+
+- **Alerta quando a Proton deixar de aceitar a versão de um helper distribuído.** Em 19/11, a Proton passou a recusar a versão que o `proton-confgen` anunciava (código 5003), e todo login quebrou até sair uma release. O projeto só soube pelos relatos (#437 a #442).
+  - O novo workflow `proton-app-version.yml` pergunta à API, a cada 6 horas e sem login, se ainda é aceita a versão que cada helper manda. Ele confere três helpers:
+    - o da `main`;
+    - o da última release estável (Windows e Linux), em `x86-64` e `aarch64`;
+    - o da última release macOS, a maior `macos-vX.Y.Z` estável, a mesma que o updater do macOS escolhe. Ela sai com `make_latest=false`, então a checagem a procura na lista de releases. Quando o `api.go` da tag é de antes do `ClientVersion`, a checagem confere o par literal (`x-pm-appversion` e `User-Agent`) que aquele helper manda.
+  - A checagem manda os mesmos cabeçalhos explícitos do helper (`internal/api/transport.go`).
+  - Quando a Proton responde 5001, 5003 ou 5005, o workflow abre uma issue `[alerta] Proton recusa a versão do helper`, com a label `bug` e atribuída ao mantenedor. A issue traz a resposta da API para cada helper, a versão atual do cliente oficial e o passo a passo da correção.
+  - Fica uma issue só para o alerta:
+    - se o que a Proton recusa mudar, a checagem comenta na issue aberta e atualiza o título. Um run parcial (release fora, resposta inconclusiva ou erro) só soma recusas novas, sem tirar nenhuma;
+    - quando um run completo vê tudo aceito, a checagem troca o prefixo da issue para `[resolvido]` e a fecha;
+    - fechar à mão silencia o alerta: enquanto o que a Proton recusa couber no que foi fechado, a checagem não abre outra issue a cada 6 horas. Uma recusa diferente abre issue nova.
+  - O run fica vermelho quando o alerta muda (issue aberta ou atualizada) ou quando a própria checagem falha. Enquanto nada muda, a recusa fica como aviso no run, sem um e-mail de falha a cada 6 horas.
+  - Rede fora, 5xx ou qualquer outro código só viram aviso, sem issue.
+  - 5002, 2064 ou uma saída inesperada do script indicam erro da própria checagem: o run fica vermelho, sem issue. Uma recusa encontrada no mesmo run ainda abre a sua.
+  - O workflow só roda em `bezumiya/GoLiveBypass`.
+  - A mesma checagem roda à mão com `node scripts/check-proton-app-version.mjs`. Com `PROTON_CLIENT_VERSION=X.Y.Z`, testa outra versão.
+
+  **Verificado:**
+  - os 61 testes do script passam;
+  - contra a API real, a 6.1.2 da `main` e da `v2.0.18` foi aceita nas duas arquiteturas, o par da `macos-v0.8.0` (`linux-vpn@4.17.2`) recebeu 5003 e a rede fora deu inconclusivo;
+  - os passos do workflow rodaram localmente com `bash --noprofile --norc -eo pipefail`, o shell declarado no workflow. O `gh` real foi usado só para leitura (releases, `api.go` das tags, a escolha da release macOS e os filtros `--jq` contra issues fechadas) e um `gh` falso para escrever. Cenários:
+    - abrir, atualizar (também em run parcial), silenciar e fechar a issue;
+    - a label falhando sem tirar o responsável;
+    - script quebrado sem alarme falso;
+    - recusa junto com erro da checagem;
+    - API do GitHub fora.
+
+  **Não verificado:** um run de verdade no Actions, que só roda depois do merge, na branch padrão. Os `if:` dos passos e o que a Proton responde aos IPs dos runners também só se veem nesse primeiro run.
+
 ## [2.0.18] - 2026-11-20
 
 ### Alterado
