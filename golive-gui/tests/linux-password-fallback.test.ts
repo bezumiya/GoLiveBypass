@@ -29,14 +29,17 @@ type RunCall = { args: string[]; env: Record<string, string> };
 function createFallback(overrides: {
   results: Array<{ code: number; stdout?: string; stderr?: string }>;
   password?: string | null;
+  errorChunks?: string[];
 }) {
   const js = ts.transpileModule(functionText("createLinuxPasswordFallback"), {
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
   }).outputText;
+  const uiChunks: string[] = [];
   const state = { pending: "", providerMissing: false, guiPasswordRejected: false };
   // Recorte do parser real (consumeLinuxElevationEvents): a GUI so descobre que
   // precisa perguntar pelos eventos que o script emite no stderr.
   const forwardChunk = (chunk: string) => {
+    uiChunks.push(chunk);
     if (chunk.includes("prompt.unavailable") && chunk.includes("reason=provider_missing")) {
       state.providerMissing = true;
     }
@@ -53,6 +56,7 @@ function createFallback(overrides: {
       (forward as (chunk: string) => void)(
         "[elevation] prompt.unavailable provider=none result=unavailable input=not_applicable reason=provider_missing\n",
       );
+      for (const extra of overrides.errorChunks ?? []) (forward as (chunk: string) => void)(extra);
     }
     return result;
   };
@@ -64,19 +68,20 @@ function createFallback(overrides: {
   const factory = new Function(
     "runScript",
     "promptLinuxSudoPassword",
+    "consumeLinuxElevationEvents",
     "fs",
     "path",
     "tmpdir",
     "LINUX_GUI_PASSWORD_ATTEMPTS",
     `${js}\nreturn createLinuxPasswordFallback;`,
-  )(runScript, promptLinuxSudoPassword, fs, path, os.tmpdir, 3) as (
+  )(runScript, promptLinuxSudoPassword, (chunk: string, s: { providerMissing: boolean }) => { if (chunk.includes("reason=provider_missing")) s.providerMissing = true; }, fs, path, os.tmpdir, 3) as (
     parserState: { pending: string; providerMissing: boolean; guiPasswordRejected: boolean },
     forward: (chunk: string) => void,
   ) => {
     run: (args: string[], onChunk: (chunk: string) => void) => Promise<{ code: number }>;
     dispose: () => void;
   };
-  return { fallback: factory(state, forwardChunk), calls, prompts: () => prompts };
+  return { fallback: factory(state, forwardChunk), calls, prompts: () => prompts, uiChunks };
 }
 
 describe("fallback de senha da GUI (uma senha por operacao)", () => {
@@ -117,5 +122,17 @@ describe("fallback de senha da GUI (uma senha por operacao)", () => {
     expect(calls.every((call) => call.env.GOLIVE_SUDO_PASS_FILE === undefined)).toBe(true);
     expect(calls.every((call) => call.env.GOLIVE_SUDO_UI === "1")).toBe(true);
     fallback.dispose();
+  });
+
+  it("não mostra o erro da primeira tentativa enquanto a janela abre (#380)", async () => {
+    const erro = "Falha: nao foi possivel autorizar o sudo (resultado unavailable). A ativacao foi cancelada sem alterar o sistema.\n";
+    const ok = createFallback({ results: [{ code: 1 }, { code: 0 }], errorChunks: [erro] });
+    await ok.fallback.run(["--yes"], () => {});
+    expect(ok.prompts()).toBe(1);
+    expect(ok.uiChunks.some((chunk) => chunk.includes("resultado unavailable"))).toBe(false);
+
+    const cancel = createFallback({ password: null, results: [{ code: 1 }], errorChunks: [erro] });
+    await cancel.fallback.run(["--yes"], () => {});
+    expect(cancel.uiChunks.some((chunk) => chunk.includes("resultado unavailable"))).toBe(true);
   });
 });

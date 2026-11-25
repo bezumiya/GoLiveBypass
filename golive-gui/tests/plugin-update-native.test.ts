@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import ts from "typescript";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -184,5 +185,16 @@ describe("updater nativo do plugin", () => {
     expect(native).toContain('const UNKNOWN_PLUGIN_VERSION = "unknown"');
     expect(native).toContain("catch { return normalizePluginVersion(PLUGIN_VERSION) ?? UNKNOWN_PLUGIN_VERSION; }");
     expect(native).toContain("validatePluginSourceTree(target)");
+  });
+});
+
+describe("diagnóstico da recuperação de update interrompido", () => {
+  it("mantém a mensagem do erro no log do plugin", () => {
+    const fonte = native.match(/export function describeUpdateRecoveryError\(error: unknown\): string \{[\s\S]*?\n\}/)?.[0];
+    expect(fonte).toBeTruthy();
+    const js = ts.transpileModule(fonte!.replace("export ", ""), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    const descrever = new Function(`${js}\nreturn describeUpdateRecoveryError;`)() as (error: unknown) => string;
+    expect(descrever(new Error("wireSockInstallFailure: 502"))).toBe("wireSockInstallFailure: 502");
+    expect(descrever({ message: "sem permissão" })).toBe("sem permissão");
   });
 });

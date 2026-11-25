@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, parseWireSockUninstallLocations, readWireSockResult, sanitizeWireGuardConfig, wireSockExecError, wireSockForeignInstallLocations, wireSockForeignInstallMessage, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
+import { classifyWireSockActivationFailure, classifyWireSockDirectResult, classifyWireSockInstallState, describeWireSockDownloadError, formatAllowedApps, limparSinalDoSupervisor, mayUseServiceCompatibility, parseWireSockOrphanDefaultRoutes, parseWireSockUninstallEntries, parseWireSockUninstallLocations, readWireSockResult, sanitizeWireGuardConfig, wireSockDownloadRetryable, wireSockExecError, wireSockForeignInstallLocations, wireSockForeignInstallMessage, wireSockInstallFailureHint, wireSockInstallModeError, wireSockInstallerArguments, wireSockInstallerExitKind, wireSockResidueNeedsRestore, type WireSockNetworkRestoreResult } from "../electron/wiresock";
 import { collectWireSockInstallerLogErrors, describeWireSockInstallerExit, installerFolderDiagnosis, wireSockInstallerFailureDetail } from "../electron/wiresock-install-diag";
 import { elevatedPowerShellFileArgs, wireSockDirectScript, wireSockNetworkRestoreScript, wireSockServiceScript } from "../electron/wiresock-service";
 
@@ -688,5 +688,20 @@ describe("recuperação de rede compartilhada", () => {
     const { ctx, calls } = recoverCtx(true, restoreOk);
     await run(ctx, { forceNetworkRestore: true });
     expect(calls).toEqual([{ reason: "recuperacao", force: true }]);
+  });
+});
+
+describe("download do instalador WireSock", () => {
+  it("explica um 502 e orienta nova tentativa", () => {
+    const mensagem = describeWireSockDownloadError(new Error("HTTP 502"));
+    expect(mensagem).toMatch(/HTTP 502/);
+    expect(mensagem).toMatch(/tente ativar novamente/);
+  });
+
+  it("tenta de novo apenas em falhas transitórias do site oficial", () => {
+    expect(wireSockDownloadRetryable(new Error("HTTP 502"))).toBe(true);
+    expect(wireSockDownloadRetryable(new Error("Timeout ao baixar o instalador WireSock"))).toBe(true);
+    expect(wireSockDownloadRetryable(new Error("Redirecionamento para host não autorizado do instalador WireSock"))).toBe(false);
+    expect(wireSockDownloadRetryable(new Error("HTTP 404"))).toBe(false);
   });
 });

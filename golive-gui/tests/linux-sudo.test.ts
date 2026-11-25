@@ -185,8 +185,10 @@ describe("elevacao sudo no Linux", () => {
     // Falha de elevacao nao pode ser mascarada: o operador precisa do aviso
     // com o comando manual porque o tunel pode continuar ativo.
     expect(teardown).toContain('warn "Nao consegui remover o namespace');
-    // Sucesso so e anunciado quando o namespace realmente saiu.
-    expect(teardown).toContain("if ! netns_exists; then");
+    // Sucesso so e anunciado quando o namespace saiu nas duas vias (usuario e
+    // elevada); se sobrar, o retorno e 1 e o uninstall falha em vez de mentir.
+    expect(teardown).toContain("if netns_exists || netns_exists_elevated; then");
+    expect(teardown).toContain("rc=1");
     expect(teardown).toContain('ok "Tunel WireGuard encerrado."');
   });
   itLinux("finaliza status e probe mesmo com stdin aberto", { timeout: 120_000 }, async () => {

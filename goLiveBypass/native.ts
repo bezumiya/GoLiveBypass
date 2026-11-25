@@ -82,7 +82,7 @@ import * as proton from "./vpn-proton";
 import { safeDiagnosticDetail } from "./vpn-types";
 import { createOperationId, createPluginLogger, formatarLinhaDoArquivo, montarResumoDoPlugin, pendingNamespaceRelaunch, trimJsonlTailByBytes, type PluginLogContext } from "./plugin-log";
 
-const PLUGIN_VERSION = "2.0.18";
+const PLUGIN_VERSION = "2.0.19";
 const PLUGIN_ASSET = "goLiveBypass-vencord.zip";
 const PLUGIN_CHECKSUM_ASSET = `${PLUGIN_ASSET}.sha256`;
 const GITHUB_RELEASES_URL = "https://api.github.com/repos/bezumiya/GoLiveBypass/releases?per_page=20";
@@ -2889,6 +2889,12 @@ app.on("will-quit", () => {
     disposeWireSockSnapshotWorker();
 });
 
+export function describeUpdateRecoveryError(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    const mensagem = (error as { message?: unknown } | null)?.message;
+    return typeof mensagem === "string" && mensagem ? mensagem : String(error);
+}
+
 app.whenReady().then(async () => {
     const relaunchPendente = process.platform === "linux" ? pendingNamespaceRelaunch(pluginLogger.records()) : null;
     log("info", `abrindo plugin VPN | ${process.platform} ${process.arch} | electron ${process.versions.electron}`);
@@ -2912,7 +2918,7 @@ app.whenReady().then(async () => {
         try { await recoverInterruptedPluginUpdate({ allowStaged: true }); }
         finally { releasePluginUpdateLock(lock); }
     } catch (error) {
-        log("warn", "não consegui concluir a recuperação de update interrompido", { erro: error });
+        log("warn", "não consegui concluir a recuperação de update interrompido", { erro: describeUpdateRecoveryError(error) });
     }
     // Capture antes de qualquer update automático: depois do preparo o
     // manifest do checkout pode estar novo, embora este processo ainda seja o

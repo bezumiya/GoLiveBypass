@@ -428,6 +428,21 @@ function wireSockPlatform(): { hash: keyof typeof WIRESOCK_INSTALLER_HASHES; que
   throw new Error(`Arquitetura Windows não suportada para WireSock: ${process.arch}`);
 }
 
+/** HTTP 502/503/504 e 429 do site oficial sao transitórios: merecem nova tentativa. */
+export function wireSockDownloadRetryable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (/host não autorizado|URL oficial|Muitos redirecionamentos|excede o limite/.test(error.message)) return false;
+  return /HTTP (429|502|503|504)\b|Timeout ao baixar/.test(error.message);
+}
+
+export function describeWireSockDownloadError(error: unknown): string {
+  if (!(error instanceof Error)) return "Download WireSock falhou sem detalhes.";
+  const status = error.message.match(/HTTP (\d+)/)?.[1];
+  if (!status) return error.message;
+  const transitório = /^(429|502|503|504)$/.test(status);
+  return `Download WireSock retornou HTTP ${status}.${transitório ? " O site oficial pode estar indisponível neste momento; tente ativar novamente em instantes." : ""}`;
+}
+
 function downloadOfficialWireSock(platform: "x64" | "x86" | "ARM64", target: string): Promise<void> {
   const start = WIRESOCK_OFFICIAL_DOWNLOAD.replace("{platform}", platform);
   const maxBytes = 512 * 1024 * 1024;
@@ -444,7 +459,11 @@ function downloadOfficialWireSock(platform: "x64" | "x86" | "ARM64", target: str
         request(new URL(response.headers.location, parsed).toString(), redirects + 1).then(resolve, reject);
         return;
       }
-      if (response.statusCode !== 200) { response.resume(); reject(new Error(`Download WireSock retornou HTTP ${response.statusCode ?? "desconhecido"}`)); return; }
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(new Error(describeWireSockDownloadError(new Error(`HTTP ${response.statusCode ?? "desconhecido"}`))));
+        return;
+      }
       const output = fs.createWriteStream(target, { flags: "wx" });
       let total = 0;
       let settled = false;
@@ -461,7 +480,23 @@ function downloadOfficialWireSock(platform: "x64" | "x86" | "ARM64", target: str
     req.setTimeout(120_000, () => req.destroy(new Error("Timeout ao baixar o instalador WireSock")));
     req.on("error", reject);
   });
-  return request(start);
+
+  // Um 502 do site oficial (visto em #429/#432) derrubava a ativação inteira.
+  // Tentativas curtas com backoff, sem mirror: o hash fixado continua a origem da verdade.
+  const tentar = async (tentativa: number): Promise<void> => {
+    try {
+      await request(start);
+    } catch (error) {
+      if (tentativa >= 3 || !wireSockDownloadRetryable(error)) throw error;
+      logger.warn("wiresock", "download falhou, tentando novamente", { tentativa, erro: detalheErro(error) });
+      try { fs.unlinkSync(target); } catch { /* arquivo ainda nao criado */ }
+      const espera = Promise.withResolvers<void>();
+      setTimeout(espera.resolve, 1000 * tentativa);
+      await espera.promise;
+      return tentar(tentativa + 1);
+    }
+  };
+  return tentar(1);
 }
 
 /**
