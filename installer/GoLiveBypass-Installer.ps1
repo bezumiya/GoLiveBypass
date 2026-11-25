@@ -960,6 +960,7 @@ function Copy-PatchParallel($root, $resources) {
         Write-Warn $motivo
         return [pscustomobject]@{ Ok = $false; Motivo = $motivo }
     }
+    if ($nome -eq 'Equibop') { return Set-EquibopEquicordDir $root $resources }
 
     $asar = Join-Path $root "dist\$asarName"
     if (-not (Test-Path -LiteralPath $asar)) {
@@ -982,6 +983,42 @@ function Copy-PatchParallel($root, $resources) {
     }
     Copy-Item -LiteralPath $asar -Destination $appAsar -Force
     Write-Ok "$nome patcheado: $appAsar"
+    return [pscustomobject]@{ Ok = $true; Motivo = '' }
+}
+
+# O dist\equibop.asar do Equicord nao e o app do Equibop: e so o Equicord que o Equibop carrega
+# por dentro (main/renderer/preload). Copiado por cima do resources\app.asar, o Equibop perdia o
+# proprio app e parava de abrir. O caminho que o Equibop suporta e o "Equicord Location":
+# equicordDir no state.json, de onde ele carrega <dir>\equibop na abertura.
+function Set-EquibopEquicordDir($root, $resources) {
+    $dist = Join-Path $root 'dist'
+    if (-not (Test-Path -LiteralPath (Join-Path $dist 'equibop\main.js'))) {
+        $motivo = "o build nao gerou $dist\equibop\main.js. Rode 'pnpm build' no checkout Equicord e tente de novo."
+        Write-Warn $motivo
+        return [pscustomobject]@{ Ok = $false; Motivo = $motivo }
+    }
+    # Quem passou pela copia antiga ficou com o Equibop sem abrir: devolve o app.asar original.
+    if ((Get-ClientAsarState $resources) -eq 'golive') { [void](Restore-ClientAsar $resources 'Equibop') }
+
+    # Mesma regra do Equibop (src/main/constants.ts): DATA_DIR = EQUICORD_USER_DATA_DIR ?? userData.
+    $dataDir = if ($env:EQUICORD_USER_DATA_DIR) { $env:EQUICORD_USER_DATA_DIR } else { Join-Path $env:APPDATA 'Equibop' }
+    $stateFile = Join-Path $dataDir 'state.json'
+    $state = $null
+    if (Test-Path -LiteralPath $stateFile) {
+        try { $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json }
+        catch {
+            $motivo = "nao consegui ler $stateFile. No Equibop, aponte Equicord Location para $dist na mao."
+            Write-Warn $motivo
+            return [pscustomobject]@{ Ok = $false; Motivo = $motivo }
+        }
+    }
+    if ($null -eq $state -or $state -is [array] -or $state -is [string]) { $state = [pscustomobject]@{} }
+    $state | Add-Member -NotePropertyName equicordDir -NotePropertyValue $dist -Force
+    Save-Text $stateFile ($state | ConvertTo-Json -Depth 100)
+    # O Equicord dentro do Equibop le as configuracoes de <DATA_DIR>\settings, nao do %APPDATA%\Equicord.
+    Set-PluginSettings $root (Join-Path $dataDir 'settings\settings.json')
+    Write-InstallerEvent 'info' 'installer.equibop_equicord_dir' 'inject' @{ target_count = 1 }
+    Write-Ok "Equibop usando o Equicord de $dist"
     return [pscustomobject]@{ Ok = $true; Motivo = '' }
 }
 
@@ -1126,7 +1163,8 @@ function Restore-ClientAsar($resources, $label, [switch]$Force) {
 
 function Show-ClientStates {
     $seen = 0
-    foreach ($resources in Get-DiscordResources) {
+    # Get-PatchTargets inclui Equibop/Vesktop/Legcord; Get-DiscordResources so lista o oficial.
+    foreach ($resources in @(Get-PatchTargets | ForEach-Object { $_.Resources })) {
         if (-not $resources) { continue }
         $label = Get-ClientLabel $resources
         $state = Get-ClientAsarState $resources
@@ -1140,7 +1178,7 @@ function Show-ClientStates {
 function Invoke-RestoreClient($alvo = '') {
     $alvo = "$alvo".Trim().ToLowerInvariant()
     $alvos = @()
-    foreach ($resources in Get-DiscordResources) {
+    foreach ($resources in @(Get-PatchTargets | ForEach-Object { $_.Resources })) {
         if (-not $resources) { continue }
         $label = Get-ClientLabel $resources
         $state = Get-ClientAsarState $resources
@@ -1393,7 +1431,8 @@ function Get-DiscordUpdaterProcesses {
 }
 
 function Get-DiscordProcesses {
-    return @(@(Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue) + @(Get-DiscordUpdaterProcesses) | Where-Object { $_ })
+    # Paralelos (Equibop/Vesktop/Legcord) tambem carregam o build do mod e travam o proprio app.asar.
+    return @(@(Get-Process -Name ($DiscordNames + $ParallelNames) -ErrorAction SilentlyContinue) + @(Get-DiscordUpdaterProcesses) | Where-Object { $_ })
 }
 
 function Stop-DiscordProcesses($processos) {
@@ -2101,8 +2140,8 @@ function Select-UpdateChannel($root) {
     return $script:SelectedChannel
 }
 
-function Set-PluginSettings($root) {
-    $file = Get-ModSettingsFile $root
+function Set-PluginSettings($root, $file = $null) {
+    if (-not $file) { $file = Get-ModSettingsFile $root }
 
     $settings = $null
     if (Test-Path -LiteralPath $file) {
@@ -2591,7 +2630,40 @@ function Get-PluginReleaseCandidates([string]$channel = $script:SelectedChannel)
             }
         }
     } catch {
-        return
+        $motivo = $_.Exception.Message
+        Write-InstallerEvent 'warn' 'installer.release_api_failed' $script:InstallerPhase @{ channel = $channel; reason = $motivo }
+        if ($channel -ne 'stable') { return }
+        Write-Warn "API do GitHub indisponivel ($motivo); buscando a release stable direto pelo github.com."
+        try { Get-StableReleaseFromWeb }
+        catch { Write-InstallerEvent 'warn' 'installer.release_web_failed' $script:InstallerPhase @{ channel = $channel; reason = $_.Exception.Message } }
+    }
+}
+
+# Sem a API (rate limit, proxy ou bloqueio do host da API) o redirect web de /releases/latest
+# ainda aponta a latest do repo, que por invariante de release e sempre stable (beta e macOS
+# nunca viram latest). Beta nao tem equivalente sem API, entao fica sem fallback.
+function Resolve-LatestStableTag {
+    $req = [Net.WebRequest]::Create("https://github.com/$GitHubRepo/releases/latest")
+    $req.Method = 'HEAD'
+    $req.UserAgent = 'GoLiveBypass-Installer'
+    $req.Timeout = 15000
+    $resp = $req.GetResponse()
+    try { return ($resp.ResponseUri.AbsolutePath -split '/')[-1] } finally { $resp.Close() }
+}
+
+function Get-StableReleaseFromWeb {
+    $tag = Resolve-LatestStableTag
+    $version = ConvertTo-PluginVersion $tag
+    # A regex de versao tambem garante que a tag e segura para montar a URL.
+    if (-not $version -or $version.Pre.Count -gt 0) { return }
+    $base = "https://github.com/$GitHubRepo/releases/download/$tag"
+    [pscustomobject]@{
+        Tag = $version.Normalized
+        Version = $version.Normalized
+        AssetUrl = "$base/goLiveBypass-vencord.zip"
+        ShaUrl = "$base/goLiveBypass-vencord.zip.sha256"
+        Prerelease = $false
+        Release = $null
     }
 }
 
