@@ -1,6 +1,6 @@
 {
   "name": "golivebypass-mac",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Reativa o Go Live do Discord no macOS (Apple Silicon e Intel) com túnel WireGuard só para o Discord.",
   "main": "dist/main/main.js",

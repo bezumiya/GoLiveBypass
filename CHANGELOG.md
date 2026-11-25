@@ -37,6 +37,26 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   **Não verificado:** um run de verdade no Actions, que só roda depois do merge, na branch padrão. Os `if:` dos passos e o que a Proton responde aos IPs dos runners também só se veem nesse primeiro run.
 
+## [macos-0.8.1] - 2026-11-24
+
+Correção do login da Proton no Mac. A 0.8.0 manda a identificação que a Proton deixou de aceitar em 19/11, e o login responde com o código 5003 (#462).
+
+### Corrigido
+
+- **O login da Proton volta a funcionar.** O `proton-confgen` embutido passa a se identificar como o cliente oficial do Linux: `linux-vpn-gui@6.1.2+x86-64` nos Macs Intel e `linux-vpn-gui@6.1.2+aarch64` nos Apple Silicon. A 0.8.0 manda `linux-vpn@4.17.2`, que a Proton recusa com HTTP 422 e código 5003 (#443).
+- **Se a Proton recusar a versão de novo, o app avisa e mantém a sessão.** No login, nas rotas e no painel do celular, o código 5003 vira "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar.". A sessão salva não é mais apagada quando a renovação recebe essa recusa (#445).
+
+### Verificado
+
+- `npm test` em `golive-gui-mac`: 136 testes passaram. O arquivo `test/vencord.test.ts` não carrega fora do macOS sem o binário do Electron instalado.
+- A API da Proton aceita a identificação nova nas duas arquiteturas (HTTP 200, código 1000) e recusa a da 0.8.0 (422/5003). A checagem agendada `proton-app-version` confere isso a cada 6 horas.
+
+### Falta validar num Mac
+
+- Entrar na conta Proton pelo app e buscar rota.
+- Ativar o bypass e fazer live no Discord.
+- Gerar a conf do celular com a sessão salva.
+
 ## [2.0.18] - 2026-11-20
 
 ### Alterado
