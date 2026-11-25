@@ -557,6 +557,95 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('open-help')!.addEventListener('click', () => openPanel(document.getElementById('help-panel')!));
 document.getElementById('open-settings')!.addEventListener('click', () => openPanel(document.getElementById('settings-panel')!));
 
+// ── Reportar bug ──────────────────────────────────────────────────────────────
+
+const bugPanel   = document.getElementById('bug-panel')!;
+const bugForm    = document.getElementById('bug-form')!;
+const bugSummary = document.getElementById('bug-summary') as HTMLInputElement;
+const bugDesc    = document.getElementById('bug-desc') as HTMLTextAreaElement;
+const bugLogs    = document.getElementById('bug-logs') as HTMLInputElement;
+const bugSend    = document.getElementById('bug-send') as HTMLButtonElement;
+const bugStatus  = document.getElementById('bug-status')!;
+const bugSuccess = document.getElementById('bug-success')!;
+const bugLink    = document.getElementById('bug-link')!;
+let bugTimer: ReturnType<typeof setInterval> | null = null;
+
+function setBugStatus(text: string, kind: 'info' | 'err' = 'info') {
+  bugStatus.textContent = text;
+  bugStatus.hidden = !text;
+  bugStatus.classList.toggle('err', kind === 'err');
+}
+
+function stopBugCountdown() {
+  if (bugTimer) clearInterval(bugTimer);
+  bugTimer = null;
+  bugSend.disabled = false;
+}
+
+// Bloqueio por spam: desabilita o Enviar com contagem regressiva até o bloqueio expirar
+function startBugCountdown(seconds: number) {
+  stopBugCountdown();
+  let left = Math.max(1, Math.floor(seconds));
+  const tick = () => {
+    if (left <= 0) { stopBugCountdown(); setBugStatus(''); return; }
+    bugSend.disabled = true;
+    setBugStatus(`Você está bloqueado por enviar reports em excesso. Tente de novo em ${left > 60 ? `${Math.ceil(left / 60)} min` : `${left}s`}.`, 'err');
+    left--;
+  };
+  tick();
+  bugTimer = setInterval(tick, 1000);
+}
+
+function setBugBusy(busy: boolean) {
+  for (const el of [bugSummary, bugDesc, bugLogs, bugSend]) el.disabled = busy;
+  bugSend.textContent = busy ? 'Enviando…' : 'Enviar';
+}
+
+document.getElementById('open-bug')!.addEventListener('click', () => {
+  stopBugCountdown();
+  bugForm.hidden = false;
+  bugSuccess.hidden = true;
+  bugLink.textContent = '';
+  setBugStatus('');
+  setBugBusy(false);
+  openPanel(bugPanel);
+  bugSummary.focus();
+});
+bugPanel.addEventListener('panelclose', stopBugCountdown);
+
+bugSend.addEventListener('click', async () => {
+  const title = bugSummary.value.trim();
+  if (!title) { setBugStatus('Informe um resumo do problema.', 'err'); bugSummary.focus(); return; }
+  setBugBusy(true);
+  setBugStatus('');
+  try {
+    const r = await golive.reportBug({ title, description: bugDesc.value, includeLogs: bugLogs.checked });
+    setBugBusy(false);
+    if (r?.ok) {
+      bugSummary.value = '';
+      bugDesc.value = '';
+      bugForm.hidden = true;
+      bugSuccess.hidden = false;
+      bugLink.textContent = '';
+      if (typeof r.issueUrl === 'string' && /^https:\/\/github\.com\//.test(r.issueUrl)) {
+        const a = document.createElement('a');
+        a.href = r.issueUrl;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = `Ver issue${r.issueNumber ? ` #${r.issueNumber}` : ''} no GitHub →`;
+        bugLink.append(a);
+      }
+    } else if (r?.blocked && r.retryAfter) {
+      startBugCountdown(r.retryAfter);
+    } else {
+      setBugStatus(r?.error || 'Falha ao enviar.', 'err');
+    }
+  } catch (e: any) {
+    setBugBusy(false);
+    setBugStatus(String(e?.message ?? e), 'err');
+  }
+});
+
 // ── Usar no celular ───────────────────────────────────────────────────────────
 
 const phonePanel   = document.getElementById('phone-panel')!;

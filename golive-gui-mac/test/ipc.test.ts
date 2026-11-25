@@ -58,3 +58,12 @@ describe('makeRouter', () => {
     await expect(router('canal:invalido', undefined)).rejects.toThrow();
   });
 });
+
+describe('report:send', () => {
+  it('limita e normaliza o payload do relato', async () => {
+    const reportBug = vi.fn(async () => ({ ok: true }));
+    const router = makeRouter({ reportBug } as any);
+    await router('report:send', { title: 'x'.repeat(300), description: 7, includeLogs: undefined });
+    expect(reportBug).toHaveBeenCalledWith({ title: 'x'.repeat(200), description: '7', includeLogs: true });
+  });
+});

@@ -599,3 +599,23 @@ body[data-state="pending"] button.power svg { stroke: var(--warn); }
 .segmented span { display: block; padding: 4px 10px; border-radius: 6px; font-size: 12px; color: var(--subtext); transition: background 0.15s, color 0.15s; }
 .segmented input:checked + span { background: var(--accent); color: #fff; }
 .segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── Reportar bug ─────────────────────────────────────────────────── */
+.bug-form { display: flex; flex-direction: column; gap: 10px; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--subtext); }
+.field input, .field textarea {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  resize: vertical;
+}
+.field input:focus, .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(91,106,245,0.18); }
+.bug-success { display: flex; flex-direction: column; gap: 6px; text-align: center; padding: 12px 0; }
+.bug-success[hidden] { display: none; }
+.bug-success h3 { font-size: 15px; font-weight: 700; color: var(--ok); }
+.bug-success a { color: var(--accent); }

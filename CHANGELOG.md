@@ -54,6 +54,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   **Não verificado:** um download real no Windows, com o `wiresock.net` respondendo 502 ou travando de verdade.
 
+## [macos-0.9.0] - não lançada
+
+Relato de bug no macOS, igual ao da GUI Windows/Linux.
+
+### Adicionado
+
+- **Reportar bug** (ícone na barra do topo). O relato vai para a mesma API da GUI (`bugs.golivebypass.dev`) e vira issue no GitHub, com o mesmo bloqueio por excesso de envios e a contagem regressiva.
+- **Log persistente** em `~/Library/Logs/GoLiveBypass/gui.log`, no formato da GUI (`[DD/MM/AAAA - HH:MM:SS] [nivel][categoria] ...`), com rotação em 2 MB e ring buffer de 1000 linhas. As mensagens do painel de log e o `console` do processo principal passam a ser gravadas.
+- **Resumo enxuto no topo do relato** (`relato-resumo.ts` da GUI): ações com resultado e duração, ativação, servidor escolhido, erros mostrados na tela agrupados e avisos (o último de cada tipo). As ações da janela (ativar, desativar, reiniciar, restaurar internet, login Proton, celular...) são registradas pelo router de IPC; leituras ficam fora.
+- **Redação em três camadas**, a mesma da GUI: padrões (credenciais, tokens, e-mail, pasta do usuário), ocorrências literais da conta Proton salva e do home, e uma varredura final que bloqueia o envio se algo sobrar. A senha Proton nunca é registrada.
+- Metadados do relato: versão, macOS, arquitetura, locale, fuso, estado do bypass, modo de conexão e de rota, troca automática e Vencord. Nada da saída escolhida.
+
 ## [macos-0.8.1] - 2026-11-24
 
 Login Proton de volta no macOS.
