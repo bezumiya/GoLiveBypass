@@ -27,6 +27,11 @@ describe('comRegistro', () => {
     expect(log).not.toContain('segredo');
   });
 
+  it('lista errors do config:import vira a mensagem da tela', async () => {
+    await comRegistro(async () => ({ ok: false, errors: ['O arquivo não tem um bloco [Peer].'], warnings: [] }))('config:import', { rawText: 'x' });
+    expect(logger.getRecent()).toContain('erro.exibido | canal=config:import mensagem=O arquivo não tem um bloco [Peer].');
+  });
+
   it('não registra canais de leitura', async () => {
     const inner = vi.fn(async () => ({ ok: false, error: 'x' }));
     await comRegistro(inner)('tunnel:status', undefined);

@@ -39,7 +39,7 @@ const binDir = path.join(process.resourcesPath ?? path.join(__dirname, '../../re
 const logDir = path.join(home, 'Library', 'Logs', 'GoLiveBypass');
 logger.initLogger(logDir);
 logger.patchConsole();
-logger.info('app', 'inicio', { versao: app.getVersion(), macos: os.release(), arch: process.arch });
+logger.info('app', 'inicio', { versao: app.getVersion(), macos: process.getSystemVersion?.() ?? os.release(), arch: process.arch });
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;

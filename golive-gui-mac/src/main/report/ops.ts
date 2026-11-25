@@ -13,10 +13,15 @@ export const CANAIS_DE_ACAO = new Set([
   'app:downloadUpdate', 'phone:generate', 'phone:save',
 ]);
 
-// O Mac devolve { error: 'codigo', detail } sem ok:false em varias acoes do tunel.
-function normalizar(valor: unknown): unknown {
+// O Mac devolve { error: 'codigo', detail } sem ok:false em varias acoes do tunel, e o
+// config:import devolve { ok:false, errors: [...] } com as mensagens da validacao.
+export function normalizar(valor: unknown): unknown {
   if (!valor || typeof valor !== 'object') return valor;
   const r = valor as Record<string, unknown>;
+  if (r.ok === false && r.error === undefined && Array.isArray(r.errors)) {
+    const msgs = r.errors.filter((e): e is string => typeof e === 'string' && e.trim() !== '');
+    return { ok: false, error: msgs.join(' ') || 'falhou' };
+  }
   if (typeof r.error === 'string' && r.ok === undefined && r.success === undefined) {
     return { ok: false, code: r.error, error: typeof r.detail === 'string' && r.detail ? r.detail : r.error };
   }
