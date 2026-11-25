@@ -637,7 +637,36 @@ export function windowsEnvironmentSnapshot(env: NodeJS.ProcessEnv = process.env)
     return snapshot;
 }
 
-function downloadInstaller(target: string, url = WIRESOCK_DOWNLOAD, redirects = 0): Promise<void> {
+// Um 502 do site oficial (#429, #432) derrubava a ativação inteira. Mesmo retry da GUI
+// (downloadOfficialWireSock): HTTP 429/502/503/504 e timeout, até três tentativas com espera curta.
+// Sem mirror: o hash fixado continua a origem da verdade.
+const WIRESOCK_DOWNLOAD_ATTEMPTS = 3;
+
+function wireSockDownloadStatusError(status: number | undefined): Error {
+    const transient = status === 429 || status === 502 || status === 503 || status === 504;
+    return new Error(`Download WireSock retornou HTTP ${status ?? "desconhecido"}.${transient ? " O site oficial pode estar indisponível neste momento; tente ativar novamente em instantes." : ""}`);
+}
+
+function wireSockDownloadRetryable(error: unknown): boolean {
+    return error instanceof Error && /HTTP (?:429|502|503|504)\b|Timeout ao baixar/.test(error.message);
+}
+
+export async function downloadInstaller(target: string, log: WireSockLogger, sleep = wait): Promise<void> {
+    for (let attempt = 1; attempt <= WIRESOCK_DOWNLOAD_ATTEMPTS; attempt++) {
+        try {
+            await downloadInstallerOnce(target);
+            return;
+        } catch (error) {
+            if (attempt === WIRESOCK_DOWNLOAD_ATTEMPTS || !wireSockDownloadRetryable(error)) throw error;
+            log("warn", "wiresock.download.retry", { tentativa: attempt, erro: logError(error) });
+            await sleep(1000 * attempt);
+            // Um timeout no meio do corpo deixa o arquivo parcial, e a próxima tentativa abre com `wx`.
+            await fs.promises.rm(target, { force: true }).catch(() => {});
+        }
+    }
+}
+
+function downloadInstallerOnce(target: string, url = WIRESOCK_DOWNLOAD, redirects = 0): Promise<void> {
     return new Promise((resolve, reject) => {
         try {
             const parsed = new URL(url);
@@ -655,12 +684,12 @@ function downloadInstaller(target: string, url = WIRESOCK_DOWNLOAD, redirects = 
                 if (redirects >= 3) { reject(new Error("Muitos redirecionamentos no instalador WireSock.")); return; }
                 // O endpoint oficial pode apontar para o CDN do próprio wiresock.net.
                 const next = new URL(response.headers.location, url).toString();
-                void downloadInstaller(target, next, redirects + 1).then(resolve, reject);
+                void downloadInstallerOnce(target, next, redirects + 1).then(resolve, reject);
                 return;
             }
             if (response.statusCode !== 200) {
                 response.resume();
-                reject(new Error(`Download WireSock retornou HTTP ${response.statusCode ?? "desconhecido"}.`));
+                reject(wireSockDownloadStatusError(response.statusCode));
                 return;
             }
             const output = fs.createWriteStream(target, { flags: "wx" });
@@ -1030,7 +1059,7 @@ async function ensureWireSockInstalledOnce(log: WireSockLogger): Promise<string>
     const startedAt = Date.now();
     try {
         log("info", "baixando instalador oficial do WireSock", { version: WIRESOCK_VERSION });
-        await downloadInstaller(installer);
+        await downloadInstaller(installer, log);
         if (sha256(installer).toLowerCase() !== WIRESOCK_INSTALLER_SHA256)
             throw new Error("Hash do instalador WireSock não corresponde ao release oficial fixado.");
         const state = await detectWireSockInstallState();
