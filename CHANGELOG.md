@@ -6,6 +6,15 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Corrigido
+
+- **Instalador Windows do plugin no Equibop.**
+  - O instalador não deixa mais o Equibop sem abrir. Ele copiava o `dist\equibop.asar` do Equicord por cima do `resources\app.asar` do Equibop, mas esse arquivo é só o Equicord que o Equibop carrega por dentro: o Equibop perdia o próprio app. Agora o instalador grava o "Equicord Location" do Equibop (`equicordDir` no `%APPDATA%\Equibop\state.json`), apontando para o `dist` do checkout, e ativa o plugin nas configurações do Equicord do Equibop. Quem ficou com o Equibop quebrado pela versão anterior tem o `app.asar` original devolvido na próxima instalação.
+  - O Equibop, o Vesktop e o Legcord abertos são fechados antes da instalação. Antes só o Discord oficial era fechado, e a instalação parava em "Os arquivos do Discord continuam em uso".
+  - `-Mode ClientStatus` e `-Mode RestoreClient` passam a enxergar o Equibop, o Vesktop e o Legcord. Antes os dois só listavam o Discord oficial e respondiam "nenhum cliente encontrado".
+- **Instalador Windows sem acesso à API do GitHub.** Quando a consulta de releases falha (rate limit, proxy ou bloqueio), o canal stable pega a release pelo redirecionamento de `github.com/.../releases/latest`, com o zip e o `.sha256` da mesma tag e a mesma conferência de SHA-256 e manifest. O beta continua dependendo da API. O motivo da falha vai para o `installer.log`, que antes só registrava a mensagem genérica.
+- **Lacuna conhecida:** o instalador Linux continua copiando o `equibop.asar` por cima do Equibop e depende só da API do GitHub. No Linux, um Equibop aberto não trava a instalação.
+
 ## [2.0.19] - 2026-11-25
 
 ### Adicionado

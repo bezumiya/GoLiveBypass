@@ -121,6 +121,39 @@ function Get-DiscordResources { return @($lote) }
 Invoke-RestoreClient ''
 Check 'driver devolve o original do cliente em lote' ((Get-Content -LiteralPath (Join-Path $lote 'app.asar') -Raw) -eq 'ORIGINAL-6')
 
+# ------------------------- Equibop instalado: status/restore enxergam o cliente paralelo
+$env:LOCALAPPDATA = Join-Path $trabalho 'local'
+$env:APPDATA = Join-Path $trabalho 'roaming'
+Remove-Item Env:\EQUICORD_USER_DATA_DIR -ErrorAction SilentlyContinue
+$equibop = Join-Path $env:LOCALAPPDATA 'Programs\Equibop\resources'
+New-Item -ItemType Directory -Path $equibop -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $equibop 'app.asar') -Value 'equibop.asar do Equicord com GoLiveBypass' -NoNewline
+Set-Content -LiteralPath (Join-Path $equibop '_app.asar') -Value 'EQUIBOP-ORIGINAL' -NoNewline
+function Get-DiscordResources { return @() }
+$status = (Show-ClientStates 6>&1 | Out-String)
+Check 'ClientStatus lista o Equibop' ($status -match 'Equibop' -and $status -notmatch 'nenhum cliente')
+Invoke-RestoreClient 'equibop'
+Check 'RestoreClient -Client Equibop devolve o app.asar original' ((Get-Content -LiteralPath (Join-Path $equibop 'app.asar') -Raw) -eq 'EQUIBOP-ORIGINAL')
+
+# ------------- install no Equibop: Equicord Location no state.json, sem tocar no app.asar
+$checkout = Join-Path $trabalho 'Equicord'
+New-Item -ItemType Directory -Path (Join-Path $checkout 'dist\equibop') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $checkout 'dist\equibop\main.js') -Value '//' -NoNewline
+Set-Content -LiteralPath (Join-Path $equibop 'app.asar') -Value 'equibop.asar do Equicord com GoLiveBypass' -NoNewline
+Set-Content -LiteralPath (Join-Path $equibop '_app.asar') -Value 'EQUIBOP-ORIGINAL' -NoNewline
+$dados = Join-Path $env:APPDATA 'Equibop'
+New-Item -ItemType Directory -Path $dados -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $dados 'state.json') -Value '{"firstLaunch":false,"windowBounds":{"x":1}}' -NoNewline
+$r = Set-EquibopEquicordDir $checkout $equibop 6>$null
+$state = Get-Content -LiteralPath (Join-Path $dados 'state.json') -Raw | ConvertFrom-Json
+Check 'Equibop recebe equicordDir apontando para o dist do checkout' ($r.Ok -and $state.equicordDir -eq (Join-Path $checkout 'dist'))
+Check 'state.json do Equibop preserva as outras chaves' ($state.firstLaunch -eq $false -and $state.windowBounds.x -eq 1)
+Check 'app.asar quebrado pela copia antiga volta ao original' ((Get-Content -LiteralPath (Join-Path $equibop 'app.asar') -Raw) -eq 'EQUIBOP-ORIGINAL')
+$cfg = Get-Content -LiteralPath (Join-Path $dados 'settings\settings.json') -Raw | ConvertFrom-Json
+Check 'plugin ativado nas configuracoes do Equicord do Equibop' ($cfg.plugins.GoLiveBypass.enabled -eq $true)
+Remove-Item -LiteralPath (Join-Path $checkout 'dist\equibop\main.js') -Force
+Check 'sem dist\equibop\main.js o Equibop nao e configurado' (-not (Set-EquibopEquicordDir $checkout $equibop 3>$null 6>$null).Ok)
+
 Remove-Item -LiteralPath $trabalho -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $extrato -Force -ErrorAction SilentlyContinue
 

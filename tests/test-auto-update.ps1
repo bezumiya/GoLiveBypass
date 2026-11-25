@@ -167,9 +167,9 @@ if ($detectBlock -notmatch "installer\.selected.*detect.*channel" -and
 } else { Bad "canal aparece falso no detect ou falta apos selecao" }
 $installModBlock = [regex]::Match($content, 'function Install-Mod[\s\S]*?function Stop-Discord').Value
 if ($installModBlock -notmatch "installer\.selected.*channel") { Ok "download do mod nao fixa stable antes da selecao" } else { Bad "download do mod registra canal antes da selecao" }
-if ($content -match 'Get-PluginReleaseCandidates' -and $content -match 'releases\?per_page=30' -and $content -notmatch 'Get-PluginReleaseCandidates[\s\S]{0,3000}releases/latest') {
-    Ok "selecao de canal nao usa /releases/latest"
-} else { Bad "selecao de canal usa endpoint latest" }
+if ($content -match 'Get-PluginReleaseCandidates' -and $content -match 'releases\?per_page=30' -and $content -notmatch 'api\.github\.com[^\r\n]*releases/latest' -and $content -notmatch '\$GitHubApi/releases/latest') {
+    Ok "selecao de canal nao usa o endpoint /releases/latest da API"
+} else { Bad "selecao de canal usa endpoint latest da API" }
 if ($content -match 'function Invoke-ChangeChannel' -and
     $content -match 'Mudar canal de atualizacoes' -and
     $content -match 'Invoke-ChangeChannel \$root; continue') {
@@ -295,6 +295,26 @@ if ($script:webRequests -eq 0 -and $checkOutput -match 'canal:\s*beta' -and $che
     Bad "-Mode CheckUpdate ficou falso-verde ou fez download"
 }
 Remove-Item $settingsRoot -Recurse -Force
+
+# 9. API do GitHub fora: stable cai no redirect web, beta continua recusando
+Write-Host ""
+Write-Host "== 9. Fallback sem API do GitHub =="
+$env:GLB_INSTALLER_LOG_DIR = Join-Path ([IO.Path]::GetTempPath()) ("golive-log-" + [guid]::NewGuid().ToString('N'))
+function Invoke-RestMethod { throw 'Response status code does not indicate success: 403 (rate limit exceeded).' }
+$script:fakeLatestTag = 'v2.0.19'
+function Resolve-LatestStableTag { return $script:fakeLatestTag }
+$fallback = Get-PluginReleaseForChannel stable 3>$null 6>$null
+if ($fallback.Version -eq '2.0.19' -and
+    $fallback.AssetUrl -eq 'https://github.com/bezumiya/GoLiveBypass/releases/download/v2.0.19/goLiveBypass-vencord.zip' -and
+    $fallback.ShaUrl -eq 'https://github.com/bezumiya/GoLiveBypass/releases/download/v2.0.19/goLiveBypass-vencord.zip.sha256') {
+    Ok "stable usa a latest do github.com, presa a tag, quando a API falha"
+} else { Bad "stable sem fallback correto: $($fallback | Out-String)" }
+if ($null -eq (Get-PluginReleaseForChannel beta 6>$null)) { Ok "beta nao cai na latest quando a API falha" } else { Bad "beta usou fallback de latest" }
+$script:fakeLatestTag = 'v2.1.0-beta-1'
+if ($null -eq (Get-PluginReleaseForChannel stable 6>$null)) { Ok "latest com sufixo de prerelease e recusada no stable" } else { Bad "stable aceitou latest prerelease" }
+$logText = Get-Content -LiteralPath (Join-Path $env:GLB_INSTALLER_LOG_DIR 'installer.log') -Raw
+if ($logText -match 'installer\.release_api_failed' -and $logText -match '403') { Ok "motivo da falha da API vai para o installer.log" } else { Bad "falha da API nao foi registrada no log" }
+Remove-Item $env:GLB_INSTALLER_LOG_DIR -Recurse -Force -ErrorAction SilentlyContinue
 
 # Resultado
 Write-Host ""
