@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('golive', {
   checkUpdate:    () => ipcRenderer.invoke('golive', 'app:checkUpdate'),
   downloadUpdate: (version: string) => ipcRenderer.invoke('golive', 'app:downloadUpdate', { version }),
   appInfo:        () => ipcRenderer.invoke('golive', 'app:info'),
+  reportBug:      (p: { title: string; description: string; includeLogs: boolean }) => ipcRenderer.invoke('golive', 'report:send', p),
   getSettings:    () => ipcRenderer.invoke('golive', 'settings:get'),
   setSettings:    (patch: Record<string, unknown>) => ipcRenderer.invoke('golive', 'settings:set', patch),
 

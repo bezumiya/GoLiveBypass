@@ -19,6 +19,7 @@ export interface RouterHandlers {
   checkUpdate(): Promise<unknown>;
   downloadUpdate(payload: { version?: string }): Promise<unknown>;
   appInfo(): Promise<unknown>;
+  reportBug(payload: { title: string; description: string; includeLogs: boolean }): Promise<unknown>;
   getSettings(): Promise<unknown>;
   phoneStatus(): Promise<unknown>;
   phoneGenerate(payload: { delivery?: 'qr' | 'file' }): Promise<unknown>;
@@ -64,6 +65,11 @@ export function makeRouter(h: RouterHandlers) {
       case 'app:checkUpdate':     return h.checkUpdate();
       case 'app:downloadUpdate':  return h.downloadUpdate({ version: typeof payload?.version === 'string' ? payload.version : undefined });
       case 'app:info':            return h.appInfo();
+      case 'report:send':         return h.reportBug({
+        title: String(payload?.title ?? '').slice(0, 200),
+        description: String(payload?.description ?? '').slice(0, 8192),
+        includeLogs: payload?.includeLogs !== false,
+      });
       case 'settings:get':        return h.getSettings();
       case 'settings:set':        return h.setSettings({
         openAtLogin: optBool(payload?.openAtLogin),

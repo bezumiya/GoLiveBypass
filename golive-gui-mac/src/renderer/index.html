@@ -19,6 +19,9 @@
       <button id="check-update" class="icon-btn" title="Checar atualizações" aria-label="Checar atualizações">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" /><path d="M4 3v5h5" /><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" /><path d="M20 21v-5h-5" /></svg>
       </button>
+      <button id="open-bug" class="icon-btn" title="Reportar bug" aria-label="Reportar bug">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="6" width="8" height="14" rx="4" /><path d="M9 4l1.5 2M15 4l-1.5 2M4 10h4M16 10h4M4 16h4M16 16h4M12 11v9" /></svg>
+      </button>
       <button id="open-settings" class="icon-btn" title="Configurações" aria-label="Configurações">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
       </button>
@@ -209,6 +212,47 @@
           <li>Apague o arquivo do Mac e, no Android, também do celular.</li>
           <li>Ligue o túnel antes de entrar em live no Discord.</li>
         </ol>
+      </div>
+    </div>
+  </div>
+
+  <div id="bug-panel" class="panel" hidden role="dialog" aria-modal="true" aria-labelledby="bug-title">
+    <div class="panel-backdrop" data-close></div>
+    <div class="panel-sheet">
+      <div class="panel-head">
+        <div>
+          <p class="panel-kicker">Ajude a melhorar</p>
+          <h2 id="bug-title">Reportar bug</h2>
+        </div>
+        <button class="icon-btn" data-close aria-label="Fechar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        </button>
+      </div>
+      <div class="panel-body">
+        <div id="bug-form" class="bug-form">
+          <p class="hint">Descreva o problema. O relato vira uma issue pública no GitHub. Sua conta Proton, seu e-mail e o nome do seu usuário no Mac são removidos antes de enviar.</p>
+          <label class="field">
+            <span>Resumo *</span>
+            <input id="bug-summary" type="text" maxlength="200" placeholder="Ex.: Go Live continua bloqueado com o bypass ativo" />
+          </label>
+          <label class="field">
+            <span>Detalhes</span>
+            <textarea id="bug-desc" rows="4" maxlength="8192" placeholder="O que aconteceu? O que esperava? Passos para reproduzir..."></textarea>
+          </label>
+          <label class="toggle-row">
+            <input id="bug-logs" type="checkbox" checked />
+            <span>Incluir logs da sessão (recomendado)</span>
+          </label>
+          <p id="bug-status" class="status-line" role="status" hidden></p>
+          <div class="btn-row end">
+            <button id="bug-send" class="pill-btn">Enviar</button>
+          </div>
+        </div>
+        <div id="bug-success" class="bug-success" hidden>
+          <h3>Obrigado por ajudar!</h3>
+          <p class="hint">Seu report foi enviado e já ajuda a melhorar o GoLiveBypass para toda a comunidade.</p>
+          <p id="bug-link" class="hint"></p>
+        </div>
       </div>
     </div>
   </div>

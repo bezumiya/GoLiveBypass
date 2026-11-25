@@ -27,10 +27,19 @@ import { checkForUpdate, downloadAndInstall, type UpdateInfo, type PendingUpdate
 import type { AppSettings, UiSettings, ThemeChoice } from '../shared/types';
 import { PhoneConfService } from './phone/service';
 import { isCloudSyncedPath } from './phone/cloud';
+import * as logger from './report/logger';
+import { comRegistro, nivelDaMensagem } from './report/ops';
+import { submitBugReport } from './report/bugreport';
 
 const home   = os.homedir();
 const user   = os.userInfo().username;
 const binDir = path.join(process.resourcesPath ?? path.join(__dirname, '../../resources'), 'bin');
+
+// Log persistente do relato de bug (gui.log, mesmo formato da GUI Windows/Linux)
+const logDir = path.join(home, 'Library', 'Logs', 'GoLiveBypass');
+logger.initLogger(logDir);
+logger.patchConsole();
+logger.info('app', 'inicio', { versao: app.getVersion(), macos: process.getSystemVersion?.() ?? os.release(), arch: process.arch });
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -73,6 +82,10 @@ async function activationOpts() {
 }
 
 function sendToWindow(channel: string, payload: unknown) {
+  if (channel === 'log') {
+    const msg = String(payload);
+    logger.escrever(nivelDaMensagem(msg), 'app', msg);
+  }
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
 
@@ -389,6 +402,7 @@ function runFetch(o: Omit<ProtonFetchOpts, 'binDir' | 'sessDir' | 'confOut'>, on
         const stored = storeConfig(fs.readFileSync(confOut, 'utf8'));
         if (!stored.ok) return resolve({ ok: false, error: 'unknown', detail: stored.errors.join(' ') });
         saveSettings({ connectionMode: 'proton', ...(result.chosen ? { protonServer: result.chosen } : {}) });
+        if (result.chosen) logger.info('proton', 'servidor ótimo selecionado', { server: result.chosen.server, ...(result.chosen.pingMs !== undefined ? { ping: result.chosen.pingMs } : {}) });
         resolve(result);
       } catch (e: any) {
         resolve({ ok: false, error: 'unknown', detail: String(e?.message ?? e) });
@@ -460,8 +474,11 @@ const handlers = {
         },
         publicIp,
       });
-      if ('error' in r) sendToWindow('log', `Falha ao ativar: ${r.error}${r.detail ? ` — ${r.detail}` : ''}`);
-      else {
+      if ('error' in r) {
+        logger.warn('tunnel', 'ativacao falhou', { erro: r.error, detalhe: r.detail });
+        sendToWindow('log', `Falha ao ativar: ${r.error}${r.detail ? ` — ${r.detail}` : ''}`);
+      } else {
+        logger.info('tunnel', 'ativacao concluida', { servidor: loadSettings().protonServer?.server ?? 'conf importada' });
         tunnelActive = true;
         resumeTunnel = false;
         saveSettings({ lastTunnelState: 'active' });
@@ -692,6 +709,16 @@ const handlers = {
     });
   },
 
+  async reportBug({ title, description, includeLogs }: { title: string; description: string; includeLogs: boolean }) {
+    return submitBugReport({ title, description, includeLogs }, {
+      home,
+      logFile: path.join(logDir, 'gui.log'),
+      protonUsername: readSavedAccount(sessionDir(home))?.username ?? null,
+      meta: reportMeta(),
+      fetch: ((input, init) => net.fetch(String(input), init)) as typeof fetch,
+    });
+  },
+
   async appInfo() {
     return { version: app.getVersion() };
   },
@@ -723,7 +750,28 @@ const handlers = {
   },
 };
 
-const router = makeRouter(handlers as any);
+const router = comRegistro(makeRouter(handlers as any));
+
+// Metadados técnicos do relato: diagnóstico sem identificar a pessoa nem expor a saída escolhida.
+function reportMeta(): Record<string, string> {
+  const st = loadSettings();
+  return {
+    versao: app.getVersion(),
+    plataforma: `${process.platform}-${process.arch}`,
+    macos: process.getSystemVersion?.() ?? os.release(),
+    electron: process.versions.electron ?? '?',
+    node: process.versions.node ?? '?',
+    locale: app.getLocale() || '?',
+    fuso: Intl.DateTimeFormat().resolvedOptions().timeZone || '?',
+    modoRoteamento: 'wireguard-split-ip',
+    bypass: currentUiState(),
+    conexao: st.connectionMode ?? 'conf',
+    rota: st.protonRoutePreference === 'manual' ? 'manual' : 'auto',
+    troca_automatica: st.autoFailover === false ? 'nao' : 'sim',
+    vencord: st.vencordOptIn ? 'sim' : 'nao',
+    uptime_s: String(Math.round(process.uptime())),
+  };
+}
 
 // ─── Inicialização ────────────────────────────────────────────────────────────
 
