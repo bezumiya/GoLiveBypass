@@ -451,10 +451,28 @@ try {
     $erroLivre = $null
     try { Stop-Discord -Resources @($lockRoot) -TentativasProcessos 1 -TentativasTravas 2 } catch { $erroLivre = $_.Exception.Message }
     Assert-Equal $erroLivre $null "Stop-Discord segue quando o arquivo esta livre"
+    # Layout legado (#453): app.asar e uma pasta, _app.asar e o arquivo real. Abrir a
+    # pasta como arquivo dava Access denied e o instalador acusava trava sem nenhuma.
+    $dirRoot = Join-Path ([System.IO.Path]::GetTempPath()) "GoLiveBypassDirAsar_$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path (Join-Path $dirRoot 'app.asar') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dirRoot '_app.asar') -Value 'asar original' -Encoding UTF8
+    Assert-Equal (Test-ArquivoLivre (Join-Path $dirRoot 'app.asar')) $true "diretorio app.asar nao e arquivo travado"
+    Assert-Equal ((@(Get-DiscordResourcesTravados @($dirRoot))).Count -eq 0) $true "layout com app.asar em pasta nao bloqueia a instalacao"
+    $erroDir = $null
+    try { Stop-Discord -Resources @($dirRoot) -TentativasProcessos 1 -TentativasTravas 2 } catch { $erroDir = $_.Exception.Message }
+    Assert-Equal $erroDir $null "Stop-Discord segue com app.asar em pasta"
+    $backupFile = Join-Path $dirRoot '_app.asar'
+    $travaBackup = [IO.File]::Open($backupFile, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        Assert-Equal (Test-ArquivoLivre $backupFile) $false "_app.asar travado continua detectado"
+    } finally {
+        $travaBackup.Close()
+    }
 } finally {
     if ($trava) { $trava.Close() }
     Set-Item -Path Function:Get-DiscordProcesses -Value $originalGetDiscordProcesses
     Remove-Item -LiteralPath $lockRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $dirRoot -Recurse -Force -ErrorAction SilentlyContinue
     # A secao 3 volta a medir o standalone: devolve as definicoes dele ao lugar.
     . $tempStandalone
 }
