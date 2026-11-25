@@ -37,6 +37,18 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   **Não verificado:** um run de verdade no Actions, que só roda depois do merge, na branch padrão. Os `if:` dos passos e o que a Proton responde aos IPs dos runners também só se veem nesse primeiro run.
 
+## [macos-0.8.1] - 2026-11-24
+
+Login Proton de volta no macOS.
+
+### Corrigido
+
+- **Login Proton voltou a funcionar.** Desde 19/11 a Proton recusa a versão que o `proton-confgen` da 0.8.0 anunciava (`linux-vpn@4.17.2`, código 5003), e entrar no Proton Otimizado falhava como se a senha estivesse errada. A 0.8.1 embute o `proton-confgen` atual de `tools/proton-confgen`, que se identifica como o cliente oficial (`linux-vpn-gui@6.1.2`), a mesma correção da 2.0.17.
+- **Versão recusada pela Proton vira mensagem clara.** Se a Proton voltar a recusar a versão, o app diz "A Proton deixou de aceitar esta versão do GoLiveBypass. Atualize o GoLiveBypass para continuar." em vez de "Usuário ou senha incorretos.", e a sessão salva não é apagada. No Usar no celular, essa falha não troca de servidor à toa.
+- **Medição de velocidade** do `proton-confgen` não vira mais `+Inf`.
+
+**Verificado:** 144 testes do `golive-gui-mac` e `go test ./...` do `proton-confgen` passam; o DMG universal embute o `proton-confgen` com `linux-vpn-gui@` e `6.1.2`, sem `4.17.2`; login Proton testado com conta real no app instalado do DMG.
+
 ## [2.0.18] - 2026-11-20
 
 ### Alterado
