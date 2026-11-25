@@ -19,6 +19,8 @@ work=$(mktemp -d)
 target="golive-netns-test-$$"
 prefix="${target}-old"
 cleanup() {
+  [ -n "${glb_pid:-}" ] && kill "$glb_pid" 2>/dev/null || true
+  [ -n "${glb_launcher:-}" ] && kill "$glb_launcher" 2>/dev/null || true
   ip netns del "$target" 2>/dev/null || true
   ip netns del "$prefix" 2>/dev/null || true
   rm -rf "$work"
@@ -37,9 +39,11 @@ mkdir -p /run/netns /etc/netns
 mount -t tmpfs golive-netns-test-ns /run/netns
 mount -t tmpfs golive-netns-config /etc/netns
 
-# Carrega exatamente o helper do standalone, sem executar o restante do instalador.
-awk '/^netns_exists\(\) \{/{capture=1} capture {print} capture && /^}/{exit}' \
-  "$STANDALONE_SRC" > "$work/helper.sh"
+# Carrega exatamente os helpers do standalone: deteccao por lista, por identidade
+# nsfs e teardown autoritativo (as funcoes que dependem de resolve_binary nao
+# sao chamadas aqui).
+sed -n '/^# \/var\/run\/netns pode ser 0700/,/^# ---------------------------------------------------------------------------/p' \
+  "$STANDALONE_SRC" | sed '$d' > "$work/helper.sh"
 # O teardown real passou a encerrar tambem o daemon do WireGuard de usuario: o bloco inteiro
 # entra no helper (as funcoes que dependem de resolve_binary nao sao chamadas aqui).
 sed -n '/^# ======================= WireGuard de usuario (wireguard-go)/,/^# O preflight nao carrega o modulo:/p' \
@@ -81,5 +85,36 @@ for cycle in {1..10}; do
   ! netns_exists
   teardown_wireguard_netns
 done
+
+# #449: com /run/netns 0700, `ip netns list` como usuario nao enumera o namespace.
+# A identidade gravada na ativacao prova o namespace por um processo, sem root.
+ip netns add "$target"
+ip netns exec "$target" sh -c 'echo $$ > "$1"; exec sleep 60' sh "$work/pid" &
+glb_launcher=$!
+for _ in $(seq 1 50); do
+  if [ -s "$work/pid" ]; then break; fi
+  sleep 0.1
+done
+glb_pid="$(cat "$work/pid")"
+glb_ident="$(stat -L -c '%d:%i' "/proc/$glb_pid/ns/net")"
+mkdir -p "$INSTALL_DIR"
+printf '%s\n' "$glb_ident" > "$INSTALL_DIR/netns.inode"
+chmod 700 /run/netns
+IP_BINARY=/bin/false
+if ! netns_exists; then
+  printf 'netns ativo nao detectado por identidade com /run/netns 0700\n' >&2
+  exit 1
+fi
+if ! netns_identity_pid_matches "$glb_ident"; then
+  printf 'identidade nsfs do processo nao confere\n' >&2
+  exit 1
+fi
+unset IP_BINARY
+kill "$glb_pid" "$glb_launcher" 2>/dev/null || true
+teardown_wireguard_netns
+if netns_exists; then
+  printf 'teardown deixou o namespace ativo\n' >&2
+  exit 1
+fi
 
 printf 'Linux netns detection: pure name, NSID, prefix rejection, reuse and teardown — OK\n'
