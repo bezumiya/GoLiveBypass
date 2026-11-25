@@ -1,7 +1,13 @@
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import https from "node:https";
+import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyWireSockInstallState,
+  downloadInstaller,
   parseWireSockOrphanDefaultRoutes,
   parseWireSockUninstallEntries,
   parseWireSockUninstallLocations,
@@ -145,5 +151,128 @@ describe("o caminho de instalação do plugin usa a política nova", () => {
     // Setup sem teto deixaria o painel preso em "preparando" para sempre.
     expect(source).toContain("WIRESOCK_INSTALLER_TIMEOUT_MS = 5 * 60_000");
     expect(source).toContain("taskkill.exe");
+  });
+});
+
+// #429/#432: um 502 do site oficial derrubava a ativação. Mesmo retry da GUI: 429/502/503/504 e
+// timeout, até três tentativas. O `https.get` responde por roteiro e a espera entre tentativas é injetada.
+describe("download do instalador WireSock no plugin", () => {
+  type Resposta =
+    | { status: number; location?: string; body?: string }
+    | { timeout: "antes-da-resposta" }
+    | { timeout: "no-meio-do-corpo"; parcial: string };
+
+  let dir = "";
+  let target = "";
+  const log = vi.fn();
+  const sleep = vi.fn(async (_ms: number) => {});
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "golive-plugin-download-"));
+    target = path.join(dir, "wiresock-sdk.exe");
+    log.mockClear();
+    sleep.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Cada `https.get` consome a próxima resposta. Como no Node, `destroy(erro)` emite o erro no pedido
+  // e derruba a resposta que estiver em andamento.
+  function roteiro(respostas: Resposta[]): string[] {
+    const urls: string[] = [];
+    vi.spyOn(https, "get").mockImplementation(((url: string, callback: (response: PassThrough) => void) => {
+      urls.push(String(url));
+      const resposta = respostas.shift();
+      if (!resposta) throw new Error(`pedido inesperado: ${url}`);
+      const request = new EventEmitter() as EventEmitter & { setTimeout(ms: number, onTimeout: () => void): void; destroy(error: Error): void };
+      let entregue: PassThrough | null = null;
+      let onTimeout = () => {};
+      request.setTimeout = (_ms, callback) => { onTimeout = callback; };
+      request.destroy = error => queueMicrotask(() => {
+        request.emit("error", error);
+        entregue?.destroy(new Error("aborted"));
+      });
+      const responder = (status: number, headers: Record<string, string> = {}) => {
+        entregue = Object.assign(new PassThrough(), { statusCode: status, headers });
+        callback(entregue);
+        return entregue;
+      };
+      setImmediate(async () => {
+        if (!("timeout" in resposta)) {
+          responder(resposta.status, resposta.location ? { location: resposta.location } : {}).end(resposta.body ?? "");
+          return;
+        }
+        if (resposta.timeout === "no-meio-do-corpo") {
+          responder(200).write(resposta.parcial);
+          await vi.waitFor(() => expect(fs.readFileSync(target, "utf8")).toBe(resposta.parcial));
+        }
+        onTimeout();
+      });
+      return request;
+    }) as never);
+    return urls;
+  }
+
+  it("502 seguido de 200 conclui na segunda tentativa", async () => {
+    const urls = roteiro([{ status: 502 }, { status: 200, body: "instalador" }]);
+    await downloadInstaller(target, log, sleep);
+    expect(fs.readFileSync(target, "utf8")).toBe("instalador");
+    expect(urls).toHaveLength(2);
+    expect(sleep.mock.calls).toEqual([[1000]]);
+    expect(log.mock.calls).toEqual([["warn", "wiresock.download.retry", { tentativa: 1, erro: expect.stringContaining("HTTP 502") }]]);
+  });
+
+  it("três 502 seguidos desistem com a mensagem que aponta o site oficial", async () => {
+    const urls = roteiro([{ status: 502 }, { status: 502 }, { status: 502 }]);
+    await expect(downloadInstaller(target, log, sleep)).rejects.toThrow(
+      "Download WireSock retornou HTTP 502. O site oficial pode estar indisponível neste momento; tente ativar novamente em instantes.");
+    expect(urls).toHaveLength(3);
+    expect(sleep.mock.calls).toEqual([[1000], [2000]]);
+    expect(log).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it.each([
+    ["HTTP 404", [{ status: 404 }], /^Download WireSock retornou HTTP 404\.$/],
+    ["redirecionamento para fora do wiresock.net", [{ status: 302, location: "https://example.com/wiresock.exe" }], /host não autorizado/],
+  ] as Array<[string, Resposta[], RegExp]>)("%s falha na hora, sem nova tentativa", async (_nome, respostas, erro) => {
+    const urls = roteiro(respostas);
+    await expect(downloadInstaller(target, log, sleep)).rejects.toThrow(erro);
+    expect(urls).toHaveLength(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("timeout antes da resposta ganha nova tentativa", async () => {
+    const urls = roteiro([{ timeout: "antes-da-resposta" }, { status: 200, body: "instalador" }]);
+    await downloadInstaller(target, log, sleep);
+    expect(fs.readFileSync(target, "utf8")).toBe("instalador");
+    expect(urls).toHaveLength(2);
+    expect(log.mock.calls).toEqual([["warn", "wiresock.download.retry", { tentativa: 1, erro: "Timeout ao baixar o instalador WireSock." }]]);
+  });
+
+  it("timeout no meio do corpo descarta o arquivo parcial antes de tentar de novo", async () => {
+    // Sem a remoção, o `wx` da segunda tentativa falharia com EEXIST.
+    roteiro([{ timeout: "no-meio-do-corpo", parcial: "MZ-parcial" }, { status: 200, body: "instalador" }]);
+    await downloadInstaller(target, log, sleep);
+    expect(fs.readFileSync(target, "utf8")).toBe("instalador");
+    expect(sleep.mock.calls).toEqual([[1000]]);
+  });
+
+  it("redirecionamento continua valendo e a nova tentativa recomeça pelo endpoint oficial", async () => {
+    const cdn = "https://cdn.wiresock.net/wiresock-secure-connect-sdk.exe";
+    const urls = roteiro([
+      { status: 302, location: cdn }, { status: 503 },
+      { status: 302, location: cdn }, { status: 200, body: "instalador" },
+    ]);
+    await downloadInstaller(target, log, sleep);
+    expect(fs.readFileSync(target, "utf8")).toBe("instalador");
+    const oficial = urls[0];
+    expect(oficial).toMatch(/^https:\/\/wiresock\.net\/_api\/download-release\.php\?/);
+    expect(urls).toEqual([oficial, cdn, oficial, cdn]);
+    expect(sleep.mock.calls).toEqual([[1000]]);
   });
 });

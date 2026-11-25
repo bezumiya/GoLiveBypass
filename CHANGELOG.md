@@ -37,6 +37,23 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
   **Não verificado:** um run de verdade no Actions, que só roda depois do merge, na branch padrão. Os `if:` dos passos e o que a Proton responde aos IPs dos runners também só se veem nesse primeiro run.
 
+### Corrigido
+
+- **Plugin no Windows: falha temporária no download do WireSock ganha nova tentativa e mensagem útil (#429, #432).** O plugin baixava o instalador oficial numa tentativa só. Um HTTP 502 passageiro do `wiresock.net` encerrava a ativação com "Download WireSock retornou HTTP 502.", sem sugerir uma nova tentativa. Os relatos #429 e #432 vieram da GUI, mas o plugin tem o mesmo download. Agora o download do plugin (`goLiveBypass/vpn-windows.ts`) faz o que a GUI faz desde a 2.0.19-beta-1 (27637f2):
+  - HTTP 429/502/503/504 e timeout ganham até três tentativas, com espera de 1 s e depois de 2 s. Cada tentativa recomeça pelo endpoint oficial, com os redirecionamentos para o CDN do `wiresock.net` valendo como antes, e cada repetição fica no log como `wiresock.download.retry`;
+  - se as três falharem, a mensagem diz que o site oficial pode estar indisponível e orienta ativar de novo em instantes;
+  - 404, redirecionamento para fora do `wiresock.net` e as outras respostas inválidas falham na hora, sem repetir;
+  - o arquivo parcial é apagado antes da tentativa seguinte. O destino é aberto com `wx`, então um timeout no meio do corpo faria a tentativa seguinte falhar com `EEXIST`. A pasta temporária continua sendo removida no fim.
+
+  O hash fixado e a conferência do instalador não mudam, e nenhum mirror foi adicionado. O standalone, pausado, instala o WireSock pelo winget e não tem esse download; Linux e macOS não usam WireSock.
+
+  **Verificado:**
+  - 7 testes novos em `golive-gui/tests/plugin-wiresock-install.test.ts`, com o `https.get` respondendo por roteiro e a espera injetada: 502 seguido de 200, três 502, 404 e host não autorizado sem repetição, timeout antes da resposta e no meio do corpo, e redirecionamento com nova tentativa. Cada um destes desvios derruba pelo menos um deles: uma tentativa só (o código anterior), sem a remoção do arquivo parcial (`EEXIST`), todo erro tratado como transitório, sem a mensagem nova e espera fixa;
+  - os 30 arquivos de teste da GUI que exercitam o plugin (360 testes) e, no Node 24, as regressões do workflow `plugin-startup-regressions` e as do route probe, que carregam o `vpn-windows.ts` direto;
+  - `tsc --strict` no `vpn-windows.ts`, porque nenhum `tsconfig` do repositório cobre `goLiveBypass/`.
+
+  **Não verificado:** um download real no Windows, com o `wiresock.net` respondendo 502 ou travando de verdade.
+
 ## [2.0.18] - 2026-11-20
 
 ### Alterado
