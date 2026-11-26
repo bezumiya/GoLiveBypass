@@ -4696,6 +4696,13 @@ if [ "$MODE" = "status" ]; then
 fi
 
 if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]; then
+    # O teardown eleva com stderr descartado: sem autorizar aqui, o provider_missing
+    # nao chega a GUI, a janela de senha nao abre e o namespace fica ativo (#471).
+    # Como na ativacao, autoriza antes de fechar o cliente. Sem sudo o teardown
+    # ja nao elevava (pkexec abre o proprio dialogo), entao nada muda ali.
+    if have sudo; then
+        authorize_install_elevation || fail "Nao foi possivel autorizar a desativacao (resultado ${ELEVATION_RESULT}). O Discord nao foi encerrado."
+    fi
     # Guarda o alvo antes de fechar o cliente: o uninstall deve devolver o Discord
     # ao host quando ele estava aberto (#449).
     glb_uninstall_target=""

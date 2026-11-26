@@ -13,6 +13,7 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   - O Equibop, o Vesktop e o Legcord abertos são fechados antes da instalação. Antes só o Discord oficial era fechado, e a instalação parava em "Os arquivos do Discord continuam em uso".
   - `-Mode ClientStatus` e `-Mode RestoreClient` passam a enxergar o Equibop, o Vesktop e o Legcord. Antes os dois só listavam o Discord oficial e respondiam "nenhum cliente encontrado".
 - **Instalador Windows sem acesso à API do GitHub.** Quando a consulta de releases falha (rate limit, proxy ou bloqueio), o canal stable pega a release pelo redirecionamento de `github.com/.../releases/latest`, com o zip e o `.sha256` da mesma tag e a mesma conferência de SHA-256 e manifest. O beta continua dependendo da API. O motivo da falha vai para o `installer.log`, que antes só registrava a mensagem genérica.
+- **Desativar no Linux pede a senha do sudo (#471).** A desativação pela GUI falhava com "Nao consegui remover o namespace 'discord-vpn' (sem privilegio?)" sem abrir a janela de senha. O teardown chamava o sudo com o stderr descartado, e o sinal que faz a GUI pedir a senha sumia junto. Até a 2.0.18 a falha nem aparecia: o uninstall saía com sucesso e o túnel continuava ativo. Agora o script autoriza o sudo antes de fechar o Discord, como na ativação.
 - **Lacuna conhecida:** o instalador Linux continua copiando o `equibop.asar` por cima do Equibop e depende só da API do GitHub. No Linux, um Equibop aberto não trava a instalação.
 
 ## [2.0.19] - 2026-11-25
