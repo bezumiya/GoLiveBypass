@@ -4696,6 +4696,16 @@ if [ "$MODE" = "status" ]; then
 fi
 
 if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]; then
+    # O teardown eleva com stderr descartado: sem autorizar aqui, o provider_missing
+    # nao chega a GUI, a janela de senha nao abre e o namespace fica ativo (#471).
+    # Como na ativacao, autoriza antes de fechar o cliente. Sem sudo o teardown
+    # ja nao elevava (pkexec abre o proprio dialogo), entao nada muda ali.
+    if have sudo; then
+        # A frase precisa ser a que a GUI retem antes de abrir o modal de senha
+        # (electron/main.ts, "nao foi possivel autorizar o sudo"): com outro texto,
+        # a falha aparece na janela antes do pedido de senha (#380).
+        authorize_install_elevation || fail "nao foi possivel autorizar o sudo (resultado ${ELEVATION_RESULT}). A desativacao foi cancelada; o Discord continua aberto."
+    fi
     # Guarda o alvo antes de fechar o cliente: o uninstall deve devolver o Discord
     # ao host quando ele estava aberto (#449).
     glb_uninstall_target=""

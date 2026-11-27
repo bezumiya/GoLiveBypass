@@ -330,6 +330,16 @@ test("standalone --uninstall desliga o Tor mesmo com falha parcial de elevacao",
     assert.ok(failedGateIndex === -1 || removeTorIndex < failedGateIndex);
 });
 
+test("standalone --uninstall autoriza o sudo antes de fechar o Discord (#471)", () => {
+    // O teardown eleva com 2>/dev/null: o provider_missing que abre a janela de
+    // senha da GUI sumia ali e a desativacao falhava sem pedir senha.
+    const block = section(read("standalone/golivebypass-standalone.sh"),
+        'if [ "$MODE" = "uninstall" ] || [ "$MODE" = "restore" ]; then', "teardown_wireguard_netns");
+    const authorize = block.indexOf("authorize_install_elevation ||");
+    assert.notEqual(authorize, -1);
+    assert.ok(authorize < block.indexOf("stop_discord"));
+});
+
 test("standalone mantem a porta Tor 9060", () => {
     assert.match(standalone, /const TOR_PORTS = \[9060,/);
 });
