@@ -2551,11 +2551,16 @@ bugSubmit?.addEventListener('click', async () => {
       if (hint) hint.hidden = true;
       if (bugDialogTitle) bugDialogTitle.textContent = 'Obrigado!';
       if (bugSuccessLink) {
-        if (r.issueUrl) {
-          const n = r.issueNumber ? ` #${r.issueNumber}` : '';
-          bugSuccessLink.innerHTML = `<a href="${r.issueUrl}" target="_blank" rel="noopener">Ver issue${n} no GitHub →</a>`;
-        } else {
-          bugSuccessLink.textContent = '';
+        // Montado pelo DOM, nunca por innerHTML: o endereço vem da API e a janela roda com
+        // nodeIntegration. O processo principal já só repassa issue do GitHub (electron/issue-url.ts).
+        bugSuccessLink.replaceChildren();
+        if (r.issueUrl && /^https:\/\/github\.com\//.test(r.issueUrl)) {
+          const link = document.createElement('a');
+          link.href = r.issueUrl;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.textContent = `Ver issue${r.issueNumber ? ` #${r.issueNumber}` : ''} no GitHub →`;
+          bugSuccessLink.append(link);
         }
       }
       setBugStatus('', null);
