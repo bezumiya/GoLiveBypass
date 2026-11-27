@@ -59,8 +59,23 @@ func (r *Report) Validate(maxLogBytes int64) error {
 	return nil
 }
 
+// Entre o aviso do topo e o relato: linha em branco antes do "---" para ele virar regra
+// horizontal, e nao titulo da ultima linha do aviso.
+const separadorDoAviso = "\n\n---\n\n"
+
 func BuildIssueBody(r Report) string {
+	return BuildIssueBodyWithNotice(r, "")
+}
+
+// BuildIssueBodyWithNotice poe o aviso no topo, antes do relato, que sai igual ao de
+// BuildIssueBody. O aviso entra na conta do limite do GitHub: num log grande, o corte
+// do meio do log abre espaco para ele.
+func BuildIssueBodyWithNotice(r Report, notice string) string {
 	var b strings.Builder
+	if notice != "" {
+		b.WriteString(notice)
+		b.WriteString(separadorDoAviso)
+	}
 	b.WriteString("Relato enviado pela API de bug reports.\n\n")
 
 	if len(r.Meta) > 0 {
