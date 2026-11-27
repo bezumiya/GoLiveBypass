@@ -15,6 +15,22 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - **Instalador Windows sem acesso à API do GitHub.** Quando a consulta de releases falha (rate limit, proxy ou bloqueio), o canal stable pega a release pelo redirecionamento de `github.com/.../releases/latest`, com o zip e o `.sha256` da mesma tag e a mesma conferência de SHA-256 e manifest. O beta continua dependendo da API. O motivo da falha vai para o `installer.log`, que antes só registrava a mensagem genérica.
 - **Lacuna conhecida:** o instalador Linux continua copiando o `equibop.asar` por cima do Equibop e depende só da API do GitHub. No Linux, um Equibop aberto não trava a instalação.
 
+### Segurança
+
+- **O link do relato só aceita issue do GitHub.** Antes, a GUI confiava sem conferir no endereço que a API de relatos devolvia:
+  - a janela montava o "Ver issue #N no GitHub" pondo o `issue_url` direto no `innerHTML`;
+  - o caminho do `open-bug-report` passava o mesmo campo, ou o `html_url`, para o `shell.openExternal`.
+
+  A janela roda com `nodeIntegration` e sem `contextIsolation`. Uma resposta adulterada viraria código rodando no computador de quem relatou, e o `openExternal` abriria `file:` ou outro protocolo do sistema. O risco prático é baixo, porque o endereço vem do GitHub, pela própria API e por HTTPS, mas a GUI não depende mais disso:
+  - o processo principal só repassa `https://github.com/<dono>/<repo>/issues/<número>`, sem query nem fragmento, e só aceita como número de issue um inteiro positivo;
+  - se o endereço não passar, o relato continua enviado e fica sem link. No caminho do `openExternal`, a GUI cai no formulário do GitHub, como já fazia quando a API não devolvia o link;
+  - a janela monta o link pelo DOM, com `textContent`, e não mais por `innerHTML`.
+
+  **Verificado:**
+  - os testes novos em `golive-gui/tests/issue-url.test.ts` cobrem `javascript:`, `file:`, `ms-msdt:`, `http:`, domínio parecido, aspas e tag no endereço, quebra de linha, query, fragmento, PR no lugar de issue e número inválido;
+  - com o validador aceitando qualquer texto, 18 desses testes falham;
+  - `npm run typecheck:electron` e o `tsc` do renderer passam.
+
 ## [2.0.19] - 2026-11-25
 
 ### Adicionado

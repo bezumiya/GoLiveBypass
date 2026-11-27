@@ -17,6 +17,7 @@ import * as logsDir from "./logsDir";
 import { guiEnvironmentSnapshot } from "./env-snapshot";
 import { montarResumo } from "./relato-resumo";
 import type { WgTunnelStats } from "./wgstats";
+import { safeIssueNumber, safeIssueUrl } from "./issue-url";
 import {
   cortarDoFim,
   redigir,
@@ -336,9 +337,13 @@ export async function submitBugReport(
     });
 
     if (res.status === 201) {
-      const data = (await res.json()) as { issue_url?: string; issue_number?: number };
-      logger.info("report", "enviado", { issue: data.issue_number });
-      return { ok: true, issueUrl: data.issue_url, issueNumber: data.issue_number };
+      const data = (await res.json()) as { issue_url?: unknown; issue_number?: unknown };
+      const issueUrl = safeIssueUrl(data.issue_url);
+      const issueNumber = safeIssueNumber(data.issue_number);
+      logger.info("report", "enviado", { issue: issueNumber });
+      // O relato foi criado; só o link fica de fora se a API devolver algo que não seja uma issue do GitHub.
+      if (data.issue_url !== undefined && !issueUrl) logger.warn("report", "link da issue recusado: não é uma issue do GitHub");
+      return { ok: true, issueUrl, issueNumber };
     }
     if (res.status === 429) {
       // Bloqueado no meio do envio: o servidor devolve o tempo no header Retry-After.
