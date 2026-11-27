@@ -6,6 +6,8 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+## [2.0.20-beta-1] - 2026-11-27
+
 ### Adicionado
 
 - **API: o relato de uma versão que a Proton recusa (5003) abre a issue com o passo a passo para atualizar.** Desde 19/11, a Proton recusa o helper da GUI e do plugin anteriores à 2.0.17, e o login falha com o código 5003.
