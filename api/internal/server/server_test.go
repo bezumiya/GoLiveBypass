@@ -18,6 +18,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"github.com/bezumiya/GoLiveBypass/api/internal/bugreport"
 	"github.com/bezumiya/GoLiveBypass/api/internal/config"
 	"github.com/bezumiya/GoLiveBypass/api/internal/gh"
 )
@@ -308,6 +309,65 @@ func TestCreateReportHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(f.got.Body, "````") {
 		t.Error("corpo sem fence do log")
+	}
+}
+
+func TestCreateReportAvisaVersaoSemCorrecaoDo5003(t *testing.T) {
+	// Como o #474: GUI 2.0.13 no Windows, presa num update pendente e com 5003 a cada login.
+	const log = "=== sessao GUI (ring buffer) ===\n" +
+		"[18:51:15] [info][app] iniciado | versao=2.0.13 plataforma=win32\n" +
+		"[18:51:18] [info][updater] update pendente recuperado: 2.0.18\n" +
+		"[18:51:33] [warn][proton] falha na autenticação ProtonVPN | codigo_saida=1 resposta_json=true erro_json=authentication failed: failed to get auth info: authentication failed with code: 5003"
+	// Texto exato que a pessoa le ao abrir o link "Ver issue #N no GitHub".
+	const avisoWindows = `**Esta versão do GoLiveBypass não consegue mais entrar na conta Proton (código 5003).**
+Desde 19/11 a Proton recusa as versões anteriores à 2.0.17. Para voltar a entrar, atualize:
+
+1. Clique com o botão direito no ícone do GoLiveBypass na bandeja, ao lado do relógio (no Windows 11 ele pode estar escondido na setinha "^"), e clique em **Reiniciar para atualizar**.
+2. Se esse item não aparecer, ou se ao reabrir ele ainda não estiver na versão mais nova, clique em **Checar updates** (ícone de setas no alto da janela) e aceite a atualização. Quem tinha baixado uma versão anterior à 2.0.17 precisa dessa segunda volta.
+3. Se nada disso funcionar, feche o GoLiveBypass pelo menu do ícone (**Sair**), baixe a versão nova em https://github.com/bezumiya/GoLiveBypass/releases/latest e abra o arquivo baixado.
+
+---
+
+`
+
+	tests := []struct {
+		versao string
+		aviso  string
+	}{
+		{"2.0.13", avisoWindows},
+		{"2.0.19", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.versao, func(t *testing.T) {
+			f := &fakeIssues{res: gh.IssueResult{Number: 474, URL: "https://github.com/owner/repo/issues/474"}}
+			cfg := testConfig()
+			e := newTestApp(t, cfg, f)
+			rep := bugreport.Report{
+				Title:       "Erro ao conectar a conta Proton",
+				Description: "aparece erro toda vez que tento entrar",
+				Log:         log,
+				Meta:        map[string]string{"versao": tt.versao, "plataforma": "win32-x64", "locale": "pt-BR", "bypass": "active"},
+			}
+			payload, err := json.Marshal(rep)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rec := do(t, e, http.MethodPost, "/v1/reports", "segredo", string(payload))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201 (body = %s)", rec.Code, rec.Body.String())
+			}
+			// As labels continuam as de ISSUE_LABELS: o aviso nao cria nem pede label nova.
+			if strings.Join(f.got.Labels, ",") != strings.Join(cfg.Labels, ",") {
+				t.Errorf("labels enviadas = %v, want %v", f.got.Labels, cfg.Labels)
+			}
+			// Depois do aviso, o corpo e byte a byte o de sempre.
+			want := tt.aviso + bugreport.BuildIssueBody(rep)
+			if f.got.Body != want {
+				t.Errorf("corpo enviado ao GitHub:\n%s\n\nwant:\n%s", f.got.Body, want)
+			}
+			t.Logf("corpo enviado ao GitHub:\n%s", f.got.Body)
+		})
 	}
 }
 

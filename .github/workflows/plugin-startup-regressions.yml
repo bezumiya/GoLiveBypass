@@ -9,6 +9,14 @@ on:
       - 'tests/test-plugin-runtime-compatibility.mjs'
       - 'tests/test-plugin-autostart-loop.mjs'
       - 'tests/test-plugin-update-archive.mjs'
+      # O teste de paridade também lê instaladores, standalone e partes da GUI.
+      - 'tests/test-distribution-parity.cjs'
+      - 'installer/**'
+      - 'standalone/**'
+      - 'golive-gui/electron/main.ts'
+      - 'golive-gui/electron/preload.ts'
+      - 'golive-gui/electron/bypass.ts'
+      - 'golive-gui/index.html'
       - '.github/workflows/plugin-startup-regressions.yml'
   workflow_dispatch:
 
@@ -32,3 +40,6 @@ jobs:
           tests/test-plugin-runtime-compatibility.mjs
           tests/test-plugin-autostart-loop.mjs
           tests/test-plugin-update-archive.mjs
+      # Runner próprio (para na primeira falha), fora do node --test: quem decide é o código de saída.
+      - name: Testar paridade entre plugin, instaladores, standalone e GUI
+        run: node tests/test-distribution-parity.cjs

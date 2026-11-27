@@ -31,6 +31,7 @@ import * as discordscan from "./discordscan";
 import { descreverFalhaDaTela, resultadoDaOperacao } from "./relato-resumo";
 import * as logsDir from "./logsDir";
 import { submitBugReport } from "./bugreport";
+import { safeIssueNumber, safeIssueUrl } from "./issue-url";
 import { ensureWireSockInstalled, listRunningImageNamesAsync, getWireSockAdapterTrafficNetshAsync, pingHostAsync, trafficSample, type TunnelStats, type WireSockAdapterTraffic, getWireSockConnectionStatus, getWireSockConnectionStatusAsync, getWireSockAdapterTraffic, getWireSockAdapterTrafficAsync, hasWireSockAdapterTrafficIncrease, isWireSockActive, isWireSockActiveAsync, startWireSockService, switchWireSockService, recoverWireSockNetwork, verifyWindowsNetwork, type WireSockConnectionStatus, wireSockSelectionForReport } from "./wiresock";
 import { guiEnvironmentSnapshot } from "./env-snapshot";
 import { installerFolderDiagnosis } from "./wiresock-install-diag";
@@ -4015,17 +4016,13 @@ async function postBugReportToApi(
       return { ok: false, error: err };
     }
 
-    const issueUrl =
-      typeof data.issue_url === "string"
-        ? data.issue_url
-        : typeof data.html_url === "string"
-          ? data.html_url
-          : "";
-    if (!issueUrl) return { ok: false, error: "API nao devolveu issue_url" };
+    // O endereço vai para shell.openExternal: só passa uma issue do GitHub (ver issue-url.ts).
+    const issueUrl = safeIssueUrl(data.issue_url) ?? safeIssueUrl(data.html_url);
+    if (!issueUrl) return { ok: false, error: "API nao devolveu um link de issue do GitHub" };
     return {
       ok: true,
       issueUrl,
-      issueNumber: typeof data.issue_number === "number" ? data.issue_number : undefined,
+      issueNumber: safeIssueNumber(data.issue_number),
     };
   } catch (error) {
     return {

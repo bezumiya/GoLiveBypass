@@ -40,9 +40,12 @@ func (h *handler) createReport(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
+	// Versao que a Proton recusa (5003) ganha no topo o passo a passo para atualizar:
+	// o cliente antigo so mostra o link desta issue.
+	body := bugreport.BuildIssueBodyWithNotice(rep, bugreport.OutdatedClientNotice(rep.Meta))
 	res, err := h.issues.CreateIssue(c.Request().Context(), gh.Issue{
 		Title:  rep.Title,
-		Body:   bugreport.BuildIssueBody(rep),
+		Body:   body,
 		Labels: h.cfg.Labels,
 	})
 	if err != nil {

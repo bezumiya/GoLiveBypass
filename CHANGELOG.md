@@ -6,6 +6,40 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+### Adicionado
+
+- **API: o relato de uma versão que a Proton recusa (5003) abre a issue com o passo a passo para atualizar.** Desde 19/11, a Proton recusa o helper da GUI e do plugin anteriores à 2.0.17, e o login falha com o código 5003.
+  - **Quem fica preso:** no Windows, da 2.0.10 à 2.0.18, um update já baixado também não é aplicado sozinho. A cada abertura o log diz `update pendente recuperado`, e o **Checar updates** não faz nada enquanto ele está pendente. Foi o caso do #474: a 2.0.13 com a 2.0.18 pendente.
+  - **Por que no corpo da issue:** esses clientes não mostram texto do servidor, só o link da issue criada. O corpo dela é o único lugar onde quem ficou preso lê como sair.
+  - **O aviso:** o `createReport` põe no topo do corpo um aviso curto, separado do relato por uma linha horizontal. Ele começa por "**Esta versão do GoLiveBypass não consegue mais entrar na conta Proton (código 5003).**", e o resto do corpo sai igual.
+  - **GUI no Windows, da 2.0.0 à 2.0.17-beta-4:**
+    1. **Reiniciar para atualizar**, pelo ícone da bandeja;
+    2. se o item não aparecer, ou se ainda faltar versão ao reabrir, **Checar updates**;
+    3. por fim, o download manual em `releases/latest`.
+  - **GUI no Linux:** com **Avisar sobre atualizações** ligado, o AppImage baixa a versão nova e pergunta **Reiniciar agora**. Sem isso, o caminho é baixar o AppImage novo em `releases/latest`.
+  - **Plugin abaixo da 2.0.17:** **Verificar** e **Atualizar**, no cartão de atualizações das configurações, ou o instalador de novo.
+  - **Ficam sem aviso:**
+    - as versões corrigidas;
+    - a 1.x, que era o proxy legado, sem login Proton;
+    - o cliente macOS, porque só a 0.9.0, já corrigida, manda relato;
+    - o standalone e outros valores de `app`;
+    - versão ausente ou fora do formato do updater.
+  - **Log grande:** o aviso entra na conta dos 64 KB do GitHub. O corte do meio do log abre espaço para ele, em vez de a issue ser recusada.
+
+  **Conferido nas tags e nos artefatos publicados:**
+  - a correção (8ff01e3 e 586cb71) está na `v2.0.17` e não está na `v2.0.17-beta-4`;
+  - o `proton-confgen.exe` do zip do plugin manda `linux-vpn@4.17.2` na 2.0.16 e `linux-vpn-gui@6.1.2` na 2.0.17;
+  - os botões citados existem nas versões afetadas: o **Reiniciar para atualizar** da 2.0.5 à 2.0.19, o **Checar updates** da 2.0.10 em diante (só no Windows), e o cartão de atualização do plugin.
+
+  **Verificado:** `go test ./...`, `go vet ./...` e `gofmt -l` em `api/`. Os testes cobrem:
+  - cada origem, em testes de tabela;
+  - o corte do log com o aviso;
+  - o caminho pelo handler, com o dublê do GitHub, conferindo o corpo exato e as labels de sempre.
+
+  **Não verificado:** uma issue real criada com o aviso, e alguém preso numa versão antiga seguindo os passos.
+
+  **Precisa de deploy da API** (`api/deploy/`). As labels, as variáveis de ambiente e os clientes não mudam.
+
 ### Corrigido
 
 - **Instalador Windows do plugin no Equibop.**
@@ -15,6 +49,22 @@ segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - **Instalador Windows sem acesso à API do GitHub.** Quando a consulta de releases falha (rate limit, proxy ou bloqueio), o canal stable pega a release pelo redirecionamento de `github.com/.../releases/latest`, com o zip e o `.sha256` da mesma tag e a mesma conferência de SHA-256 e manifest. O beta continua dependendo da API. O motivo da falha vai para o `installer.log`, que antes só registrava a mensagem genérica.
 - **Desativar no Linux pede a senha do sudo (#471).** A desativação pela GUI falhava com "Nao consegui remover o namespace 'discord-vpn' (sem privilegio?)" sem abrir a janela de senha. O teardown chamava o sudo com o stderr descartado, e o sinal que faz a GUI pedir a senha sumia junto. Até a 2.0.18 a falha nem aparecia: o uninstall saía com sucesso e o túnel continuava ativo. Agora o script autoriza o sudo antes de fechar o Discord, como na ativação.
 - **Lacuna conhecida:** o instalador Linux continua copiando o `equibop.asar` por cima do Equibop e depende só da API do GitHub. No Linux, um Equibop aberto não trava a instalação.
+
+### Segurança
+
+- **O link do relato só aceita issue do GitHub.** Antes, a GUI confiava sem conferir no endereço que a API de relatos devolvia:
+  - a janela montava o "Ver issue #N no GitHub" pondo o `issue_url` direto no `innerHTML`;
+  - o caminho do `open-bug-report` passava o mesmo campo, ou o `html_url`, para o `shell.openExternal`.
+
+  A janela roda com `nodeIntegration` e sem `contextIsolation`. Uma resposta adulterada viraria código rodando no computador de quem relatou, e o `openExternal` abriria `file:` ou outro protocolo do sistema. O risco prático é baixo, porque o endereço vem do GitHub, pela própria API e por HTTPS, mas a GUI não depende mais disso:
+  - o processo principal só repassa `https://github.com/<dono>/<repo>/issues/<número>`, sem query nem fragmento, e só aceita como número de issue um inteiro positivo;
+  - se o endereço não passar, o relato continua enviado e fica sem link. No caminho do `openExternal`, a GUI cai no formulário do GitHub, como já fazia quando a API não devolvia o link;
+  - a janela monta o link pelo DOM, com `textContent`, e não mais por `innerHTML`.
+
+  **Verificado:**
+  - os testes novos em `golive-gui/tests/issue-url.test.ts` cobrem `javascript:`, `file:`, `ms-msdt:`, `http:`, domínio parecido, aspas e tag no endereço, quebra de linha, query, fragmento, PR no lugar de issue e número inválido;
+  - com o validador aceitando qualquer texto, 18 desses testes falham;
+  - `npm run typecheck:electron` e o `tsc` do renderer passam.
 
 ## [2.0.19] - 2026-11-25
 
