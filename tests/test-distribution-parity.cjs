@@ -234,12 +234,22 @@ test("instaladores do plugin nao distribuem o seletor de saida legado", () => {
     assert.match(windowsInstaller, /^function Remove-Tor \{/m);
 });
 
-test("manifesto local e linha v2 beta", () => {
-    assert.equal(manifest.version, "2.0.16");
+// O número da versão vem do próprio manifesto. Fixo no teste, ele era trocado à mão a cada
+// release e ficou parado na 2.0.16: o arquivo inteiro falhava a partir da 2.0.17.
+const escaparRegex = texto => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const pluginVersionPattern = new RegExp(`PLUGIN_VERSION = "${escaparRegex(manifest.version)}"`);
+
+test("manifesto local e linha v2, estavel ou prerelease", () => {
+    // O preparo de cada beta grava 2.x.y-beta-N no manifesto (2.0.17-beta-1..4 antes da
+    // 2.0.17), e o workflow roda em goLiveBypass/**: aceitar so a forma estavel deixava
+    // o check vermelho no commit de preparo do beta.
+    assert.match(manifest.version, /^2\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
 });
 
 test("plugin mostra versao e oferece verificacao na configuracao", () => {
-    assert.match(pluginRenderer, /PLUGIN_VERSION = "2\.0\.16"/);
+    // As duas constantes de versão do plugin acompanham o manifesto.
+    assert.match(pluginRenderer, pluginVersionPattern);
+    assert.match(pluginNative, pluginVersionPattern);
     assert.match(pluginRenderer, /checkPluginUpdate\(/);
     assert.match(pluginRenderer, /Atualizar/);
 });
